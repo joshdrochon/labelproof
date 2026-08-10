@@ -36,7 +36,7 @@ One-week build with three checkpoints (the brief sets no deadlines; this cadence
 | MVP | Day 2, EOD | Single-label verify, end-to-end, on the deployed URL, under budget |
 | Final Submission | Day 7, noon | Batch, robustness, warning deep checks, judgment tier, full test suite, accessibility, performance verification, cost analysis, submission package |
 
-The brief is explicit about priorities: *"A working core application with clean code is preferred over ambitious but incomplete features."* Milestone gates enforce that — no Early-scope feature merges while an MVP checklist item is open.
+The brief is explicit about priorities: *"A working core application with clean code is preferred over ambitious but incomplete features."* Milestone gates enforce that — no Final-scope feature merges while an MVP checklist item is open.
 
 ---
 
