@@ -28,14 +28,13 @@ The underlying goal is not to demo an AI extraction call. It is to prove that ro
 
 ## Project Overview
 
-One-week build with four checkpoints (the brief sets no deadlines; this cadence is self-imposed and mirrors how the work will be sequenced and gated):
+One-week build with three checkpoints (the brief sets no deadlines; this cadence is self-imposed and mirrors how the work will be sequenced and gated):
 
 | Checkpoint | Deadline | Gate |
 |---|---|---|
 | Architecture Defense | Day 0 + 4 hours | Stack, AI pipeline, and processing model decisions written down and defensible |
 | MVP | Day 2, EOD | Single-label verify, end-to-end, on the deployed URL, under budget |
-| Early Submission | Day 4, EOD | Batch mode, image robustness, judgment tier, full test suite |
-| Final Submission | Day 7, noon | Accessibility pass, performance verification, cost analysis, submission package |
+| Final Submission | Day 7, noon | Batch, robustness, warning deep checks, judgment tier, full test suite, accessibility, performance verification, cost analysis, submission package |
 
 The brief is explicit about priorities: *"A working core application with clean code is preferred over ambitious but incomplete features."* Milestone gates enforce that — no Early-scope feature merges while an MVP checklist item is open.
 
@@ -182,7 +181,8 @@ The vendor pilot died of unexplained slowness; LabelProof instruments against ex
 All items required to pass:
 
 - [ ] Verify Now working end-to-end on the deployed public URL: image upload + application form → per-field verdict checklist with evidence
-- [ ] Full spirits field set verified: brand, class/type, alcohol content (with proof cross-check), net contents (with standards-of-fill validation), producer name/address, country of origin, government warning presence + verbatim text check
+- [ ] Full field set verified: brand, class/type, alcohol content (with proof cross-check), net contents (with standards-of-fill validation), producer name/address, country of origin, government warning presence + verbatim text check
+- [ ] All three commodities active (spirits, wine, malt): per-commodity required/optional matrix, ABV exceptions, per-commodity standards of fill
 - [ ] Verdict taxonomy implemented exactly as specified (Match / Acceptable variation / Mismatch / Missing / Unreadable / Not applicable) with confidence + rationale on every field
 - [ ] Tier 1 + Tier 2 matching live — STONE'S THROW case resolves as Acceptable variation with a visible note
 - [ ] p95 ≤ 5s demonstrated on the deployed URL: 20 consecutive timed verifications, results recorded in the repo
@@ -204,7 +204,6 @@ Everything in MVP, plus:
 - [ ] Image robustness suite passing: angled, dim, glare, blur fixtures each produce correct verdicts or honest Unreadable — zero fabrication across the robustness set
 - [ ] Government warning deep checks: tokenized diff view, all-caps + bold header check, non-bold body check, title-case regression test (Jenny's catch), prominence heuristics, type-size honesty caveat
 - [ ] Tier 3 judgment live with rationale + confidence routing; adjudication fixtures in CI
-- [ ] Wine and malt commodity rules active (ABV optionality, per-commodity standards of fill)
 - [ ] Golden set ≥25 labels spanning every canonical test case; final accuracy report committed (field accuracy, confusion matrix, zero false passes on warning violations)
 - [ ] Accessibility: WCAG 2.1 AA / Section 508 pass (automated audit + keyboard-only walkthrough + screen-reader labels); 200% zoom usable
 - [ ] Usability verification: ≥3 cold users complete a verification with zero instructions; findings addressed
@@ -350,9 +349,8 @@ Sections due by checkpoint:
 | Section | Due |
 |---|---|
 | Architecture decisions (stack, pipeline, processing model) | Architecture Defense |
-| Verify Now + spirits rules + deploy + fixtures + golden v1 | MVP |
-| Batch, robustness, warning deep checks, judgment tier, full suite | Early Submission |
-| Accessibility, performance verification, accuracy report, cost analysis, submission package | Final |
+| Verify Now + per-commodity rules + deploy + fixtures + golden v1 | MVP |
+| Batch, robustness, warning deep checks, judgment tier, full suite, accessibility, performance verification, accuracy report, cost analysis, submission package | Final |
 
 ---
 
