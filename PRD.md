@@ -570,6 +570,15 @@ Sources: **[SC]** Sarah Chen, Deputy Director · **[MW]** Marcus Williams, IT Sy
 
 Verified against eCFR / ttb.gov on 2026-08-10. This is the data the rules engine encodes; each item ships as a constant/table with a source comment.
 
+**Verification log.** Re-checked 2026-08-10 against Cornell LII's eCFR mirror (ecfr.gov served a
+bot-block): the 16.21 warning text, the 16.22 type-size bands and character-per-inch caps, the
+16.22 bold/non-bold rules, and the 5.203 spirits standards of fill (25 sizes) all match this
+appendix exactly. **Not yet re-verified:** wine standards of fill (4.72), ABV tolerances, and the
+wine/malt ABV exceptions — LP-328 covers closing that gap.
+
+*Implementation note:* 27 CFR 16.22 refers to the words `GOVERNMENT WARNING,` with a comma when
+stating the bold requirement, but the statement itself in 16.21 uses a **colon**. Encode the colon.
+
 ### The government warning statement — canonical text (27 CFR 16.21)
 
 > **GOVERNMENT WARNING:** (1) According to the Surgeon General, women should not drink alcoholic beverages during pregnancy because of the risk of birth defects. (2) Consumption of alcoholic beverages impairs your ability to drive a car or operate machinery, and may cause health problems.
