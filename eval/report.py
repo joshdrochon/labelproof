@@ -215,6 +215,18 @@ def warning_section(report: Report) -> list[str]:
             out.append(f"    {o.fixture:34s} got {verdict:22s} waiting on {o.pending}")
         out.append("  'pending' cannot hide a false pass — it is still counted above.")
 
+    if report.undeclared_violations:
+        out.append("")
+        out.append("  DECLARATION SHORTFALL — fixture(s) stopped declaring a violation:")
+        for name in report.undeclared_violations:
+            out.append(f"    {name}   its `expect` no longer says the warning must fail")
+        out.append(
+            "  These are pinned in MUST_DECLARE_WARNING_VIOLATION. A row that declares"
+        )
+        out.append(
+            "  nothing does not fail the gate — it leaves it, which is worse."
+        )
+
     if report.missing_required_violations:
         out.append("")
         out.append("  COVERAGE SHORTFALL — required violation row(s) were not scored:")

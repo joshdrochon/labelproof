@@ -30,7 +30,10 @@ from api.models import Application, FieldName, Verdict
 from api.provider.base import ExtractionProvider, ImageInput
 from api.provider.fake import SpecBackedProvider
 from api.verify import verify
-from fixtures.generator.catalog import REQUIRED_WARNING_VIOLATIONS
+from fixtures.generator.catalog import (
+    REQUIRED_WARNING_VIOLATIONS,
+    undeclared_warning_violations,
+)
 from fixtures.generator.spec import LabelSpec
 
 #: Verdicts that mean "this field is fine". A warning row expected to be MISMATCH or
@@ -134,6 +137,16 @@ class Report:
     so a shrinking denominator has to shrink this list too, in a reviewable diff.
     """
 
+    undeclared_violations: list[str] = dc_field(default_factory=list)
+    """Fixtures the repository requires to DECLARE a warning violation, that no longer do.
+
+    The other half of the same hole. `pending` was one off-switch; `expect` sits one line
+    above it in the catalog and does the same job — emptying it makes a row expect a clean
+    Match, so it stops being a violation at all and vanishes from the report rather than
+    failing it. Checked against the specs, not the outcomes, because by outcome time the
+    declaration is already gone.
+    """
+
     subset: bool = False
     """True when the operator narrowed the run with --fixture.
 
@@ -204,10 +217,17 @@ class Report:
     def warning_coverage_ok(self) -> bool:
         """Did this run actually exercise the zero-false-pass gate, in full?
 
-        Two ways to fail. Zero checks is not evidence of anything, and neither is a
-        denominator that quietly shrank below what the repository declares. A narrowed
-        `--fixture` run is exempt from both because the operator chose the narrowing.
+        Three ways to fail. Zero checks is not evidence of anything; a denominator that
+        shrank below what the repository declares is not either; and a fixture that
+        stopped declaring its violation never reaches the denominator to shrink it.
+
+        A narrowed `--fixture` run is exempt from the first two because the operator chose
+        the narrowing — but NOT from the third. A missing declaration is a property of the
+        catalog, not of which fixtures this run happened to select, so narrowing must not
+        launder it.
         """
+        if self.undeclared_violations:
+            return False
         if self.subset:
             return True
         return bool(self.warning_violations) and not self.missing_required_violations
@@ -300,6 +320,7 @@ def evaluate(
         required_violations=(
             REQUIRED_WARNING_VIOLATIONS if required_violations is None else required_violations
         ),
+        undeclared_violations=undeclared_warning_violations(list(specs)),
     )
 
     for spec in specs:

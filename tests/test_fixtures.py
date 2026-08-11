@@ -198,6 +198,7 @@ def test_non_standard_fill_spec_uses_an_unauthorized_size() -> None:
     from api.models import Commodity
     from api.rules import fills
     parsed = fills.parse(by_name("tc10_non_standard_fill").net_contents)
+    assert parsed.ml is not None, "733 mL must parse to a volume at all"
     assert not fills.is_authorized(parsed.ml, Commodity.SPIRITS)
 
 

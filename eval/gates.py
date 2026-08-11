@@ -89,7 +89,12 @@ def gates_for(report: Report) -> list[Gate]:
     violations = len(report.warning_violations)
 
     missing = report.missing_required_violations
-    if report.subset:
+    if report.undeclared_violations:
+        coverage_summary = (
+            f"fixture(s) stopped DECLARING a violation: "
+            f"{', '.join(report.undeclared_violations)} — the row left the gate entirely"
+        )
+    elif report.subset:
         coverage_summary = "subset run — coverage not required"
     elif missing:
         coverage_summary = (
@@ -108,7 +113,13 @@ def gates_for(report: Report) -> list[Gate]:
 
     coverage = Gate(
         name="warning_gate_exercised",
-        status=SKIP if report.subset else _status(report.warning_coverage_ok),
+        # A missing declaration is never skipped: it is a property of the catalog, not of
+        # which fixtures this run selected, so a --fixture subset must not launder it.
+        status=(
+            _status(report.warning_coverage_ok)
+            if report.undeclared_violations or not report.subset
+            else SKIP
+        ),
         blocking=True,
         exit_code=EXIT_WARNING_COVERAGE,
         summary=coverage_summary,

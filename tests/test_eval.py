@@ -38,7 +38,11 @@ from eval.gates import (
 from eval.outcomes import ACCURACY_FLOOR, FieldOutcome, Report, evaluate
 from eval.report import render
 from eval.run import build_parser, main, payload
-from fixtures.generator.catalog import CATALOG, REQUIRED_WARNING_VIOLATIONS
+from fixtures.generator.catalog import (
+    CATALOG,
+    MUST_DECLARE_WARNING_VIOLATION,
+    REQUIRED_WARNING_VIOLATIONS,
+)
 from fixtures.generator.spec import LabelSpec
 
 REPO = Path(__file__).resolve().parents[1]
@@ -125,7 +129,95 @@ def test_every_known_gap_names_a_ticket_in_the_report() -> None:
 def test_golden_set_scores_every_required_warning_violation() -> None:
     report = evaluate(CATALOG)
     assert report.missing_required_violations == []
-    assert report.required_violations == REQUIRED_WARNING_VIOLATIONS
+    assert report.undeclared_violations == []
+
+
+#: The names the repository committed to checking. Written out here, not imported, because
+#: `assert report.required_violations == REQUIRED_WARNING_VIOLATIONS` was a tautology —
+#: `evaluate()` assigns that exact constant — so emptying the constant left 767 tests green
+#: and the pin defending nothing.
+PINNED_REQUIRED_VIOLATIONS = frozenset(
+    {
+        "tc03_title_case_warning",
+        "tc04_bold_warning_body",
+        "tc05_reworded_warning",
+        "tc07_missing_warning",
+    }
+)
+
+
+def test_the_required_violation_list_can_only_grow() -> None:
+    """A ratchet, so removing a check is a failing test rather than a quiet deletion."""
+    assert PINNED_REQUIRED_VIOLATIONS <= REQUIRED_WARNING_VIOLATIONS, (
+        "a fixture was removed from the zero-false-pass denominator: "
+        f"{sorted(PINNED_REQUIRED_VIOLATIONS - REQUIRED_WARNING_VIOLATIONS)}"
+    )
+
+
+def test_the_must_declare_list_covers_the_required_list_and_the_pending_one() -> None:
+    """Declaration is the wider net: it must cover fixtures the scoring pin cannot.
+
+    `tc06_buried_warning` is exactly that case — `pending`, so it never reaches the
+    denominator, which is why emptying its `expect` was invisible to every other check.
+    """
+    assert REQUIRED_WARNING_VIOLATIONS <= MUST_DECLARE_WARNING_VIOLATION
+    assert "tc06_buried_warning" in MUST_DECLARE_WARNING_VIOLATION
+    assert PINNED_REQUIRED_VIOLATIONS | {
+        "tc06_buried_warning"
+    } <= MUST_DECLARE_WARNING_VIOLATION
+
+
+def test_every_pinned_fixture_still_exists_in_the_catalog() -> None:
+    """A pin naming a deleted fixture protects nothing and looks like it does."""
+    names = {spec.name for spec in CATALOG}
+    assert names >= MUST_DECLARE_WARNING_VIOLATION, (
+        f"pinned but absent: {sorted(MUST_DECLARE_WARNING_VIOLATION - names)}"
+    )
+
+
+def test_emptying_the_required_list_would_be_caught() -> None:
+    """Proves the ratchet above is not itself a tautology."""
+    assert not (frozenset() >= PINNED_REQUIRED_VIOLATIONS)
+
+
+def test_the_declaration_pin_fires_when_an_expectation_is_emptied() -> None:
+    """The reviewer's two-line diff: drop `expect`, regenerate, ship.
+
+    Catalog-independent, so it keeps proving the hole is shut whatever tc06's expectation
+    becomes when LP-211 lands.
+    """
+    gutted = [
+        spec.with_(expect={}) if spec.name == "tc06_buried_warning" else spec
+        for spec in CATALOG
+    ]
+    report = evaluate(gutted)
+    assert report.undeclared_violations == ["tc06_buried_warning"]
+    assert not report.warning_coverage_ok
+    assert not report.passed
+    assert exit_code_for(gates_for(report)) == EXIT_WARNING_COVERAGE
+    assert "DECLARATION SHORTFALL" in render(report)
+
+
+def test_a_passing_expectation_is_as_bad_as_no_expectation() -> None:
+    gutted = [
+        spec.with_(expect={"government_warning": "match"})
+        if spec.name == "tc04_bold_warning_body"
+        else spec
+        for spec in CATALOG
+    ]
+    report = evaluate(gutted)
+    assert "tc04_bold_warning_body" in report.undeclared_violations
+    assert not report.passed
+
+
+def test_a_subset_run_cannot_launder_a_missing_declaration() -> None:
+    """Narrowing is an operator's choice about scope, not a licence to drop a check."""
+    gutted = [
+        spec.with_(expect={}) for spec in CATALOG if spec.name == "tc06_buried_warning"
+    ]
+    report = evaluate(gutted, subset=True)
+    assert report.undeclared_violations == ["tc06_buried_warning"]
+    assert not report.passed
 
 
 def test_golden_set_actually_exercises_the_warning_gate() -> None:
@@ -669,18 +761,29 @@ def test_the_run_records_which_extractor_produced_the_number(
 def test_a_seeded_regression_trips_the_threshold_gate(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The point of a threshold is that a worse run exits non-zero."""
+    """The point of a threshold is that a worse run exits non-zero.
+
+    Built on a set with the live fail-open fixture removed, so the accuracy gate is what
+    the assertions actually observe. Written against the full catalog, both assertions
+    reduced to `== 3` while tc06 false-passes — the seeded regression was never the thing
+    being measured, and the test proved nothing until LP-211 landed.
+    """
     import eval.run as run_module
 
-    broken = [CATALOG[0].with_(expect={"brand_name": "mismatch"}), *CATALOG[1:]]
+    sound = [s for s in CATALOG if s.name not in KNOWN_LIVE_FALSE_PASSES]
+    monkeypatch.setattr(run_module, "CATALOG", sound)
+    monkeypatch.setattr(
+        "eval.outcomes.REQUIRED_WARNING_VIOLATIONS", REQUIRED_WARNING_VIOLATIONS
+    )
+    assert main([]) == EXIT_OK, "the sound subset must be green before seeding anything"
+
+    broken = [sound[0].with_(expect={"brand_name": "mismatch"}), *sound[1:]]
     monkeypatch.setattr(run_module, "CATALOG", broken)
 
-    # One wrong row out of ~98 is still above the 95% floor, so accuracy is not what
-    # blocks: the run exits on whatever the set already exits on.
-    assert main([]) == golden_exit()
-    # Raise the bar and accuracy becomes the binding gate — unless a false pass, which
-    # outranks it, is already live.
-    assert main(["--min-accuracy", "1.0"]) == (golden_exit() or EXIT_ACCURACY)
+    # One wrong row out of ~98 is still above the 95% floor — the default run passes.
+    assert main([]) == EXIT_OK
+    # Raise the bar and the same run is blocked, by the accuracy gate specifically.
+    assert main(["--min-accuracy", "1.0"]) == EXIT_ACCURACY
 
 
 def test_the_threshold_can_be_raised() -> None:
@@ -833,8 +936,10 @@ def _tier_b_manifest(
     images.mkdir(exist_ok=True)
     source = REPO / "fixtures" / "labels" / "tc01_old_tom_clean.png"
     for label in labels:
-        for image in label.get("images", []):  # type: ignore[union-attr]
-            name = str(image.get("file", ""))
+        declared = label.get("images", [])
+        assert isinstance(declared, list)
+        for image in declared:
+            name = str(image.get("file", "")) if isinstance(image, dict) else ""
             if name and name not in absent and not (images / name).exists():
                 (images / name).write_bytes(source.read_bytes())
 
@@ -1046,6 +1151,46 @@ def test_a_broken_manifest_never_masks_a_warning_false_pass(
     assert body["tier_b_manifest_invalid"] is True
 
 
+def test_every_top_level_signal_in_the_payload_agrees(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`exit_code`, `status` and `passed` must never contradict each other.
+
+    A broken Tier B manifest with every Tier A gate green produced
+    `{"exit_code": 2, "status": "fail", "passed": true}` — the same shape of bug as the
+    exit-code disagreement, one field over, and a CI job branching on `.passed` ships.
+    """
+    path = _tier_b_manifest(tmp_path, [_old_tom_row(commodity="cider")])
+    monkeypatch.setattr(tier_b, "MANIFEST", path)
+    for argv in ([], ["--tier", "b"], ["--tier", "all"]):
+        code = main(["--json", *argv])
+        body = json.loads(capsys.readouterr().out)
+        assert body["exit_code"] == code, argv
+        assert body["passed"] is (code == 0), argv
+        assert body["status"] == ("pass" if code == 0 else "fail"), argv
+
+
+def test_a_broken_manifest_alone_makes_passed_false(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Isolates the exact case: gates green, manifest broken."""
+    path = _tier_b_manifest(tmp_path, [_old_tom_row(commodity="cider")])
+    monkeypatch.setattr(tier_b, "MANIFEST", path)
+    monkeypatch.setattr(
+        "eval.run.evaluate",
+        lambda *a, **k: Report(
+            tier="A",
+            outcomes=[warning_violation()],
+            required_violations=frozenset(),
+        ),
+    )
+    code = main(["--json", "--tier", "b"])
+    body = json.loads(capsys.readouterr().out)
+    assert code == EXIT_USAGE
+    assert body["passed"] is False
+    assert body["gates_passed"] is True, "the Tier A verdict stays available separately"
+
+
 def test_the_payload_exit_code_always_equals_the_process_exit_code(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -1182,22 +1327,37 @@ def _run_sweep(
 
 
 def evidence_complete_specs() -> list[LabelSpec]:
-    """The catalog plus the one warning posture it does not yet exercise.
+    """The catalog plus enough DISTINCT fixtures to satisfy the evidence gate.
 
-    `header_not_bold` has zero fixtures on this branch — the gap the sweep now refuses to
-    recommend across. The fixture that closes it (`tc03b_non_bold_warning_header`) belongs
-    to the warning agent and is deliberately NOT duplicated into the catalog here; these
-    tests build an equivalent locally so the ship rule can be tested on a set that has
-    evidence, while the real set keeps telling the truth about its gap.
+    Two per posture, because that is what the gate now requires: one fixture cannot
+    distinguish "the model reads this posture" from "the model reads this one picture",
+    and re-sending the same PNG does not help.
+
+    These stay test-local. The catalog's real gap (`header_not_bold` has zero fixtures,
+    every other posture has one) is deliberately left alone — the fixtures that close it
+    belong to the warning agent, and the sweep is supposed to keep reporting the gap until
+    they land. These stand-ins exist so the ship rule itself can be tested on a set that
+    does have evidence.
     """
     base = CATALOG[0]
+    variants = [
+        ("header_not_bold_a", {"warning_header_bold": False}),
+        ("header_not_bold_b", {"warning_header_bold": False, "brand_name": "SECOND LABEL"}),
+        ("header_case_b", {"warning_header_case": "lower"}),
+        ("body_bold_b", {"warning_body_bold": True, "brand_name": "SECOND LABEL"}),
+        ("text_altered_b", {"warning_text": "According to the Surgeon General, drink less."}),
+        ("warning_absent_b", {"include_warning": False}),
+    ]
     return [
         *CATALOG,
-        base.with_(
-            name="local_header_not_bold",
-            warning_header_bold=False,
-            expect={"government_warning": "mismatch"},
-            notes="Local stand-in for the header-not-bold posture.",
+        *(
+            base.with_(
+                name=f"local_{name}",
+                expect={"government_warning": "mismatch"},
+                notes=f"Local stand-in giving the {name} posture a second distinct label.",
+                **changes,  # type: ignore[arg-type]
+            )
+            for name, changes in variants
         ),
     ]
 
@@ -1217,7 +1377,9 @@ def test_the_cheapest_qualifying_tier_is_what_ships() -> None:
     """The ship rule, applied rather than restated — on a set that has the evidence."""
     specs = evidence_complete_specs()
     results = _run_sweep({"claude-opus-5": 4.0, "claude-haiku-4-5": 2.0}, specs, repeat=3)
-    assert sweep.recommend(results, specs).model == "claude-haiku-4-5"
+    winner = sweep.recommend(results, specs)
+    assert winner is not None
+    assert winner.model == "claude-haiku-4-5"
     assert "SHIPS: claude-haiku-4-5" in sweep.render(results, specs)
 
 
@@ -1369,9 +1531,60 @@ def test_the_current_set_has_the_gap_the_reviewer_found() -> None:
     assert coverage["body_bold"] == 1
 
 
-def test_repeats_multiply_the_evidence() -> None:
-    assert sweep.posture_coverage(CATALOG, repeat=1)["body_bold"] == 1
-    assert sweep.posture_coverage(CATALOG, repeat=5)["body_bold"] == 5
+def test_repeats_are_not_evidence() -> None:
+    """Re-sending one PNG is not a second sample of the posture.
+
+    The previous version of this test asserted the opposite and codified the flaw as
+    intended behaviour: `--repeat 100` reported "100 sample(s), an error rate up to 3%
+    would go unseen" from a single image, and `--repeat 3` — the default — cleared the
+    gate on its own.
+    """
+    assert sweep.posture_coverage(CATALOG)["body_bold"] == 1
+    # No repeat parameter exists to inflate it any more.
+    assert sweep.posture_coverage(list(CATALOG) * 100)["body_bold"] == 1
+
+
+def test_repeats_cannot_clear_the_evidence_gate() -> None:
+    for repeat in (1, 3, 100):
+        problems = sweep.evidence_problems(CATALOG, repeat=repeat)
+        assert any("header_not_bold" in p for p in problems), repeat
+        assert any("body_bold" in p for p in problems), repeat
+
+
+def test_a_hundred_repeats_of_one_image_does_not_claim_a_small_blind_spot() -> None:
+    specs = [s for s in CATALOG if s.name == "tc04_bold_warning_body"]
+    results = _run_sweep({"claude-opus-5": 1.0}, specs, repeat=100)
+    text = sweep.render(results, specs)
+    assert "1 fixture(s) x 100 run(s)" in text
+    # The blind-spot figure is bounded by the fixture count, so it stays at 95%.
+    assert "up to 95% would go unseen" in text
+    assert "NO RECOMMENDATION" in text
+
+
+def test_the_report_prints_fixtures_and_runs_separately() -> None:
+    """A single 'samples' figure cannot tell two labels from one label sent twice."""
+    specs = evidence_complete_specs()
+    text = sweep.render(_run_sweep({"claude-opus-5": 1.0}, specs, repeat=3), specs)
+    assert "fixture(s) x 3 run(s)" in text
+    assert "Blind-spot figures come from the fixture count alone" in text
+
+
+def test_too_few_runs_per_fixture_also_blocks_a_recommendation() -> None:
+    """Distinct fixtures bound the posture claim; runs bound the stability claim."""
+    specs = evidence_complete_specs()
+    thin = _run_sweep({"claude-opus-5": 1.0}, specs, repeat=1)
+    assert sweep.recommend(thin, specs) is None
+    assert any("--repeat 1" in p for p in sweep.evidence_problems(specs, repeat=1))
+
+    enough = _run_sweep({"claude-opus-5": 1.0}, specs, repeat=3)
+    assert sweep.recommend(enough, specs) is not None
+
+
+def test_recommend_requires_the_spec_set() -> None:
+    """An optional `specs` meant any forgetful caller skipped the evidence gate."""
+    results = _run_sweep({"claude-opus-5": 1.0}, list(CATALOG), repeat=3)
+    with pytest.raises(TypeError):
+        sweep.recommend(results)  # type: ignore[call-arg]
 
 
 def test_a_single_sample_proves_almost_nothing_and_the_report_says_so() -> None:
@@ -1417,10 +1630,13 @@ def test_an_unpriced_model_shows_no_price_rather_than_a_made_up_one() -> None:
     from eval.pricing import price_for
 
     assert price_for("claude-not-a-model") is None
-    results = _run_sweep({"claude-not-a-model": 2.0}, list(CATALOG))
+    specs = evidence_complete_specs()
+    results = _run_sweep({"claude-not-a-model": 2.0}, specs, repeat=3)
     assert results[0].priced is False
-    assert "no price" in sweep.render(results, list(CATALOG))
-    assert sweep.recommend(results) is None
+    assert "no price" in sweep.render(results, specs)
+    # Evidence is sufficient here, so the None is about the missing price alone.
+    assert sweep.evidence_problems(specs, repeat=3) == []
+    assert sweep.recommend(results, specs) is None
 
 
 def test_percentile_is_nearest_rank() -> None:
@@ -1466,38 +1682,74 @@ def test_fixture_images_exist_for_every_spec() -> None:
 
 # --- expectations are honest -----------------------------------------------------------------
 
-def test_no_fixture_expects_a_warning_violation_to_pass() -> None:
-    """A golden set that expected a violation to be a Match would encode the bug.
+PASSING_VERDICTS = {v.value for v in (Verdict.MATCH, Verdict.NOT_APPLICABLE)}
 
-    The previous version of this test could not fail: it asserted that a value already
-    known to be `mismatch` or `missing` was not `match` or `not_applicable`. It now checks
-    the property that matters — every fixture whose NAME or defect declares a warning
-    violation must carry a non-passing expectation.
+
+def renders_a_warning_defect(spec: LabelSpec) -> bool:
+    """Does this spec draw a label that violates 27 CFR 16.21/16.22?
+
+    Named and reused so the guard below can exercise the predicate itself rather than a
+    tautology over its output.
     """
-    passing = {v.value for v in (Verdict.MATCH, Verdict.NOT_APPLICABLE)}
-    defective = [
-        spec
-        for spec in CATALOG
-        if not spec.include_warning
+    return (
+        not spec.include_warning
         or spec.warning_header_case != "upper"
         or not spec.warning_header_bold
         or spec.warning_body_bold
         or spec.warning_text is not None
-    ]
-    assert defective, "the set must contain warning defects at all"
-    for spec in defective:
-        expected = spec.expect.get("government_warning")
-        assert expected is not None, f"{spec.name} renders a warning defect but expects nothing"
-        assert expected not in passing, f"{spec.name} expects a violation to pass: {expected}"
-
-
-def test_the_expectation_check_can_actually_fail() -> None:
-    """Guards the guard: a fixture that expected its own defect to pass must be caught."""
-    passing = {v.value for v in (Verdict.MATCH, Verdict.NOT_APPLICABLE)}
-    liar = CATALOG[0].with_(
-        name="liar", warning_body_bold=True, expect={"government_warning": "match"}
     )
-    assert liar.expect["government_warning"] in passing
+
+
+def expectation_violations(specs: list[LabelSpec]) -> list[str]:
+    """Fixtures that render a warning defect but expect the warning to pass."""
+    bad = []
+    for spec in specs:
+        if not renders_a_warning_defect(spec):
+            continue
+        expected = spec.expect.get("government_warning")
+        if expected is None or expected in PASSING_VERDICTS:
+            bad.append(spec.name)
+    return bad
+
+
+def test_no_fixture_expects_a_warning_violation_to_pass() -> None:
+    """A golden set that expected a violation to be a Match would encode the bug."""
+    defective = [s for s in CATALOG if renders_a_warning_defect(s)]
+    assert defective, "the set must contain warning defects at all"
+    assert expectation_violations(list(CATALOG)) == []
+
+
+@pytest.mark.parametrize(
+    ("changes", "label"),
+    [
+        ({"warning_body_bold": True}, "body_bold"),
+        ({"warning_header_bold": False}, "header_not_bold"),
+        ({"warning_header_case": "title"}, "header_case"),
+        ({"include_warning": False}, "absent"),
+        ({"warning_text": "Drink responsibly."}, "text_altered"),
+    ],
+)
+def test_the_expectation_check_catches_each_kind_of_liar(
+    changes: dict[str, object], label: str
+) -> None:
+    """Guards the guard, and actually runs it.
+
+    The previous version reduced to `assert "match" in {"match", "not_applicable"}` — it
+    never invoked the predicate it claimed to protect, so deleting a clause from the
+    defect check (say `warning_body_bold`) silently stopped tc04 being examined and
+    nothing went red. Each case here fails if its clause is removed.
+    """
+    liar = CATALOG[0].with_(
+        name=f"liar_{label}", expect={"government_warning": "match"}, **changes
+    )
+    assert renders_a_warning_defect(liar), f"the defect predicate ignores {label}"
+    assert expectation_violations([liar]) == [f"liar_{label}"]
+
+
+def test_the_expectation_check_also_catches_a_missing_expectation() -> None:
+    """`expect={}` is the same off-switch as `expect={"...": "match"}`."""
+    silent = CATALOG[0].with_(name="silent", warning_body_bold=True, expect={})
+    assert expectation_violations([silent]) == ["silent"]
 
 
 def test_finding_expectations_reference_codes_the_code_can_raise() -> None:

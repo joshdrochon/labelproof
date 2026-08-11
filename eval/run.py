@@ -216,7 +216,12 @@ def payload(
             }
             for o in report.false_passes
         ],
-        "passed": report.passed,
+        # The run as a whole, not just Tier A's gates: a broken Tier B manifest with every
+        # gate green used to yield {"exit_code": 2, "status": "fail", "passed": true} —
+        # three signals, two of them agreeing, in one document. A CI job branching on
+        # `.passed` shipped. `gates_passed` keeps the Tier A verdict available separately.
+        "passed": code == 0,
+        "gates_passed": report.passed,
     }
 
 
@@ -262,12 +267,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--repeat",
         type=int,
-        default=sweep.MIN_SAMPLES_PER_POSTURE,
+        default=sweep.MIN_RUNS_PER_FIXTURE,
         metavar="N",
         help=(
-            f"with --model: run each label N times (default {sweep.MIN_SAMPLES_PER_POSTURE}). "
+            f"with --model: run each label N times (default {sweep.MIN_RUNS_PER_FIXTURE}). "
             f"A model's warning reading is stochastic; one pass cannot tell a reliable "
-            f"model from a lucky one."
+            f"model from a lucky one. Repeats do NOT substitute for a second fixture."
         ),
     )
     parser.add_argument(
@@ -333,6 +338,17 @@ def main(argv: list[str] | None = None) -> int:
         print(
             f"--min-accuracy must be between {ACCURACY_FLOOR} and 1.0. "
             f"{ACCURACY_FLOOR:.0%} is the OPS-3 floor and this flag can only raise it.",
+            file=sys.stderr,
+        )
+        return EXIT_USAGE
+
+    # A negative repeat produced "Planned: -80 image(s) ... Estimated spend: ~$-4.11",
+    # which is nonsense presented with a currency symbol.
+    if args.repeat < 1:
+        print(
+            f"--repeat must be at least 1, got {args.repeat}. "
+            f"{sweep.MIN_RUNS_PER_FIXTURE} is the default and the point below which a "
+            f"model that reads a label correctly only sometimes looks reliable.",
             file=sys.stderr,
         )
         return EXIT_USAGE

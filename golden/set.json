@@ -172,7 +172,7 @@
       },
       "expect_findings": {},
       "pending": "LP-211",
-      "notes": "TC-06. Warning present and verbatim but shrunk and low-contrast \u2014 the 'creative' evasion Jenny described. Prominence heuristics (LP-211) target this; until they land the expectation may need revisiting."
+      "notes": "TC-06. Warning present and verbatim but shrunk and low-contrast \u2014 the 'creative' evasion Jenny described. Prominence heuristics (LP-211) target this. The expectation may move \u2014 LP-211 makes it `unreadable` rather than `mismatch` \u2014 but it may not disappear: this fixture is listed in MUST_DECLARE_WARNING_VIOLATION, and emptying its `expect` fails the run."
     },
     {
       "name": "tc07_missing_warning",

@@ -78,7 +78,9 @@ CATALOG: list[LabelSpec] = [
         notes=(
             "TC-06. Warning present and verbatim but shrunk and low-contrast — the "
             "'creative' evasion Jenny described. Prominence heuristics (LP-211) target "
-            "this; until they land the expectation may need revisiting."
+            "this. The expectation may move — LP-211 makes it `unreadable` rather than "
+            "`mismatch` — but it may not disappear: this fixture is listed in "
+            "MUST_DECLARE_WARNING_VIOLATION, and emptying its `expect` fails the run."
         ),
     ),
 
@@ -220,6 +222,46 @@ REQUIRED_WARNING_VIOLATIONS: frozenset[str] = frozenset(
         "tc07_missing_warning",
     }
 )
+
+
+#: Fixtures whose `expect` MUST declare a government-warning violation.
+#:
+#: A superset of REQUIRED_WARNING_VIOLATIONS, and the reason it exists is that hardening
+#: `pending` left `expect` — one line above it — doing exactly the same job. Deleting
+#: `expect={"government_warning": "mismatch"}` makes the row expect a clean Match, so it
+#: stops being a declared violation, disappears from the report entirely, and the run
+#: prints "0 false passes across 4 violation row(s)" and exits 0. It is a two-line diff
+#: that any author revisiting an expectation might make in good faith.
+#:
+#: `tc06_buried_warning` IS in this list even though it is absent from
+#: REQUIRED_WARNING_VIOLATIONS. That asymmetry is the whole point: the one fixture whose
+#: expectation is under active discussion is the one the scoring pin cannot cover, because
+#: it is `pending`. This list covers it at the declaration level instead. Its expectation
+#: may legitimately change (LP-211 moves it from `mismatch` to `unreadable` — still a
+#: violation, still non-passing); what it may not do is quietly become no expectation.
+MUST_DECLARE_WARNING_VIOLATION: frozenset[str] = REQUIRED_WARNING_VIOLATIONS | {
+    "tc06_buried_warning",
+}
+
+
+def declares_warning_violation(spec: LabelSpec) -> bool:
+    """Does this spec's `expect` say the warning must NOT pass?"""
+    expected = spec.expect.get("government_warning")
+    return expected is not None and expected not in ("match", "not_applicable")
+
+
+def undeclared_warning_violations(specs: list[LabelSpec]) -> list[str]:
+    """Fixtures the repository requires to declare a violation, that no longer do.
+
+    Only fixtures actually present in `specs` are checked, so a `--fixture` subset run
+    does not report every absent name as a defect.
+    """
+    present = {spec.name: spec for spec in specs}
+    return sorted(
+        name
+        for name in MUST_DECLARE_WARNING_VIOLATION & present.keys()
+        if not declares_warning_violation(present[name])
+    )
 
 
 def by_name(name: str) -> LabelSpec:

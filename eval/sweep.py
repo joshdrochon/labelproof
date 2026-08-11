@@ -70,12 +70,23 @@ WARNING_POSTURES: dict[str, Callable[[LabelSpec], bool]] = {
     "warning_absent": lambda s: not s.include_warning,
 }
 
-#: Samples per posture below which the sweep declines to name a winner.
+#: DISTINCT FIXTURES per posture below which the sweep declines to name a winner.
 #:
-#: Three is not a statistical claim — it is the point at which a single lucky read stops
-#: being the whole answer. `undetectable_error_rate` prints what the chosen sample count
-#: actually buys, so nobody has to take this constant on faith.
-MIN_SAMPLES_PER_POSTURE = 3
+#: Distinct fixtures, not reads. The first version of this gate multiplied the fixture
+#: count by `--repeat`, so `--repeat 3` — the default, and equal to the threshold — cleared
+#: it on its own. At `--repeat 100` the artifact read "body_bold 100 sample(s), an error
+#: rate up to 3% would go unseen" from a single PNG. Re-sending one image is not an
+#: independent read: a model that misreads a particular rendering misreads it every time,
+#: and the reviewer's re-simulation put the deterministic case at 53% of runs still
+#: shipping Haiku.
+#:
+#: Two is the smallest number that can distinguish "the model reads this posture" from
+#: "the model reads this one picture".
+MIN_FIXTURES_PER_POSTURE = 2
+
+#: Runs per label. Widens the confidence claim WITHIN a fixture — it catches a model that
+#: is right on Tuesday and wrong on Wednesday — and never substitutes for a second fixture.
+MIN_RUNS_PER_FIXTURE = 3
 
 #: Builds the extractor for one model. Injected so the table, the disqualification rule
 #: and the recommendation are all testable with no network and no spend.
@@ -111,38 +122,53 @@ class LabelRun:
     usd: float
 
 
-def posture_coverage(specs: Sequence[LabelSpec], repeat: int = 1) -> dict[str, int]:
-    """Samples per warning posture across the set, accounting for repeats."""
+def posture_coverage(specs: Sequence[LabelSpec]) -> dict[str, int]:
+    """DISTINCT fixtures exercising each warning posture.
+
+    Deliberately takes no `repeat`: re-sending the same PNG produces no new evidence about
+    the posture, only about run-to-run stability of one rendering.
+    """
     return {
-        posture: sum(1 for spec in specs if matches(spec)) * repeat
+        posture: len({spec.name for spec in specs if matches(spec)})
         for posture, matches in WARNING_POSTURES.items()
     }
 
 
-def undetectable_error_rate(samples: int, confidence: float = 0.95) -> float:
-    """The largest per-call error rate that would still likely produce a clean sweep.
+def undetectable_error_rate(fixtures: int, confidence: float = 0.95) -> float:
+    """The largest per-posture error rate that would still likely produce a clean sweep.
 
-    With `samples` independent reads and zero observed failures, any true error rate below
-    `1 - (1 - confidence) ** (1 / samples)` survives at the given confidence. At one sample
-    that is 95% — which is the honest description of what a single-shot sweep proves about
-    a model's warning reading: almost nothing.
+    Computed from DISTINCT FIXTURES, never from repeats. The arithmetic
+    (`1 - (1 - confidence) ** (1 / n)`) assumes independent draws, and repeats of one image
+    are the opposite of independent — a model that misreads a rendering misreads it every
+    time. Feeding `repeat` in here is what let 100 re-sends of one PNG report a 3% blind
+    spot. At one fixture the honest figure is 95%: a single-shot sweep proves almost
+    nothing about a model's warning reading.
     """
-    if samples <= 0:
+    if fixtures <= 0:
         return 1.0
-    return 1.0 - (1.0 - confidence) ** (1.0 / samples)
+    return float(1.0 - (1.0 - confidence) ** (1.0 / fixtures))
 
 
 def evidence_problems(specs: Sequence[LabelSpec], repeat: int = 1) -> list[str]:
     """Why this set cannot support a ship recommendation, if it cannot."""
     problems: list[str] = []
-    for posture, samples in sorted(posture_coverage(specs, repeat).items()):
-        if samples == 0:
-            problems.append(f"{posture}: NO fixture exercises it — the model is never tested on it")
-        elif samples < MIN_SAMPLES_PER_POSTURE:
+    for posture, fixtures in sorted(posture_coverage(specs).items()):
+        if fixtures == 0:
             problems.append(
-                f"{posture}: {samples} sample(s), need {MIN_SAMPLES_PER_POSTURE}. "
-                f"An error rate up to {undetectable_error_rate(samples):.0%} would go unseen"
+                f"{posture}: NO fixture exercises it — the model is never tested on it"
             )
+        elif fixtures < MIN_FIXTURES_PER_POSTURE:
+            problems.append(
+                f"{posture}: {fixtures} distinct fixture(s), need "
+                f"{MIN_FIXTURES_PER_POSTURE}. An error rate up to "
+                f"{undetectable_error_rate(fixtures):.0%} would go unseen, and repeats "
+                f"cannot close that — they re-read the same rendering"
+            )
+    if repeat < MIN_RUNS_PER_FIXTURE:
+        problems.append(
+            f"--repeat {repeat}: fewer than {MIN_RUNS_PER_FIXTURE} runs per label, so a "
+            f"model that reads a label correctly only sometimes looks reliable"
+        )
     return problems
 
 
@@ -234,7 +260,7 @@ def run_model(
 
     `repeat` runs every label that many times. A model's warning reading is stochastic —
     the same label can come back right once and wrong the next — so one pass per label
-    cannot distinguish a reliable model from a lucky one. See `MIN_SAMPLES_PER_POSTURE`.
+    cannot distinguish a reliable model from a lucky one. See `MIN_RUNS_PER_FIXTURE`.
     """
     price = price_for(model)
     report = Report(tier="A", fixtures=len(specs) * repeat, provider=model)
@@ -305,18 +331,17 @@ def run(
 
 
 def recommend(
-    results: Sequence[ModelResult], specs: Sequence[LabelSpec] | None = None
+    results: Sequence[ModelResult], specs: Sequence[LabelSpec]
 ) -> ModelResult | None:
     """The cheapest model that clears the correctness gates on sufficient evidence.
 
-    `specs` is optional only so existing callers keep working; when supplied — as the CLI
-    always does — a set that cannot support a recommendation yields None rather than a
-    winner picked on one sample.
+    `specs` is REQUIRED. It was briefly optional "so existing callers keep working", which
+    meant any caller that forgot it silently skipped the evidence gate and got the
+    pre-fix behaviour back — including one of this project's own tests.
     """
-    if specs is not None:
-        repeat = max((r.repeat for r in results), default=1)
-        if evidence_problems(specs, repeat):
-            return None
+    repeat = max((r.repeat for r in results), default=1)
+    if evidence_problems(specs, repeat):
+        return None
     qualified = [r for r in results if r.qualified and r.priced]
     if not qualified:
         return None
@@ -451,21 +476,30 @@ def render(results: Sequence[ModelResult], specs: Sequence[LabelSpec]) -> str:
 def evidence_section(
     specs: Sequence[LabelSpec], results: Sequence[ModelResult]
 ) -> list[str]:
-    """How many times each warning posture was actually put in front of each model."""
+    """How many DISTINCT labels of each warning posture each model was shown.
+
+    Both numbers are printed — fixtures and runs — because they answer different
+    questions and only the first one bounds the blind spot. A reader given a single
+    'samples' figure cannot tell two labels from one label sent twice.
+    """
     repeat = max((r.repeat for r in results), default=1)
-    coverage = posture_coverage(specs, repeat)
+    coverage = posture_coverage(specs)
     out = [
         "",
-        f"Warning-posture evidence ({repeat} run(s) per label). A model can only be",
-        "recommended on postures it was actually shown:",
+        "Warning-posture evidence. Distinct fixtures bound what this sweep can claim;",
+        "runs only widen the claim within a fixture. Repeats are not extra evidence:",
     ]
-    for posture, samples in sorted(coverage.items()):
-        mark = "ok " if samples >= MIN_SAMPLES_PER_POSTURE else "!! "
-        blind = undetectable_error_rate(samples)
+    for posture, fixtures in sorted(coverage.items()):
+        mark = "ok " if fixtures >= MIN_FIXTURES_PER_POSTURE else "!! "
+        blind = undetectable_error_rate(fixtures)
         out.append(
-            f"  {mark}{posture:22s}{samples:3d} sample(s)   "
+            f"  {mark}{posture:22s}{fixtures:2d} fixture(s) x {repeat} run(s)   "
             f"an error rate up to {blind:.0%} would go unseen"
         )
+    out.append(
+        f"  Blind-spot figures come from the fixture count alone "
+        f"(need {MIN_FIXTURES_PER_POSTURE}, {MIN_RUNS_PER_FIXTURE} runs each)."
+    )
     return out
 
 
@@ -491,7 +525,7 @@ def latency_by_shape(results: Sequence[ModelResult]) -> list[str]:
                 continue
             # A p95 from a handful of samples is the maximum wearing a percentile's name.
             # Say so rather than letting it be quoted as one.
-            marker = "" if len(samples) >= MIN_SAMPLES_PER_POSTURE else " [thin]"
+            marker = "" if len(samples) >= MIN_RUNS_PER_FIXTURE else " [thin]"
             thin = thin or bool(marker)
             parts.append(
                 f"{shape} image(s) n={len(samples)}{marker}: "
@@ -500,7 +534,7 @@ def latency_by_shape(results: Sequence[ModelResult]) -> list[str]:
         out.append(f"  {result.model:20s}{'   '.join(parts)}")
     if thin:
         out.append(
-            f"  [thin] fewer than {MIN_SAMPLES_PER_POSTURE} samples — that p95 is the "
+            f"  [thin] fewer than {MIN_RUNS_PER_FIXTURE} samples — that p95 is the "
             f"maximum, not a percentile. Raise --repeat."
         )
     return out

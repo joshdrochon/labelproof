@@ -52,15 +52,26 @@ denominator of this gate, so one word in `fixtures/generator/catalog.py` turned 
 false pass into `"false_passes": 0`, exit `0`, `PASS`. `pending` now excuses an
 *inaccurate* verdict and never a *passing* one — see `FieldOutcome.is_warning_false_pass`.
 
-Code 5 has two triggers, both about the denominator:
+Code 5 has three triggers, all about the denominator:
 
 - **No violation rows scored at all.** `0 false passes` out of zero checks is
   arithmetically true and worthless — it is what a broken fixture load produces.
 - **The denominator shrank.** `REQUIRED_WARNING_VIOLATIONS` in
   `fixtures/generator/catalog.py` pins the fixtures that must be checked on every full
   run. Marking one `pending` no longer quietly reduces five checks to four; it fails here
-  and the report names the missing fixture. Shrinking the gate means editing that list, in
-  a diff someone has to approve.
+  and the report names the missing fixture.
+- **A fixture stopped declaring its violation.** `MUST_DECLARE_WARNING_VIOLATION` pins the
+  fixtures whose `expect` must say the warning fails. Hardening `pending` left `expect` —
+  one line above it in the catalog — doing exactly the same job: delete
+  `expect={"government_warning": "mismatch"}`, regenerate the manifest, and the row stops
+  being a violation at all, vanishes from the report, and the run exits `0` printing
+  "0 false passes across 4 violation row(s)". This list is a superset of the one above and
+  deliberately includes `tc06_buried_warning`, which is `pending` and therefore the one
+  fixture the scoring pin cannot cover. **Unlike the other two, this check applies to
+  `--fixture` subset runs too** — a missing declaration is a property of the catalog, not
+  of what this run selected.
+
+Shrinking either list means editing a committed file, in a diff someone has to approve.
 
 ### Current known gap
 
@@ -175,18 +186,26 @@ header-bold, run once per model. A reviewer simulated it against measured Haiku 
 and got `SHIPS: claude-haiku-4-5` in 277 of 400 runs — a coin flip on the decision the
 instrument exists to make. Two changes:
 
-- `--repeat N` (default 3) runs every label N times. A model's warning reading is
-  stochastic; one pass cannot tell a reliable model from a lucky one.
-- The sweep now names no winner at all unless every warning posture
-  (`header_not_all_caps`, `header_not_bold`, `body_bold`, `text_altered`,
-  `warning_absent`) has at least `MIN_SAMPLES_PER_POSTURE` samples. It prints the sample
-  count per posture alongside the error rate that would still go unseen at that count —
-  at one sample, 95%.
+- The sweep names no winner unless every warning posture (`header_not_all_caps`,
+  `header_not_bold`, `body_bold`, `text_altered`, `warning_absent`) is exercised by at
+  least `MIN_FIXTURES_PER_POSTURE` **distinct fixtures**.
+- `--repeat N` (default `MIN_RUNS_PER_FIXTURE` = 3) runs every label N times. A model's
+  warning reading is stochastic; one pass cannot tell a reliable model from a lucky one.
 
-On this branch `header_not_bold` has **zero** fixtures, so the sweep correctly reports
-`NO RECOMMENDATION` rather than blessing a tier. The fixture that closes it
-(`tc03b_non_bold_warning_header`) is on `wave/warning`; merging it, plus the default
-`--repeat 3`, restores a recommendation backed by evidence.
+**Repeats are not evidence, and the gate no longer treats them as such.** The first
+version multiplied the fixture count by `--repeat`, so the default cleared its own
+threshold: at `--repeat 100` the artifact read `body_bold 100 sample(s) — an error rate up
+to 3% would go unseen`, from a single PNG. Re-sending one image is the opposite of an
+independent read — a model that misreads a rendering misreads it every time — and a
+re-simulation put that deterministic case at 53% of runs still shipping Haiku. The
+blind-spot figure is now computed from distinct fixtures alone, and the report prints both
+numbers (`2 fixture(s) x 3 run(s)`) so a reader can tell two labels from one label sent
+twice.
+
+On this branch `header_not_bold` has **zero** fixtures and every other posture has one, so
+the sweep reports `NO RECOMMENDATION` rather than blessing a tier. Closing it needs a
+second distinct fixture per posture; `tc03b_non_bold_warning_header` on `wave/warning` is
+the first of them.
 
 The warn-FP column reads `false passes / violation rows checked`, because `0` alone reads
 identically whether it was 0-of-4 or 0-of-1.
