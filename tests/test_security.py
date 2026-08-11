@@ -279,51 +279,34 @@ def test_the_real_app_is_hardened_end_to_end() -> None:
     assert response.headers["content-security-policy"] == CONTENT_SECURITY_POLICY
 
 
-# --- is the posture actually switched on? (the finding this block exists for) --------------
+# --- is the posture actually switched on? -------------------------------------------------
 #
-# Every other test in this wave builds its own app and installs the posture itself, so all
-# of them pass whether or not `api/main.py` calls `harden`. That makes the entire security
-# posture — CSP, rate limiting, CORS, containment, retention — a fully tested, fully
-# documented no-op if two wiring lines are dropped, and nothing goes red.
+# Every other test in this file builds its own app and installs the posture itself, so all
+# of them pass whether or not `api/main.py` calls `harden`. That is how the entire security
+# posture — CSP, rate limiting, CORS, containment, retention — came to be a fully tested,
+# fully documented no-op in the shipped app with nothing going red.
 #
-# These tests take the app exactly as the process serves it and assert the controls are
-# live. `api/main.py` belongs to another agent this wave, so they are marked `xfail(strict)`
-# rather than committed red: today they XFAIL and the suite stays green; the moment the
-# wiring lands they XPASS, which under `strict=True` fails the suite and says in the failure
-# message to delete the marker. Neither direction can happen quietly, which is the point.
-#
-# If the wiring is already in place when you read this: delete `_UNWIRED` and the four
-# decorators below. That is the whole change.
-
-_UNWIRED = pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "api/main.py does not call api.security.harden, so the shipped app has no CSP, no "
-        "rate limiting, no CORS enforcement, no exception containment and no retention "
-        "sweeper. If this XPASSes, the wiring has landed — delete _UNWIRED and its four "
-        "decorators in tests/test_security.py."
-    ),
-)
+# These four take the app exactly as the process serves it and assert the controls are live.
+# They are the only tests here that can see the wiring, so if `api/main.py` ever stops
+# calling `harden`, this is what fails. Do not give any of them their own `harden()` call to
+# make them pass; that is precisely the mistake they exist to catch.
 
 
-def as_shipped() -> FastAPI:
+def as_shipped(**config_overrides: Any) -> FastAPI:
     """The app the way `api/main.py` builds it, with nothing added by the test."""
-    return create_app(config=make_config())
+    return create_app(config=make_config(**config_overrides))
 
 
-@_UNWIRED
 def test_the_shipped_app_records_a_security_policy() -> None:
     assert getattr(as_shipped().state, "security_policy", None) is not None
 
 
-@_UNWIRED
 def test_the_shipped_app_sends_a_content_security_policy() -> None:
     response = TestClient(as_shipped()).get("/health")
     assert response.headers.get("content-security-policy") == CONTENT_SECURITY_POLICY
     assert response.headers.get("x-frame-options") == "DENY"
 
 
-@_UNWIRED
 def test_the_shipped_app_refuses_a_foreign_origin_write() -> None:
     response = TestClient(as_shipped()).post(
         "/verify", headers={"Origin": "https://evil.example"}
@@ -331,14 +314,28 @@ def test_the_shipped_app_refuses_a_foreign_origin_write() -> None:
     assert response.status_code == 403
 
 
-@_UNWIRED
-def test_the_shipped_app_rate_limits_and_sweeps() -> None:
-    app = as_shipped()
-    app.state.config = make_config(rate_limit_per_minute=2)
-    client = TestClient(app)
+def test_the_shipped_app_rate_limits() -> None:
+    """The limit has to be passed to `create_app`, not set on `app.state` afterwards.
+
+    `RateLimitMiddleware` is constructed inside `harden` from the config it is handed, so
+    assigning `app.state.config` after the factory returned changed nothing — the middleware
+    already held the default 30/min and six requests never reached it. This canary could not
+    pass even with the wiring in place, which would have sent whoever deleted the xfail
+    markers hunting for a fault in the limiter that was not there.
+    """
+    client = TestClient(as_shipped(rate_limit_per_minute=2))
     statuses = [client.post("/verify").status_code for _ in range(6)]
-    assert 429 in statuses
-    assert getattr(app.state, "retention_sweeper", None) is not None
+    assert 429 in statuses, f"the shipped app is not rate limiting: {statuses}"
+
+
+def test_the_shipped_app_installs_the_retention_sweeper() -> None:
+    """Split out of the rate-limit canary, where it sat below a failing assertion and was
+    therefore unreachable — an assertion that cannot run is an assertion that is not made."""
+    app = as_shipped()
+    sweeper = getattr(app.state, "retention_sweeper", None)
+    assert sweeper is not None
+    with TestClient(app):
+        assert sweeper.running, "the sweeper is installed but never started"
 
 
 # --- strict CORS (LP-082) ----------------------------------------------------------------

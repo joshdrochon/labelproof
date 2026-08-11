@@ -37,6 +37,7 @@ from api import logging as applog
 from api.config import Config, load
 from api.provider.base import ExtractionProvider, ProviderError
 from api.routes import health, sample, verify
+from api.security import harden
 
 _WEB_DIST = Path(__file__).resolve().parents[1] / "web" / "dist"
 
@@ -90,6 +91,17 @@ def create_app(
         applog.warn("config_incomplete")
 
     _install_middleware(app)
+    # Rate limiting, security headers, strict CORS, traceback containment and the retention
+    # sweeper, all from one call (SEC-2, SEC-4, SEC-6, SEC-9).
+    #
+    # It goes AFTER `_install_middleware` and that is load-bearing. Starlette builds the
+    # user middleware stack so the last one added is the outermost, which is what puts the
+    # security headers on responses no route ever saw — the oversize-upload 413 above is
+    # one — and what lets the containment layer catch an exception before Starlette's
+    # `ServerErrorMiddleware` re-raises it into uvicorn's default traceback handler. That
+    # re-raise is how label text reaches stdout, and `api/logging.py`'s allowlist cannot
+    # see that path.
+    harden(app, resolved)
     _install_error_handlers(app)
 
     app.include_router(health.router)
