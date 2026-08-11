@@ -145,15 +145,12 @@ ban-relative-imports = "parents"
 "tests/test_compare.py" = ["RUF001"]
 "fixtures/generator/catalog.py" = ["RUF001"]
 
-# --- resilience boundaries: catching everything is the requirement --------------------
-# These three modules exist to turn *any* failure into a structured, user-facing outcome.
-# A blind `except Exception` here is ENG-4/NET-3/BATCH-6 being satisfied, not ignored:
-#   worker.py  — one bad item must never kill a 300-item batch (BATCH-6)
-#   health.py  — /ready reports the provider as unreachable; it must not itself 500 (NET-5)
-#   verify.py  — provider down degrades to a sentence, never a stack trace (TC-21, NET-3)
-"api/batch/worker.py" = ["BLE001"]
-"api/routes/health.py" = ["BLE001"]
-"api/routes/verify.py" = ["BLE001"]
+# NOTE ON BLE001: there is deliberately no per-file exception for it. The seven blind
+# catches in api/batch/worker.py, api/routes/health.py and api/routes/verify.py are
+# resilience boundaries (BATCH-6, NET-5, NET-3) and each carries its own `# noqa: BLE001`
+# with the reason. A whole-file ignore would have covered exactly those seven and nothing
+# else, which makes the rule permanently silent in a 700-line worker — it would look
+# enabled and never be able to fail.
 
 # --- bandit exceptions ----------------------------------------------------------------
 # S101: pytest's entire assertion model is `assert`. Banning it in tests is nonsense.

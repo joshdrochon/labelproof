@@ -362,7 +362,7 @@ def _estimated_usd(cost: Cost) -> float:
                 input_tokens=cost.input_tokens, output_tokens=cost.output_tokens
             )
         )
-    except Exception:
+    except Exception:  # noqa: BLE001 - a confidence estimate is decoration; never fail a verify for it
         return 0.0
 
 

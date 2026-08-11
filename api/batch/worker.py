@@ -320,7 +320,7 @@ def process(
     """
     try:
         result = verify_item(item, store, config, provider)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - per-item isolation: one bad item must not kill the batch (BATCH-6)
         retryable = isinstance(exc, ProviderError) and exc.retryable
         if retryable and item.attempts < max_attempts:
             store.requeue(item.item_id)
@@ -336,7 +336,7 @@ def process(
         failure = _failure_for(exc, item.attempts)
         try:
             store.fail(item.item_id, failure)
-        except Exception:
+        except Exception:  # noqa: BLE001 - the store is down; log and keep the worker alive (BATCH-6)
             applog.error(
                 "batch_item_unrecorded",
                 job_id=item.job_id,
@@ -354,7 +354,7 @@ def process(
 
     try:
         store.complete(item.item_id, result)
-    except Exception:
+    except Exception:  # noqa: BLE001 - the store is down; log and keep the worker alive (BATCH-6)
         applog.error("batch_item_unrecorded", job_id=item.job_id, item_id=item.item_id)
         return ItemState.FAILED
 
@@ -442,11 +442,11 @@ class WorkerPool:
             provider: ExtractionProvider = _BudgetedProvider(
                 self.provider_factory(item.images), self.budget
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - a provider that cannot even be constructed fails one item
             try:
                 store_failure = _failure_for(exc, item.attempts)
                 self.store.fail(item.item_id, store_failure)
-            except Exception:
+            except Exception:  # noqa: BLE001 - recording the failure failed; nothing left to do but log
                 applog.error("batch_item_unrecorded", job_id=item.job_id, item_id=item.item_id)
             return
 
