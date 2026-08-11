@@ -13,6 +13,7 @@ glare, which is exactly the regression worth catching.
 import hashlib
 import json
 from pathlib import Path
+from unittest import mock
 
 import numpy as np
 import pytest
@@ -28,7 +29,7 @@ from fixtures.generator.catalog import by_name
 from fixtures.generator.layout import FIELD_BANDS
 from fixtures.generator.render import render
 from fixtures.generator.spec import LabelSpec
-from scripts import calibrate_quality, robustness_eval
+from scripts import calibrate_quality, compression_sweep, robustness_eval
 
 CLEAN = degrade.BASE_FIXTURE
 ROBUSTNESS_DIR = Path(__file__).resolve().parents[1] / "fixtures" / "robustness"
@@ -580,3 +581,115 @@ def test_tier_b_calibration_says_it_is_the_honest_number(photo_dir: Path) -> Non
         calibrate_quality.sweep_all(["HOPELESS"], photos=photo_dir)
     )
     assert "never averaged with Tier A" in text
+
+
+# --- LP-322 · client encode quality --------------------------------------------------------
+
+@pytest.fixture(scope="module")
+def compression() -> compression_sweep.Sweep:
+    """WebP only, and the four levels these assertions actually read.
+
+    The full sweep is six levels across two formats over fifteen conditions, which is
+    thirty-odd seconds — worth paying when someone is deciding the encode setting, not
+    worth paying on every CI run (LP-247). The computation per level is identical either
+    way, so what is asserted here is what the full run reports.
+    """
+    with mock.patch.object(compression_sweep, "QUALITIES", (100, 95, 90, 85)), \
+         mock.patch.object(compression_sweep, "FORMATS", ("WEBP",)):
+        return compression_sweep.sweep()
+
+
+def test_the_sweep_covers_the_qualities_the_ticket_names(
+    compression: compression_sweep.Sweep,
+) -> None:
+    """q95/q85/q75, plus the shipped setting and a lossless control. Without the control
+    a small loss and a large one are indistinguishable — there is nothing to be a loss
+    *from*."""
+    for level in (95, 85, 75, 100):
+        assert level in compression_sweep.QUALITIES
+
+
+def test_compression_is_measured_on_the_warning_region(
+    compression: compression_sweep.Sweep,
+) -> None:
+    """Not on the whole image. The warning is the smallest type on the label, so a
+    whole-image measure averages it against a 72-point brand name and reports nothing."""
+    band = FIELD_BANDS[FieldName.GOVERNMENT_WARNING]
+    clean = np.array(render(by_name(degrade.BASE_FIXTURE)))
+    assert compression_sweep.warning_legibility(clean) == quality.assess_region(clean, band).blur
+
+
+def test_harder_compression_costs_the_warning_more(
+    compression: compression_sweep.Sweep,
+) -> None:
+    """A sweep where the numbers did not move with the setting would be measuring
+    nothing."""
+    webp = {level.quality: level for level in compression.for_format("WEBP")}
+    assert webp[85].warning_loss > webp[95].warning_loss
+
+
+def test_the_shipped_setting_is_inside_the_measured_safe_range(
+    compression: compression_sweep.Sweep,
+) -> None:
+    """web/src/api.ts pins WEBP quality 0.95. This is the evidence behind that number, and
+    it goes red if the measurement ever stops supporting it."""
+    shipped = next(
+        level for level in compression.for_format("WEBP") if level.quality == 95
+    )
+    assert shipped.safe
+    assert shipped.false_passes == 0
+
+
+def test_the_previous_setting_was_measurably_worse(
+    compression: compression_sweep.Sweep,
+) -> None:
+    """0.90 was the shipped value before this sweep existed. Recording *why* it moved
+    matters more than the move: the number was picked, and then it was measured."""
+    previous = next(
+        level for level in compression.for_format("WEBP") if level.quality == 90
+    )
+    assert previous.lossy_for_the_warning
+
+
+def test_a_level_with_a_false_pass_is_never_safe() -> None:
+    level = compression_sweep.Level(
+        fmt="WEBP",
+        quality=10,
+        median_bytes=1,
+        warning_score=0.9,
+        warning_loss=0.0,
+        false_passes=1,
+        false_flags=0,
+    )
+    assert not level.safe
+
+
+def test_the_recommendation_steps_back_from_the_edge(
+    compression: compression_sweep.Sweep,
+) -> None:
+    """Real photographs carry sensor noise, which compresses worse. Sitting on the
+    boundary of a synthetic measurement and calling it calibrated is how the warning ends
+    up unreadable on the one upload that mattered."""
+    recommended = compression.recommended("WEBP")
+    cheapest_safe = min(
+        (level for level in compression.for_format("WEBP") if level.safe),
+        key=lambda level: level.quality,
+        default=None,
+    )
+    assert recommended and cheapest_safe
+    assert recommended.quality >= cheapest_safe.quality
+
+
+def test_the_report_does_not_call_the_proxy_accuracy(
+    compression: compression_sweep.Sweep,
+) -> None:
+    """A proxy named as a proxy is useful. A proxy reported as accuracy is a lie with a
+    number attached — there is no model in this harness."""
+    text = compression_sweep.render(compression)
+    assert "not model accuracy" in text
+
+
+def test_the_sweep_runs_as_a_command() -> None:
+    with mock.patch.object(compression_sweep, "QUALITIES", (100, 85)), \
+         mock.patch.object(compression_sweep, "FORMATS", ("WEBP",)):
+        assert compression_sweep.main(["--json"]) == 0

@@ -26,7 +26,23 @@ import type {
 import { ERROR_FALLBACK } from './copy';
 
 const LONG_EDGE = 2576;
-const WEBP_Q = 0.9;
+
+/**
+ * Measured, not picked. `python -m scripts.compression_sweep` encodes every robustness
+ * fixture at each quality and reports what survives in the government warning's region —
+ * the smallest type on the label and the one field where being wrong is disqualifying.
+ *
+ * At 0.90 that region measurably degrades (0.049 of legibility score against a lossless
+ * control, against a 0.02 tolerance) and 0.85 starts flagging readable labels. At 0.95 the
+ * loss is 0.013 and nothing changes outcome. The extra ~8KB per image is a latency cost
+ * paid once; a warning statement compressed past reading is a compliance failure, and
+ * there is no exchange rate between those two.
+ *
+ * Caveat on the evidence: the sweep runs libwebp through Pillow on generated labels, and
+ * the browser runs libwebp through Chrome on photographs. Close, not identical. Re-run
+ * against Tier B before lowering this.
+ */
+const WEBP_Q = 0.95;
 
 /** An error already phrased for an agent. Every throw out of this module is one. */
 export class ApiFailure extends Error {
