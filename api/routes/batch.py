@@ -328,7 +328,10 @@ def _read_archive(
     """
     try:
         archive = zipfile.ZipFile(path)
-    except zipfile.BadZipFile as exc:
+    except Exception as exc:
+        # Broader than BadZipFile on purpose. A half-copied archive can raise EOFError or
+        # OSError from the central-directory read just as easily, and every one of those
+        # is the same fact for the agent: this file did not open.
         raise errors.UserError(
             f"“{_safe_name(name)}” could not be opened as a zip file. Re-create "
             f"the archive, or upload the images individually.",
@@ -365,7 +368,29 @@ def _read_archive(
                     next_step="resize",
                     code="file_too_large",
                 )
-            out.append((clean, landing.unpack(archive, entry, config.max_image_bytes)))
+            try:
+                out.append((clean, landing.unpack(archive, entry, config.max_image_bytes)))
+            except errors.LabelProofError:
+                # The batch is over its size cap. That is our refusal, not a bad entry.
+                raise
+            except Exception as exc:
+                # Decompression is where a damaged archive actually fails, and it fails in
+                # a different way every time: BadZipFile for a bad CRC, EOFError for a
+                # truncated stream, RuntimeError for an encrypted entry,
+                # NotImplementedError for WinZip AES. Every one of them used to leave here
+                # as a 500 saying "something went wrong on our side" with next_step=retry —
+                # advice that is both wrong and infinitely repeatable, for a fault that is
+                # in the agent's file and fixable by re-exporting it. A 1.2 GB dump copied
+                # off a flaky share hits this routinely.
+                raise errors.UserError(
+                    f"“{clean}” inside that archive could not be read. The archive is "
+                    f"damaged, or that file is compressed in a way this tool cannot open — "
+                    f"encrypted archives are not supported. Re-create the archive from the "
+                    f"original images, or upload them individually. Nothing has been "
+                    f"checked.",
+                    next_step="replace",
+                    code="unreadable_archive_entry",
+                ) from exc
     return out
 
 

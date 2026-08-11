@@ -1236,6 +1236,87 @@ def test_an_archive_entry_cannot_write_outside_the_job_directory(tmp_path: Path)
     assert not (tmp_path.parent / GOOD_IMAGE).exists()
 
 
+def zip_with_corrupt_entry() -> bytes:
+    """A zip whose central directory is fine and whose compressed stream is not.
+
+    This is what a 1.2 GB dump copied off a flaky share looks like: the archive opens, the
+    listing is right, and one entry blows up on decompression.
+    """
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr(GOOD_IMAGE, GOOD_BYTES)
+    raw = bytearray(buffer.getvalue())
+    middle = len(raw) // 2
+    for offset in range(middle, middle + 40):
+        raw[offset] ^= 0xFF
+    return bytes(raw)
+
+
+def zip_with_unsupported_compression() -> bytes:
+    """compress_type 99 — WinZip AES. `zipfile` raises NotImplementedError on read."""
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_STORED) as archive:
+        archive.writestr(GOOD_IMAGE, GOOD_BYTES)
+    raw = bytearray(buffer.getvalue())
+    raw[8:10] = (99).to_bytes(2, "little")
+    central = raw.rfind(b"PK\x01\x02")
+    raw[central + 10 : central + 12] = (99).to_bytes(2, "little")
+    return bytes(raw)
+
+
+def zip_with_truncated_entry() -> bytes:
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr(GOOD_IMAGE, GOOD_BYTES)
+    raw = buffer.getvalue()
+    central = raw.rfind(b"PK\x01\x02")
+    return raw[: central - 60] + raw[central:]
+
+
+@pytest.mark.parametrize(
+    "archive",
+    [
+        pytest.param(zip_with_corrupt_entry(), id="corrupt-deflate"),
+        pytest.param(zip_with_unsupported_compression(), id="unsupported-compression"),
+        pytest.param(zip_with_truncated_entry(), id="truncated-entry"),
+    ],
+)
+def test_an_unreadable_archive_entry_is_a_user_error_not_a_500(
+    tmp_path: Path, archive: bytes
+) -> None:
+    """The archive opens and the listing is fine — it is decompression that fails.
+
+    Every one of these left as a 500 saying "something went wrong on our side" with
+    next_step=retry: advice that is wrong, infinitely repeatable, and hides the one fact
+    that would let the agent act — that a named file in their archive is damaged. It also
+    contradicts the rule stated at the top of `api/main.py`, that no path out of this app
+    emits a framework default.
+    """
+    client = make_client(tmp_path)
+    response = post_batch(client, [row()], images={}, archive=archive)
+
+    assert response.status_code == 400
+    error = response.json()["error"]
+    assert error["kind"] == "user"
+    assert error["code"] == "unreadable_archive_entry"
+    assert error["next_step"] == "replace"
+    assert GOOD_IMAGE in error["message"], "the agent is not told which file is bad"
+    assert "went wrong on our side" not in error["message"]
+
+
+def test_an_over_cap_batch_inside_an_archive_is_still_a_size_refusal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The entry-read guard must not swallow our own refusals into "damaged archive"."""
+    monkeypatch.setattr(batch_routes, "MAX_TOTAL_BYTES", 1024)
+    client = make_client(tmp_path)
+    response = post_batch(
+        client, [row()], images={}, archive=zip_of({GOOD_IMAGE: GOOD_BYTES})
+    )
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "batch_too_large"
+
+
 def test_a_corrupt_archive_is_answered_in_plain_language(tmp_path: Path) -> None:
     client = make_client(tmp_path)
     response = post_batch(client, [row()], images={}, archive=b"not a zip file")
