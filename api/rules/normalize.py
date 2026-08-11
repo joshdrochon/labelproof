@@ -30,7 +30,7 @@ _QUOTE_MAP = str.maketrans(
 
 _HYPHEN_LINEBREAK = re.compile(r"(\w)-\s*\n\s*(\w)")
 _WHITESPACE = re.compile(r"\s+")
-_TERMINAL_PUNCT = re.compile(r"[.,;:!?]+$")
+_TERMINAL_PUNCT = re.compile(r"[.,;:!?\s]+$")
 
 
 class Variation(StrEnum):
@@ -83,6 +83,14 @@ def collapse_whitespace(value: str) -> str:
 
 
 def strip_terminal_punctuation(value: str) -> str:
+    """Drop trailing sentence punctuation, and any whitespace tangled up in it.
+
+    The whitespace matters for idempotency. Stripping punctuation alone leaves `". !"`
+    as `". "`, which the following whitespace collapse turns into `"."` — trailing
+    punctuation again, so a second pass through `normalize` returns something different
+    from the first. Taking punctuation and spaces together in one bite reaches the same
+    fixed point on the first pass.
+    """
     return _TERMINAL_PUNCT.sub("", value)
 
 
