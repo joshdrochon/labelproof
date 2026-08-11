@@ -35,9 +35,23 @@
 # runs on machines with an extra tool installed is one nobody exercises by hand before
 # the day they need it.
 #
+# Must be run from a checkout. The latency checks import `api/config.py` to compare the
+# deployed budget against the configured model's measured latency, so the repository has
+# to be on disk — the script locates it from its own path, not the working directory, so
+# any directory is fine. Without a checkout those checks FAIL rather than warn; they are
+# the ones that catch the 503-on-every-verification class, and skipping them quietly
+# would leave the deploy gate green on a deployment nobody verified.
+#
 # Exit code 0 means the release is good.
 
 set -Eeuo pipefail
+
+# Resolved from the script's own location, not the working directory. The budget checks
+# below import `api/config.py`, and an earlier version did `sys.path.insert(0, ".")` —
+# so running this from anywhere but the repository root silently skipped them and
+# reported a warning nobody reads. A guardrail that only works from one directory is a
+# guardrail with a footnote.
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 
 BASE_URL="${1:-${SMOKE_BASE_URL:-}}"
 
@@ -62,26 +76,37 @@ BUDGET_GRACE_MS="${SMOKE_BUDGET_GRACE_MS:-2000}"
 # it is a backstop against an absurd value, not a second budget.
 MAX_ADVERTISED_BUDGET_MS="${SMOKE_MAX_BUDGET_MS:-30000}"
 
-# Measured single-call latency for an extraction model, used to assert that the request
-# budget is large enough for the model in front of it.
+# The deadline `api/config.py` would derive for a model, and whether that model is one it
+# has actually measured.
 #
-# Read from `api/config.py`, which owns the table and sizes its own budgets from it. A
-# second copy of these numbers here would be one more pair of files that can disagree —
-# and disagreement between a budget and a model's real latency is the specific bug this
-# check exists to catch, so duplicating the numbers to check them would be absurd.
+# Read from the app rather than copied here. A second table of latencies would be one more
+# pair of files that can disagree, and disagreement between a budget and a model's real
+# latency is the exact bug this check exists to catch.
 #
-# Falls back to 0 ("unknown, cannot assert") when run from outside a checkout, rather than
-# to a guess.
-model_p50_ms() {
-  python3 - "$1" <<'PY' 2>/dev/null || echo 0
+# TWO THINGS THIS RETURNS, and both matter:
+#
+#   `derived`  — `default_provider_timeout_ms`, i.e. the measured median WITH headroom.
+#                Comparing against the bare median is not enough: with opus-5 measuring
+#                9,600 ms, a 9,700 ms deadline clears the median, boots clean, and times
+#                out roughly half of real verifications. A single smoke sample makes that
+#                a coin flip. The derived value is the number the app itself considers
+#                safe, so that is what the deployment is held to.
+#   `known`    — whether the model is in the table at all. `measured_latency_ms` returns a
+#                generous placeholder for anything unrecognised, so a bare number cannot
+#                distinguish "measured" from "guessed" — and a fabricated floor reported
+#                as a pass is worse than no check.
+#
+# Emits "<derived> <known>", or nothing at all if the app cannot be imported.
+model_budget_facts() {
+  python3 - "$1" "$SCRIPT_DIR" <<'PY' 2>/dev/null
 import sys
-sys.path.insert(0, ".")
-try:
-    from api.config import measured_latency_ms
-except Exception:
-    print(0)
-else:
-    print(measured_latency_ms(sys.argv[1]))
+
+sys.path.insert(0, sys.argv[2])
+from api.config import MEASURED_EXTRACTION_MS, default_provider_timeout_ms
+
+model = sys.argv[1]
+known = any(model.startswith(name) for name in MEASURED_EXTRACTION_MS)
+print(f"{default_provider_timeout_ms(model)} {'yes' if known else 'no'}")
 PY
 }
 
@@ -247,13 +272,23 @@ else
     fail "advertised budget ${ADVERTISED_BUDGET_MS} ms is past the ${MAX_ADVERTISED_BUDGET_MS} ms sanity ceiling — a budget cannot be widened until nothing fails"
   fi
 
-  measured="$(model_p50_ms "$MODEL")"
-  if [[ "$measured" -eq 0 ]]; then
-    warn "no measured latency on record for '${MODEL}' — cannot confirm the budget fits it. Add it to model_p50_ms() after the next spike."
-  elif [[ "$ADVERTISED_BUDGET_MS" -lt "$measured" ]]; then
-    fail "request budget ${ADVERTISED_BUDGET_MS} ms is BELOW the measured ${measured} ms latency of ${MODEL} — every real verification will time out and return 503"
+  facts="$(model_budget_facts "$MODEL" || true)"
+  if [[ -z "$facts" ]]; then
+    # Not a warning. This is one of the two checks that would have caught the 503 that
+    # shipped, and silently skipping it leaves the deploy gate green on a deployment
+    # nobody verified.
+    fail "could not read the latency table from ${SCRIPT_DIR}/api/config.py, so the budget cannot be checked against the model. Run this from a checkout of the repository."
   else
-    pass "budget ${ADVERTISED_BUDGET_MS} ms clears the measured ${measured} ms for ${MODEL}"
+    derived="${facts%% *}"
+    known="${facts##* }"
+
+    if [[ "$known" != "yes" ]]; then
+      fail "'${MODEL}' has never been timed — api/config.py falls back to a placeholder latency for it, so any 'budget clears measured' result here would be fabricated. Time it (scripts/spike_latency.py) and add it to MEASURED_EXTRACTION_MS before deploying on it."
+    elif [[ "$ADVERTISED_BUDGET_MS" -lt "$derived" ]]; then
+      fail "request budget ${ADVERTISED_BUDGET_MS} ms is below the ${derived} ms api/config.py derives for ${MODEL}. Clearing the bare median is not enough — a deadline a shade above the median times out roughly half of real verifications, and a single sample here would be a coin flip."
+    else
+      pass "budget ${ADVERTISED_BUDGET_MS} ms clears the ${derived} ms derived for ${MODEL}"
+    fi
   fi
 
   # PERF-1 is a product goal, reported every run so the gap cannot become invisible.
@@ -362,9 +397,10 @@ else
     # that, is not an outage — it is a deadline that was set too short, and saying
     # "provider unavailable" sends whoever is on call to check the wrong system.
     error_code="$(json "$verify" "d['error']['code']")"
-    measured="$(model_p50_ms "$MODEL")"
-    if [[ "$error_code" == "provider_unavailable" && "$measured" -gt 0 && "$elapsed_ms" -lt "$measured" ]]; then
-      fail "DIAGNOSIS: the request failed after ${elapsed_ms} ms while ${MODEL} measures ~${measured} ms. The provider deadline expired before the model answered. Raise LABELPROOF_PROVIDER_TIMEOUT_MS and LABELPROOF_REQUEST_BUDGET_MS (pinned in fly.toml), or move to a faster model. The provider is not down."
+    facts="$(model_budget_facts "$MODEL" || true)"
+    derived="${facts%% *}"
+    if [[ "$error_code" == "provider_unavailable" && -n "$derived" && "$elapsed_ms" -lt "$derived" ]]; then
+      fail "DIAGNOSIS: the request failed after ${elapsed_ms} ms, inside the ${derived} ms deadline api/config.py derives for ${MODEL}. The provider deadline expired before the model answered. Raise LABELPROOF_PROVIDER_TIMEOUT_MS and LABELPROOF_REQUEST_BUDGET_MS (pinned in fly.toml), or move to a faster model. The provider is not down."
     fi
   else
     pass "/verify 200"

@@ -261,11 +261,15 @@ def test_keepwarm_is_enabled_and_pings_inside_the_cache_ttl(fly: dict[str, Any])
 def test_the_latency_budget_fits_the_model_production_will_actually_call() -> None:
     """The regression that shipped a production where every real /verify returned 503.
 
-    Cross-checks three independent sources rather than reading one of them back:
-    `api/config.py` for the model production will run, `scripts/smoke.sh` for that
-    model's measured latency, and `fly.toml` for the deadline it is given. A default
-    sized for one model and silently applied to another is invisible in any single file,
-    which is exactly why it survived to production.
+    Cross-checks two sources that cannot see each other: `api/config.py` for the model
+    production runs and the deadline it derives for that model, and `fly.toml` for the
+    deadline production is actually given. A default sized for one model and silently
+    applied to another is invisible in either file alone, which is why it survived.
+
+    (The docstring used to claim a third source, `scripts/smoke.sh`, for the measured
+    latency. That was true before smoke.sh was de-duplicated to read the same table out of
+    `api/config.py` — it has been two sources ever since, and saying three overstated the
+    independence of the check.)
     """
     from api.config import Config, measured_latency_ms
 

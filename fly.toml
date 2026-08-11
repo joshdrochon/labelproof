@@ -92,7 +92,12 @@ kill_timeout = "15s"
   # turns it into a rollback trigger the day it is met.
   LABELPROOF_PROVIDER_TIMEOUT_MS = "19200"
   LABELPROOF_REQUEST_BUDGET_MS = "20700"
-  LABELPROOF_ADJUDICATION_RESERVE_MS = "1500"
+
+  # LABELPROOF_ADJUDICATION_RESERVE_MS is deliberately NOT set. `api/config.py` parses it
+  # and nothing in `api/` reads it — Tier-3 adjudication is not wired to a time reserve
+  # yet. Pinning it here would present a dead knob as a production setting in a block
+  # whose stated purpose is "what production needs to differ on", which is how a reader
+  # ends up tuning a value that does nothing. Set it when something consumes it.
 
   # Keep-warm and prompt-cache pre-warm (LP-134, LP-324). Opt-in by design — the same
   # image run locally makes no paid API calls. The interval is under the provider's
