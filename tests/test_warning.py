@@ -950,6 +950,11 @@ def _import_closure(*modules: str) -> set[str]:
     `from api.rules import compare` to this path and `compare` reaches a threshold two
     hops away — which is exactly how a knob gets into the warning path without anybody
     deciding to put one there.
+
+    Relative imports count too. `from . import thresholds` has `node.module is None` and
+    `node.level == 1`, so a walker that filters on the module name skips it entirely —
+    and ruff's current rule selection does not ban relative imports, so nothing else
+    would catch it either.
     """
     import ast
     from pathlib import Path
@@ -966,11 +971,22 @@ def _import_closure(*modules: str) -> set[str]:
         path = package.parent / (name.replace(".", "/") + ".py")
         if not path.exists():
             continue
+        parent = name.rsplit(".", 1)[0]
         for node in ast.walk(ast.parse(path.read_text())):
             if isinstance(node, ast.Import):
                 queue += [a.name for a in node.names if a.name.startswith("api")]
-            elif isinstance(node, ast.ImportFrom) and (node.module or "").startswith("api"):
-                base = node.module or ""
+            elif isinstance(node, ast.ImportFrom):
+                if node.level:
+                    # `from . import x` / `from ..rules import x`, resolved against the
+                    # importing module's own package.
+                    anchor = parent
+                    for _ in range(node.level - 1):
+                        anchor = anchor.rsplit(".", 1)[0] if "." in anchor else anchor
+                    base = f"{anchor}.{node.module}" if node.module else anchor
+                else:
+                    base = node.module or ""
+                if not base.startswith("api"):
+                    continue
                 queue.append(base)
                 queue += [f"{base}.{a.name}" for a in node.names]
 
@@ -985,13 +1001,21 @@ def test_the_import_closure_actually_follows_imports() -> None:
     assert "api.rules.typography" in reached
 
 
+def test_the_import_closure_sees_relative_imports() -> None:
+    """`from . import thresholds` has no module name, so a walker filtering on the name
+    skips it — and ruff does not ban relative imports, so nothing else would catch it."""
+    reached = _import_closure("api.pipeline.quality")
+    assert "api.rules.thresholds" in reached, (
+        "quality.py imports thresholds; the walker must see it however it is written"
+    )
+
+
 def test_the_warning_path_consults_no_threshold() -> None:
     """WARN-6. If a knob ever appears in this path, at any depth, this test names it.
 
     Structural rather than behavioural on purpose: a behavioural test can only cover the
-    thresholds that exist today. Note that nothing in the repo imports `thresholds` yet,
-    so this currently guards a property that holds for the whole codebase — it is here to
-    keep holding for this path specifically, whatever the rest of the engine does later.
+    thresholds that exist today. `api/pipeline/quality.py` imports the module, so this is
+    a real property of this path rather than of the whole codebase.
     """
     reached = _import_closure("api.rules.warning", "api.rules.typography")
     offenders = {name for name in reached if "thresholds" in name}
@@ -1017,13 +1041,50 @@ def test_punctuation_differences_are_not_folded_away() -> None:
 
 
 def _emitted_codes() -> set[str]:
-    """Every `code="..."` literal in the two modules that produce warning findings."""
-    import re as _re
+    """Every code the two modules can actually put in a `Finding`.
+
+    Read out of `Finding(...)` calls specifically, by AST rather than by regex, for two
+    reasons the first version got wrong.
+
+    It scraped every `code="..."` in the file, which includes `CHECK_MANIFEST` itself —
+    and `FINDING_CODES` is built from that manifest. So one direction of the check was
+    empty by construction: adding an invented row to the manifest kept all five tests
+    green, because the row was scraped as evidence for itself.
+
+    And a regex cannot see `code=f"warning_text_{comparison.kind}"`, so seven codes —
+    the entire `warning_text_*` family — existed in the scrape only because the manifest
+    declared them. Those are enumerated from the classification table they are built
+    from, which is the same source the code uses.
+    """
+    import ast
     from pathlib import Path
 
     root = Path(warning.__file__).parent
-    source = (root / "warning.py").read_text() + (root / "typography.py").read_text()
-    return set(_re.findall(r'code="([a-z_]+)"', source))
+    codes: set[str] = set()
+    for module in ("warning.py", "typography.py"):
+        for node in ast.walk(ast.parse((root / module).read_text())):
+            if not isinstance(node, ast.Call):
+                continue
+            if not (isinstance(node.func, ast.Name) and node.func.id == "Finding"):
+                continue
+            for keyword in node.keywords:
+                if keyword.arg != "code":
+                    continue
+                if isinstance(keyword.value, ast.Constant):
+                    codes.add(str(keyword.value.value))
+                elif isinstance(keyword.value, ast.JoinedStr):
+                    # `f"warning_text_{kind}"` — one code per classification.
+                    codes |= {f"warning_text_{kind}" for kind in warning._KIND_MESSAGE}
+    return codes
+
+
+def test_the_code_scraper_reads_findings_and_not_the_manifest() -> None:
+    """The guard under the guard. If this scraper ever reads CHECK_MANIFEST again, the
+    documentation check becomes an identity and stops being able to fail."""
+    emitted = _emitted_codes()
+    assert "warning_missing" in emitted            # a plain literal
+    assert "warning_text_truncated" in emitted     # from the f-string family
+    assert len(emitted) < len(warning.CHECK_MANIFEST) + 5  # not the manifest wholesale
 
 
 def test_the_manifest_lists_every_finding_the_code_can_raise() -> None:
