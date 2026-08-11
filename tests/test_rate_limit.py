@@ -25,7 +25,6 @@ from api.config import Config
 from api.middleware.ratelimit import (
     BATCH_READ_PER_MINUTE,
     BATCH_SUBMIT_PER_MINUTE,
-    DEFAULT_PER_MINUTE,
     RateLimiter,
     lane_for,
     lanes_for,
@@ -278,12 +277,63 @@ def test_verify_still_works_while_the_batch_poller_is_being_limited() -> None:
 
 
 def test_the_default_lane_is_generous_enough_for_a_page_load() -> None:
-    assert DEFAULT_PER_MINUTE >= 100
+    """Was `assert DEFAULT_PER_MINUTE >= 100` against a constant of 600 — a test that could
+    not fail. This drives an SPA cold load and several reloads instead."""
+    app, _ = _hardened(rate_limit_per_minute=30)
+    client = TestClient(app)
+
+    # index.html plus the hashed bundle and stylesheet, five times over, which is more
+    # reloading than any grader does.
+    refused = 0
+    for _ in range(5):
+        for path in ("/", "/assets/index.js", "/assets/index.css", "/sample"):
+            if client.get(path).status_code == 429:
+                refused += 1
+    assert refused == 0
 
 
-def test_the_client_header_separates_users_behind_one_proxy() -> None:
-    """On Fly every request has the same socket peer; without this it is one global bucket."""
-    app, _ = _hardened(rate_limit_per_minute=2)
+def test_a_client_supplied_header_is_ignored_by_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The default must fail CLOSED, and it did not.
+
+    The first version defaulted to trusting `Fly-Client-IP`, reasoning that on Fly the
+    socket peer is the proxy. Off Fly that header is client-supplied, so rotating it bought
+    an unlimited number of buckets: measured at 200 requests against a 3/min limit — 200
+    allowed, 0 refused, with nothing in the logs to say the limiter had stopped working.
+    A control that fails open silently is not a control.
+    """
+    monkeypatch.delenv("LABELPROOF_CLIENT_IP_HEADER", raising=False)
+    assert SecurityPolicy.from_config(Config()).client_ip_header == ""
+
+    app, policy = _hardened(rate_limit_per_minute=3)
+    assert policy.client_ip_header == ""
+    client = TestClient(app)
+
+    statuses = [
+        client.post("/verify", headers={"Fly-Client-IP": f"203.0.113.{n}"}).status_code
+        for n in range(1, 40)
+    ]
+    assert 429 in statuses, "rotating a header must not buy a fresh budget by default"
+
+    ipv6 = [
+        client.post("/verify", headers={"Fly-Client-IP": f"2001:db8::{n}"}).status_code
+        for n in range(1, 20)
+    ]
+    assert set(ipv6) == {429}, "already limited on the socket peer, header notwithstanding"
+
+
+def test_a_trusted_header_separates_users_when_an_operator_opts_in(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """On Fly every request has the same socket peer, so the opt-in has to work too.
+
+    Fly's proxy overwrites this header on every request, which is what makes trusting it
+    sound *there* and nowhere else.
+    """
+    monkeypatch.setenv("LABELPROOF_CLIENT_IP_HEADER", "fly-client-ip")
+    app, policy = _hardened(rate_limit_per_minute=2)
+    assert policy.client_ip_header == "fly-client-ip"
     client = TestClient(app)
 
     for _ in range(3):
@@ -293,6 +343,82 @@ def test_the_client_header_separates_users_behind_one_proxy() -> None:
 
     other = client.post("/verify", headers={"Fly-Client-IP": "203.0.113.99"})
     assert other.status_code == 200, "a second agent must not inherit the first one's limit"
+
+
+def test_trusting_a_header_is_announced_at_startup(
+    monkeypatch: pytest.MonkeyPatch, capfd: Any
+) -> None:
+    """A README paragraph is not where an operator discovers their rate limiter is off."""
+    from api import logging as applog
+
+    monkeypatch.setenv("LABELPROOF_CLIENT_IP_HEADER", "x-forwarded-for")
+    applog.configure()
+    _hardened(rate_limit_per_minute=30)
+
+    lines = [
+        json.loads(line) for line in capfd.readouterr().out.splitlines() if line.startswith("{")
+    ]
+    warned = [line for line in lines if line.get("event") == "rate_limit_trusts_client_header"]
+    assert warned, "trusting a header must be visible at boot"
+    assert warned[-1]["code"] == "client_supplied_header"
+    assert set(warned[-1]) <= applog.ALLOWED_FIELDS | {"ts"}
+
+
+def test_a_proxy_overwritten_header_is_announced_differently(
+    monkeypatch: pytest.MonkeyPatch, capfd: Any
+) -> None:
+    """`fly-client-ip` is sound behind Fly; `x-forwarded-for` never is. Say which."""
+    from api import logging as applog
+
+    monkeypatch.setenv("LABELPROOF_CLIENT_IP_HEADER", "fly-client-ip")
+    applog.configure()
+    _hardened(rate_limit_per_minute=30)
+
+    lines = [
+        json.loads(line) for line in capfd.readouterr().out.splitlines() if line.startswith("{")
+    ]
+    warned = [line for line in lines if line.get("event") == "rate_limit_trusts_client_header"]
+    assert warned and warned[-1]["code"] == "proxy_overwritten_header"
+
+
+def test_nothing_is_announced_when_the_safe_default_is_in_use(
+    monkeypatch: pytest.MonkeyPatch, capfd: Any
+) -> None:
+    from api import logging as applog
+
+    monkeypatch.delenv("LABELPROOF_CLIENT_IP_HEADER", raising=False)
+    applog.configure()
+    _hardened(rate_limit_per_minute=30)
+
+    lines = [
+        json.loads(line) for line in capfd.readouterr().out.splitlines() if line.startswith("{")
+    ]
+    assert not [
+        line for line in lines if line.get("event") == "rate_limit_trusts_client_header"
+    ]
+
+
+@pytest.mark.parametrize(
+    "path",
+    ["//verify", "/./verify", "/VERIFY", "/batch/../verify", "/verify/", "//.//verify"],
+)
+def test_a_normalising_proxy_cannot_move_verify_into_the_cheap_lane(path: str) -> None:
+    """All of these 404 in Starlette today, so this is not exploitable in the shipped app.
+
+    It becomes exploitable the instant anything that normalises paths sits in front, and the
+    consequence is that `/verify` — the expensive route, the one the 30/min budget exists
+    for — draws on the 600/min default lane instead.
+    """
+    assert lane_for("POST", path, LANES).name == "verify"
+
+
+def test_normalisation_does_not_move_anything_into_the_wrong_lane() -> None:
+    assert lane_for("GET", "//health//", LANES).name == "exempt"
+    assert lane_for("GET", "/batch/JOB_ABC/export.csv", LANES).name == "batch_read"
+    assert lane_for("POST", "//batch", LANES).name == "batch_submit"
+    # A path that merely starts with the same letters is not the verify route.
+    assert lane_for("POST", "/verifysomething", LANES).name == "default"
+    assert lane_for("GET", "/", LANES).name == "default"
 
 
 def test_the_rate_limit_event_carries_no_content(capfd: Any) -> None:

@@ -88,13 +88,39 @@ def lanes_for(verify_per_minute: int) -> tuple[Lane, ...]:
     )
 
 
+def normalise_path(path: str) -> str:
+    """Reduce a request path to the form the lane table matches against.
+
+    `//verify`, `/./verify` and `/VERIFY` all reach the same route through a normalising
+    proxy while reading, character for character, as something the lane table has never
+    heard of — so they would draw on the 600/min default lane instead of the 30/min verify
+    lane. Starlette 404s all three today, so this is not exploitable in the shipped app; it
+    becomes exploitable the moment anything that normalises sits in front, and the fix costs
+    a few string operations per request.
+
+    Case is folded because the lane table decides a *budget*, not a route. Being generous
+    about what draws on the expensive lane is free; being strict is a hole.
+    """
+    segments: list[str] = []
+    for segment in path.split("/"):
+        if segment in ("", "."):
+            continue
+        if segment == "..":
+            if segments:
+                segments.pop()
+            continue
+        segments.append(segment)
+    return "/" + "/".join(segments).lower() if segments else "/"
+
+
 def lane_for(method: str, path: str, lanes: tuple[Lane, ...]) -> Lane:
     """Which budget this request draws on.
 
     Kept as a function of `(method, path)` rather than a regex table so the routing rule is
-    readable next to the reason for it. `path` arrives already normalised of its trailing
-    slash by the caller.
+    readable next to the reason for it. `path` is normalised here rather than by the caller
+    so no caller can forget.
     """
+    path = normalise_path(path)
     by_name = {lane.name: lane for lane in lanes}
     if path in ("/health", "/ready"):
         return by_name["exempt"]
@@ -226,8 +252,7 @@ class RateLimitMiddleware:
             return
 
         path = str(scope.get("path") or "/")
-        normalised = path.rstrip("/") or "/"
-        lane = lane_for(str(scope.get("method") or "GET").upper(), normalised, self.limiter.lanes)
+        lane = lane_for(str(scope.get("method") or "GET").upper(), path, self.limiter.lanes)
         if lane.unlimited:
             await self.app(scope, receive, send)
             return
@@ -271,5 +296,6 @@ __all__ = [
     "RateLimiter",
     "lane_for",
     "lanes_for",
+    "normalise_path",
     "too_many_requests",
 ]

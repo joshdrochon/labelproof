@@ -146,14 +146,20 @@ class SecurityPolicy:
     #: Requests per minute per client on `/verify` (SEC-9, BUILD.md §1 default 30).
     rate_limit_per_minute: int = 30
 
-    #: Header naming the real client, checked before the socket peer.
+    #: Header naming the real client, checked before the socket peer. **Empty by default.**
     #:
-    #: Defaults to Fly's, because on Fly every request arrives from the proxy and keying on
-    #: the socket peer would put every user on earth in one 30/min bucket — which is the
-    #: "throttled the demo into looking broken" failure, not abuse protection. Fly's proxy
-    #: sets and overwrites this header, so on the deployment it is authoritative. Off Fly
-    #: with no proxy it is spoofable; set this to "" there to key on the socket peer.
-    client_ip_header: str = "fly-client-ip"
+    #: An earlier version defaulted to `fly-client-ip`, reasoning that on Fly the socket peer
+    #: is the proxy and keying on it would put every user in one bucket. That reasoning is
+    #: right about Fly and catastrophic everywhere else: a trusted header the client supplies
+    #: is a header the client can rotate, and rate limiting **fails open** — measured at
+    #: 200 requests against a 3/min limit with a rotating header, 200 allowed, 0 refused.
+    #:
+    #: Failing open is the wrong direction for a control. So the safe default is the socket
+    #: peer, which always works and can never be spoofed, and trusting a header is an
+    #: explicit operator decision that logs a warning at startup (`_warn_about_identity`).
+    #: Fly deployments set `LABELPROOF_CLIENT_IP_HEADER=fly-client-ip`, which is sound there
+    #: because Fly's proxy overwrites the header on every request.
+    client_ip_header: str = ""
 
     #: Cross-origin browsers allowed to talk to this API. Empty means same-origin only,
     #: which is the shipping configuration — the SPA is served from this very origin.
@@ -181,7 +187,7 @@ class SecurityPolicy:
         `api/config.py`, which already validates them. The handful of knobs that exist only
         for this module are read here rather than pushed into a file another wave owns.
         """
-        header = os.environ.get("LABELPROOF_CLIENT_IP_HEADER")
+        header = os.environ.get("LABELPROOF_CLIENT_IP_HEADER", "")
         origins = frozenset(
             origin.strip().rstrip("/").lower()
             for origin in os.environ.get("LABELPROOF_ALLOWED_ORIGINS", "").split(",")
@@ -191,9 +197,7 @@ class SecurityPolicy:
             rate_limit_per_minute=(
                 config.rate_limit_per_minute if config is not None else 30
             ),
-            client_ip_header=(
-                "fly-client-ip" if header is None else header.strip().lower()
-            ),
+            client_ip_header=header.strip().lower(),
             allowed_origins=origins,
             hsts=_env_flag("LABELPROOF_HSTS", True),
             contain_tracebacks=not _env_flag("LABELPROOF_DEBUG_TRACEBACKS", False),
@@ -327,6 +331,32 @@ def _scrubbed_thread_excepthook(args: threading.ExceptHookArgs) -> None:
 
 # --- the front door ------------------------------------------------------------------------
 
+#: Headers whose value the *edge proxy* sets and overwrites, so a client cannot forge them.
+#: Anything outside this set is client-supplied on at least one hop and trusting it turns
+#: the rate limiter off for anyone who notices.
+_OVERWRITTEN_BY_A_KNOWN_PROXY: frozenset[str] = frozenset({"fly-client-ip", "cf-connecting-ip"})
+
+
+def _warn_about_identity(policy: SecurityPolicy) -> None:
+    """Say out loud, at startup, when the rate limiter is trusting a header.
+
+    A README paragraph is not where an operator discovers their rate limiter is off. This
+    is a `WARNING` on stdout at boot, next to the bind line they are already reading.
+    """
+    header = policy.client_ip_header
+    if not header:
+        return
+    applog.warn(
+        "rate_limit_trusts_client_header",
+        code=(
+            "proxy_overwritten_header"
+            if header in _OVERWRITTEN_BY_A_KNOWN_PROXY
+            else "client_supplied_header"
+        ),
+        stage=header,
+        kind="internal",
+    )
+
 
 def harden(app: FastAPI, config: Config | None = None) -> SecurityPolicy:
     """Install the whole posture. Call once, from the app factory, after its own middleware.
@@ -353,6 +383,8 @@ def harden(app: FastAPI, config: Config | None = None) -> SecurityPolicy:
 
     if policy.contain_tracebacks:
         install_log_containment()
+
+    _warn_about_identity(policy)
 
     install_middleware(app, policy)
 

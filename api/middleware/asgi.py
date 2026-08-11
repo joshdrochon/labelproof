@@ -63,11 +63,26 @@ def request_origin(scope: Scope) -> str:
 
 
 def client_key(scope: Scope, ip_header: str) -> str:
-    """Who to charge this request to.
+    """Who to charge this request to. Socket peer unless an operator trusted a header.
 
-    The configured header wins when present, because behind a proxy the socket peer is the
-    proxy and keying on it collapses every user into one bucket. When it is absent — direct
-    connections, the test suite, curl against localhost — the socket peer is the answer.
+    **`ip_header` is off by default, and turning it on is a security decision.** Whatever
+    header it names is read from the request, so unless something between the client and
+    this process *overwrites* that header on every request, the client controls it and can
+    rotate it to get an unlimited number of buckets. Measured: 200 requests against a 3/min
+    limit with a rotating header, 200 allowed, 0 refused. `api/security.py` logs a warning
+    at startup whenever this is set, because a rate limiter that has silently failed open is
+    worse than one that was never installed.
+
+    Safe when the edge overwrites it: Fly (`fly-client-ip`), Cloudflare
+    (`cf-connecting-ip`). **Not safe for `x-forwarded-for`**, which is the obvious thing to
+    reach for behind nginx: it is an append-only chain, this function takes the leftmost
+    entry, and the leftmost entry is whatever the client sent. Behind a proxy that appends,
+    the value you want is the *rightmost trusted* hop, which this deliberately does not try
+    to compute — getting that wrong is how header-based identity fails quietly.
+
+    Even with an unspoofable header, per-IP limiting is per-*address*: anyone holding an
+    IPv6 /64 (which is a single residential allocation) has 2^64 of them. This raises the
+    cost of a flood; it does not make one impossible.
     """
     if ip_header:
         forwarded = header(scope, ip_header).split(",")[0].strip()
