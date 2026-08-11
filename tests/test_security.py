@@ -153,13 +153,58 @@ def test_the_csp_permits_no_external_host() -> None:
 
 
 def test_the_csp_still_allows_what_the_spa_actually_does() -> None:
-    """Blob previews and the inline styles the evidence overlay positions itself with."""
+    """Blob previews for the upload thumbnails and the off-main-thread encode worker."""
     assert "img-src 'self' blob: data:" in CONTENT_SECURITY_POLICY
     assert "worker-src 'self' blob:" in CONTENT_SECURITY_POLICY
-    # Documented in the judgment log, not slipped in: EvidenceOverlay.tsx positions each
-    # highlight with a React inline style attribute, which CSP3 blocks under a bare
-    # style-src 'self' — silently, leaving every box stacked at the top-left corner.
-    assert "style-src 'self' 'unsafe-inline'" in CONTENT_SECURITY_POLICY
+
+
+def test_the_policy_carries_no_unsafe_directive_at_all() -> None:
+    """There is no relaxation anywhere in this policy, and this is the guard on that.
+
+    An earlier version shipped `style-src 'unsafe-inline'` on the theory that the evidence
+    overlay's React inline `style` props needed it. That theory was wrong — react-dom
+    applies the `style` prop through `node.style.setProperty`, a CSSOM mutation, which CSP
+    does not govern; CSP governs style attributes parsed from markup and `<style>` elements.
+    Checked in a browser against the real built SPA under this exact policy: an injected
+    `<style>` element and an inline `<script>` were both refused (`style-src-elem`,
+    `script-src-elem`, so enforcement was genuinely on) while the evidence box still
+    computed to `left: 30.4px` and rendered over the brand name it cites.
+
+    A source check cannot see a rendering bug, so this test does not pretend to. It holds
+    the line that was hard-won: if someone adds `'unsafe-inline'` back, they have to delete
+    this and explain why in the same commit.
+    """
+    for unsafe in ("'unsafe-inline'", "'unsafe-eval'", "'unsafe-hashes'", "data: 'self' *"):
+        assert unsafe not in CONTENT_SECURITY_POLICY, f"{unsafe} is back in the CSP"
+    assert "style-src 'self';" in CONTENT_SECURITY_POLICY + ";"
+
+
+def test_only_the_evidence_overlay_uses_inline_styles() -> None:
+    """The premise of the browser check above, held in place.
+
+    The finding turned on *which* mechanism sets those styles. If a component starts
+    emitting a real inline `<style>` element or a CSS-in-JS runtime lands in `web/`, the
+    browser evidence stops applying and the CSP needs re-testing rather than re-assuming.
+    """
+    sources = list((ROOT / "web" / "src").rglob("*.tsx")) + list(
+        (ROOT / "web" / "src").rglob("*.ts")
+    )
+    assert sources, "the SPA sources should be present"
+
+    inline_style_props = {
+        path.relative_to(ROOT).as_posix()
+        for path in sources
+        if "style={{" in path.read_text()
+    }
+    assert inline_style_props == {"web/src/components/EvidenceOverlay.tsx"}, (
+        "a new inline-style user appeared; re-check the CSP in a browser before trusting "
+        "test_the_policy_carries_no_unsafe_directive_at_all"
+    )
+
+    for path in sources:
+        text = path.read_text()
+        assert "<style" not in text, f"{path.name} renders a style element — CSP governs those"
+        assert "dangerouslySetInnerHTML" not in text, f"{path.name} injects raw HTML"
 
 
 def test_hsts_is_sent_over_https_and_withheld_over_plaintext() -> None:
@@ -219,7 +264,12 @@ def test_hardening_twice_does_not_halve_the_rate_limit() -> None:
 
 
 def test_the_real_app_is_hardened_end_to_end() -> None:
-    """Not a stand-in: `create_app` plus `harden`, exercising the shipped stack."""
+    """`create_app` plus `harden`, exercising the shipped stack.
+
+    This proves the two pieces fit together. It does **not** prove the shipped app is
+    hardened, because it installs the posture itself — see the block below, which is the
+    test that actually holds `api/main.py` to account.
+    """
     app = create_app(config=make_config())
     harden(app, make_config())
     client = TestClient(app)
@@ -227,6 +277,68 @@ def test_the_real_app_is_hardened_end_to_end() -> None:
     assert response.status_code == 200
     assert response.headers["x-content-type-options"] == "nosniff"
     assert response.headers["content-security-policy"] == CONTENT_SECURITY_POLICY
+
+
+# --- is the posture actually switched on? (the finding this block exists for) --------------
+#
+# Every other test in this wave builds its own app and installs the posture itself, so all
+# of them pass whether or not `api/main.py` calls `harden`. That makes the entire security
+# posture — CSP, rate limiting, CORS, containment, retention — a fully tested, fully
+# documented no-op if two wiring lines are dropped, and nothing goes red.
+#
+# These tests take the app exactly as the process serves it and assert the controls are
+# live. `api/main.py` belongs to another agent this wave, so they are marked `xfail(strict)`
+# rather than committed red: today they XFAIL and the suite stays green; the moment the
+# wiring lands they XPASS, which under `strict=True` fails the suite and says in the failure
+# message to delete the marker. Neither direction can happen quietly, which is the point.
+#
+# If the wiring is already in place when you read this: delete `_UNWIRED` and the four
+# decorators below. That is the whole change.
+
+_UNWIRED = pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "api/main.py does not call api.security.harden, so the shipped app has no CSP, no "
+        "rate limiting, no CORS enforcement, no exception containment and no retention "
+        "sweeper. If this XPASSes, the wiring has landed — delete _UNWIRED and its four "
+        "decorators in tests/test_security.py."
+    ),
+)
+
+
+def as_shipped() -> FastAPI:
+    """The app the way `api/main.py` builds it, with nothing added by the test."""
+    return create_app(config=make_config())
+
+
+@_UNWIRED
+def test_the_shipped_app_records_a_security_policy() -> None:
+    assert getattr(as_shipped().state, "security_policy", None) is not None
+
+
+@_UNWIRED
+def test_the_shipped_app_sends_a_content_security_policy() -> None:
+    response = TestClient(as_shipped()).get("/health")
+    assert response.headers.get("content-security-policy") == CONTENT_SECURITY_POLICY
+    assert response.headers.get("x-frame-options") == "DENY"
+
+
+@_UNWIRED
+def test_the_shipped_app_refuses_a_foreign_origin_write() -> None:
+    response = TestClient(as_shipped()).post(
+        "/verify", headers={"Origin": "https://evil.example"}
+    )
+    assert response.status_code == 403
+
+
+@_UNWIRED
+def test_the_shipped_app_rate_limits_and_sweeps() -> None:
+    app = as_shipped()
+    app.state.config = make_config(rate_limit_per_minute=2)
+    client = TestClient(app)
+    statuses = [client.post("/verify").status_code for _ in range(6)]
+    assert 429 in statuses
+    assert getattr(app.state, "retention_sweeper", None) is not None
 
 
 # --- strict CORS (LP-082) ----------------------------------------------------------------
@@ -469,6 +581,46 @@ def test_containment_holds_even_if_the_exception_reaches_the_server(capfd: Any) 
     assert "RuntimeError suppressed" in combined
 
 
+def test_a_contained_500_still_carries_a_request_id() -> None:
+    """The response that most needs correlation was the one without it.
+
+    Containment sits outside the app factory's request-context middleware, so it swallowed
+    the exception before an ID was ever attached: a 500 came back with a CSP and no
+    `X-Request-ID`, while the README promised "the ID an agent reads off the screen is the
+    ID in the logs". The 429 path was given an ID deliberately; this one was missed.
+    """
+    app = hardened_app()
+
+    @app.get("/explode")
+    def explode() -> JSONResponse:
+        raise RuntimeError("something a compliance agent will phone someone about")
+
+    response = TestClient(app, raise_server_exceptions=False).get("/explode")
+    assert response.status_code == 500
+    assert response.headers["x-request-id"].startswith("req_")
+    assert response.headers["cache-control"] == "no-store"
+    assert "content-security-policy" in response.headers
+
+
+def test_the_id_on_a_contained_500_is_the_id_in_the_log(capfd: Any) -> None:
+    applog.configure()
+    app = hardened_app()
+
+    @app.get("/explode")
+    def explode() -> JSONResponse:
+        raise RuntimeError("boom")
+
+    response = TestClient(app, raise_server_exceptions=False).get("/explode")
+    lines = [
+        json.loads(line)
+        for line in capfd.readouterr().out.splitlines()
+        if line.startswith("{")
+    ]
+    unhandled = [line for line in lines if line.get("event") == "unhandled_exception"]
+    assert unhandled, "the failure should be in the log"
+    assert unhandled[-1]["request_id"] == response.headers["x-request-id"]
+
+
 def test_the_scrubbed_line_still_names_what_broke(capfd: Any) -> None:
     """Containment must not cost a developer the ability to find the bug."""
     _drive_a_failing_verification(hardened=True)
@@ -483,6 +635,90 @@ def test_the_scrubbed_line_still_names_what_broke(capfd: Any) -> None:
     assert unhandled[-1]["reason_code"] == "RuntimeError"
     assert unhandled[-1]["request_id"].startswith("req_")
     assert set(unhandled[-1]) <= applog.ALLOWED_FIELDS | {"ts"}
+
+
+def test_an_exception_passed_as_a_log_argument_is_scrubbed(capfd: Any) -> None:
+    """The gap the traceback scrubbing alone did not close.
+
+        logger.error("extraction failed: %s", exc)
+
+    No `exc_info`, so nothing about that record looks like a traceback — and `str(exc)` on
+    the extraction path is the label the model just read. It is also the most ordinary way
+    in the world to write a log line.
+    """
+    security.install_log_containment()
+    logger = _uvicorn_error_logger()
+
+    logger.error("extraction failed: %s", RuntimeError(LABEL_TEXT))
+    logger.error(RuntimeError(LABEL_TEXT))
+    logger.error("failed on %(what)s", {"what": ValueError(LABEL_TEXT)})
+
+    captured = capfd.readouterr()
+    combined = captured.out + captured.err
+    assert LABEL_TEXT not in combined
+    assert "STONE'S THROW" not in combined
+    # The developer still learns what class of thing went wrong.
+    assert "<RuntimeError>" in combined
+    assert "<ValueError>" in combined
+    # And the human half of the message survives, because it carries no content.
+    assert "extraction failed" in combined
+
+
+def test_a_stack_info_record_keeps_its_message(capfd: Any) -> None:
+    """`logger.warning("slow request", stack_info=True)` is not an exception report.
+
+    The first version fired on `exc_info or sinfo`, so it destroyed the message and
+    announced "Exception suppressed" for an exception that never happened. Drop the stack,
+    keep the line.
+    """
+    security.install_log_containment()
+    logger = _uvicorn_error_logger()
+    logger.setLevel(logging.WARNING)
+
+    logger.warning("slow request", stack_info=True)
+
+    combined = capfd.readouterr().out
+    assert "slow request" in combined
+    assert "suppressed" not in combined
+    assert "Stack (most recent call last)" not in combined
+
+
+def test_containment_notices_when_something_else_takes_the_factory() -> None:
+    """`containment_active()` read a module flag, so it answered True after a hijack.
+
+    That is the worst possible answer from a function whose only job is to say whether a
+    security control is on. It now reads the live factory, and re-installing re-wraps
+    whatever is in place instead of returning early on a stale flag.
+    """
+    security.install_log_containment()
+    assert security.containment_active()
+
+    ours = logging.getLogRecordFactory()
+    hijacker = logging.LogRecord
+    logging.setLogRecordFactory(hijacker)
+    try:
+        assert not security.containment_active(), "must not claim to be active after a hijack"
+        security.install_log_containment()
+        assert security.containment_active(), "re-install must re-wrap, not no-op"
+        assert logging.getLogRecordFactory() is not ours
+    finally:
+        security.remove_log_containment()
+
+
+def test_containment_still_scrubs_after_being_reasserted(capfd: Any) -> None:
+    """The self-heal has to actually work, not just flip the flag."""
+    security.install_log_containment()
+    logging.setLogRecordFactory(logging.LogRecord)
+    security.install_log_containment()
+
+    logger = _uvicorn_error_logger()
+    try:
+        raise RuntimeError(LABEL_TEXT)
+    except RuntimeError:
+        logger.error("Exception in ASGI application", exc_info=True)
+
+    combined = capfd.readouterr().out + capfd.readouterr().err
+    assert LABEL_TEXT not in combined
 
 
 def test_containment_leaves_ordinary_log_lines_alone(capfd: Any) -> None:

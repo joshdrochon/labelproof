@@ -58,6 +58,15 @@ class ExceptionContainmentMiddleware:
         try:
             await self.app(scope, receive, wrapped)
         except Exception as exc:
+            # This layer sits OUTSIDE the app factory's request-context middleware, so by
+            # the time an exception arrives here the request ID that middleware assigns is
+            # either unreachable (it runs the app in its own task) or never got assigned at
+            # all. Without this, a 500 was the one response in the app with no correlation
+            # ID — on precisely the response an agent is most likely to be reading out to
+            # whoever can help them, and while the README promised "the ID an agent reads
+            # off the screen is the ID in the logs".
+            request_id = applog.current_request_id() or applog.new_request_id()
+
             # `reason_code` is on the logging allowlist and an exception class name is a
             # code identifier, never content — so a developer still learns what broke
             # without a single byte of the label reaching stdout.
@@ -66,6 +75,7 @@ class ExceptionContainmentMiddleware:
                 kind="internal",
                 code="internal_error",
                 reason_code=type(exc).__name__,
+                status=500,
             )
             if started:
                 # The status line is already on the wire; there is no response left to
@@ -76,5 +86,8 @@ class ExceptionContainmentMiddleware:
                 send,
                 errors.InternalError(),
                 status=500,
-                extra_headers={"Cache-Control": "no-store"},
+                extra_headers={
+                    "Cache-Control": "no-store",
+                    "X-Request-ID": request_id,
+                },
             )

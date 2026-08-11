@@ -49,16 +49,18 @@ if TYPE_CHECKING:  # pragma: no cover - import cycle only matters to type checke
 #: `script-src 'self'` is absolute: no inline script, no CDN, no `eval`. That is where XSS
 #: lives and there is no relaxation of it anywhere in this file.
 #:
-#: `style-src` carries `'unsafe-inline'` and the reason is specific rather than habitual.
-#: The evidence overlay positions each highlight box with a React inline `style` attribute
-#: (`web/src/components/EvidenceOverlay.tsx`), and CSP3 blocks style *attributes* under a
-#: bare `style-src 'self'`. The failure would be silent — every evidence box stacked at the
-#: top-left of the label instead of over the text it cites — and a highlight pointing at the
-#: wrong region is worse than no highlight in a product whose argument is honest evidence.
-#: The residual risk is CSS injection, and React escapes every interpolated value while
-#: `img-src` and `default-src 'none'` close the usual CSS exfiltration route.
-#: `style-src-attr` was rejected as the narrower fix: browsers without it fall back to
-#: `style-src`, so the breakage would depend on the reader's browser version.
+#: `style-src 'self'` with **no** `'unsafe-inline'`, and that was checked in a browser
+#: rather than reasoned about. An earlier version of this file relaxed it, on the theory
+#: that the evidence overlay positions each highlight with a React inline `style` attribute
+#: (`web/src/components/EvidenceOverlay.tsx`) and CSP3 blocks style attributes. That theory
+#: was wrong: react-dom applies the `style` prop through `node.style.setProperty`, which is
+#: a CSSOM mutation, and CSP governs style attributes *parsed from markup* and `<style>`
+#: elements — not the CSSOM. Verified against the real built SPA under this exact policy:
+#: an injected `<style>` element and an inline `<script>` were both refused
+#: (`style-src-elem`, `script-src-elem`, so enforcement is real), while the evidence box
+#: still computed to `left: 30.4px` and rendered over the brand name it cites.
+#: Nothing in `web/src` needs the relaxation — two `style={{...}}` props, both in
+#: EvidenceOverlay, both CSSOM. There is now no relaxation anywhere in this policy.
 #:
 #: `img-src` allows `blob:` because the app previews uploads through `URL.createObjectURL`,
 #: and `data:` for inline icons. `worker-src blob:` covers the off-main-thread encode path.
@@ -71,7 +73,7 @@ CONTENT_SECURITY_POLICY: str = "; ".join(
     (
         "default-src 'none'",
         "script-src 'self'",
-        "style-src 'self' 'unsafe-inline'",
+        "style-src 'self'",
         "img-src 'self' blob: data:",
         "font-src 'self'",
         "connect-src 'self'",
@@ -225,6 +227,7 @@ class SecurityPolicy:
 _SCRUBBED = "%s suppressed: traceback withheld (SEC-4)"
 
 _original_record_factory: Any = None
+_installed_factory: Any = None
 _original_excepthook: Any = None
 _original_thread_excepthook: Any = None
 _containment_lock = threading.Lock()
@@ -238,46 +241,101 @@ def _exception_name(exc_info: object) -> str:
     return "Exception"
 
 
-def install_log_containment() -> None:
-    """Strip tracebacks from every log record created anywhere in this process.
+def _safe_arg(value: object) -> object:
+    """Replace an exception passed as a log argument with its class name.
 
-    Idempotent. The record keeps its logger, level and timestamp — only the traceback and
-    the message that would have carried it are replaced, and the replacement names the
-    exception class so a developer still knows what to reproduce. Log lines with no
-    `exc_info` are untouched, which is what keeps uvicorn's startup and bind lines readable.
+    This is the gap the traceback scrubbing alone did not close, and it is the most
+    ordinary way in the world to write a log line:
+
+        logger.error("extraction failed: %s", exc)
+
+    No `exc_info`, so nothing about that record looks like a traceback — and `str(exc)` on a
+    pydantic `ValidationError` is `input_value=...`, which on the extraction path is the
+    label. So exception *objects* are replaced wherever they appear as arguments,
+    unconditionally, on every record. It costs an `isinstance` per argument.
     """
-    global _original_record_factory, _original_excepthook, _original_thread_excepthook
+    if isinstance(value, BaseException):
+        return f"<{type(value).__name__}>"
+    if isinstance(value, dict):
+        # `logger.info("%(what)s", {"what": exc})`. `LogRecord.__init__` unwraps a lone
+        # mapping argument, so by the time anything else sees it the exception is nested one
+        # level down — which is exactly how this vector got past the first version.
+        return {key: _safe_arg(item) for key, item in value.items()}
+    return value
+
+
+def _safe_args(args: object) -> object:
+    if isinstance(args, BaseException):
+        return (f"<{type(args).__name__}>",)
+    if isinstance(args, tuple):
+        return tuple(_safe_arg(item) for item in args)
+    if isinstance(args, dict):
+        return {key: _safe_arg(item) for key, item in args.items()}
+    return args
+
+
+def install_log_containment() -> None:
+    """Strip tracebacks and exception objects from every log record in this process.
+
+    Self-healing rather than merely idempotent: if something else replaced the record
+    factory after this ran — another library, another guard, a test — the containment is
+    re-wrapped on top of whatever is there now. A control that can be silently switched off
+    by an unrelated import is not a control.
+
+    Records with no `exc_info` keep their message, which is what leaves uvicorn's startup
+    and bind lines readable. What they do not keep is an exception object passed as an
+    argument; see `_safe_arg`.
+    """
+    global _original_record_factory, _installed_factory
+    global _original_excepthook, _original_thread_excepthook
     with _containment_lock:
-        if _original_record_factory is not None:
+        current = logging.getLogRecordFactory()
+        if _installed_factory is not None and current is _installed_factory:
             return
 
-        base = logging.getLogRecordFactory()
-        _original_record_factory = base
+        # First install captures the pristine factory. A re-install after a hijack wraps
+        # whatever is now in place, and deliberately does NOT overwrite the original —
+        # `remove_log_containment` must still be able to restore the process as it was.
+        if _original_record_factory is None:
+            _original_record_factory = current
+        base = current
 
         def factory(*args: Any, **kwargs: Any) -> logging.LogRecord:
             # LogRecord's positional contract:
             #   (name, level, pathname, lineno, msg, args, exc_info, func, sinfo)
             values = list(args)
-            exc_info = values[6] if len(values) > 6 else kwargs.get("exc_info")
-            sinfo = values[8] if len(values) > 8 else kwargs.get("sinfo")
-            if exc_info or sinfo:
-                name = _exception_name(exc_info)
-                if len(values) > 4:
-                    values[4] = _SCRUBBED
+
+            def field(index: int, name: str) -> object:
+                return values[index] if len(values) > index else kwargs.get(name)
+
+            def put(index: int, name: str, value: object) -> None:
+                if len(values) > index:
+                    values[index] = value
                 else:
-                    kwargs["msg"] = _SCRUBBED
-                if len(values) > 5:
-                    values[5] = (name,)
-                else:
-                    kwargs["args"] = (name,)
-                if len(values) > 6:
-                    values[6] = None
-                else:
-                    kwargs["exc_info"] = None
-                if len(values) > 8:
-                    values[8] = None
-                else:
-                    kwargs["sinfo"] = None
+                    kwargs[name] = value
+
+            exc_info = field(6, "exc_info")
+            sinfo = field(8, "sinfo")
+
+            if exc_info:
+                # The traceback channel: message and all, because an exception log line
+                # usually interpolates the exception it is reporting.
+                put(4, "msg", _SCRUBBED)
+                put(5, "args", (_exception_name(exc_info),))
+                put(6, "exc_info", None)
+                put(8, "sinfo", None)
+            else:
+                # Everything else keeps its message. A `stack_info=True` record is not an
+                # exception report — it is someone asking "how did we get here" — so
+                # destroying its message and naming an exception that never happened was
+                # simply wrong. Drop the stack, keep the line.
+                if sinfo:
+                    put(8, "sinfo", None)
+                msg = field(4, "msg")
+                if isinstance(msg, BaseException):
+                    put(4, "msg", f"<{type(msg).__name__}>")
+                put(5, "args", _safe_args(field(5, "args")))
+
             record = base(*values, **kwargs)
             record.exc_info = None
             record.exc_text = None
@@ -285,16 +343,19 @@ def install_log_containment() -> None:
             return record
 
         logging.setLogRecordFactory(factory)
+        _installed_factory = factory
 
-        _original_excepthook = sys.excepthook
-        _original_thread_excepthook = threading.excepthook
+        if _original_excepthook is None:
+            _original_excepthook = sys.excepthook
+            _original_thread_excepthook = threading.excepthook
         sys.excepthook = _scrubbed_excepthook
         threading.excepthook = _scrubbed_thread_excepthook
 
 
 def remove_log_containment() -> None:
     """Put the process back exactly as it was. Used by tests and by nothing else."""
-    global _original_record_factory, _original_excepthook, _original_thread_excepthook
+    global _original_record_factory, _installed_factory
+    global _original_excepthook, _original_thread_excepthook
     with _containment_lock:
         if _original_record_factory is None:
             return
@@ -302,12 +363,19 @@ def remove_log_containment() -> None:
         sys.excepthook = _original_excepthook
         threading.excepthook = _original_thread_excepthook
         _original_record_factory = None
+        _installed_factory = None
         _original_excepthook = None
         _original_thread_excepthook = None
 
 
 def containment_active() -> bool:
-    return _original_record_factory is not None
+    """Is containment actually in force *right now*?
+
+    Reads the live record factory rather than a module flag. The flag version returned True
+    after any library installed its own factory over the top, which is the worst possible
+    answer from a function whose entire job is to tell you whether a security control is on.
+    """
+    return _installed_factory is not None and logging.getLogRecordFactory() is _installed_factory
 
 
 def _scrubbed_excepthook(
