@@ -8,7 +8,10 @@ average away a server clock that disagrees with the stopwatch.
 
 from __future__ import annotations
 
+import asyncio
 import json
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
@@ -409,12 +412,15 @@ def test_the_summary_distinguishes_the_two_clocks_in_words() -> None:
     assert "minus render" in text
 
 
-# --- against the real app over a real ASGI stack ---------------------------------------
+# --- against the real app, in process --------------------------------------------------
+#
+# In-process transport: this drives the real ASGI app but never opens a socket and never
+# runs the script's own HTTP client. The socket-level tests are further down.
 
 
-def test_it_times_the_real_service_end_to_end(tmp_path: Path) -> None:
-    """The check that matters: this script and the running service agree on the wire
-    format, the field names, and where the timings live."""
+def test_it_agrees_with_the_service_on_the_response_shape(tmp_path: Path) -> None:
+    """Field names and where the timings live, checked against the real app — but with
+    `TestClient` standing in for the network. Wire format is covered over a socket below."""
     from fastapi.testclient import TestClient
 
     from api.config import Config
@@ -453,3 +459,184 @@ def test_it_fails_clearly_when_the_url_is_not_a_labelproof(monkeypatch: pytest.M
     monkeypatch.setattr(timed_run, "http_get", lambda url, timeout=60.0: Reply(404, b""))
     with pytest.raises(SystemExit, match="Point this at"):
         timed_run.load_payload("http://example.com", "", [])
+
+
+# --- over a real socket ---------------------------------------------------------------
+#
+# `scripts/timed_run.py` is the artifact that substantiates the p95 claim to a federal
+# agency, and the two functions that actually talk to a deployed URL — `poster_for` and
+# `probe_ready` — are pure `urllib`. Driving the app in-process with `TestClient` never
+# runs either of them: no socket, no HTTP framing, no multipart body crossing a wire.
+#
+# So these tests stand the real ASGI app behind `http.server.ThreadingHTTPServer` on a
+# real port and point the real script at it. `uvicorn` is not in this environment; a
+# ~40-line ASGI adapter is, and it exercises the parts under test — the script's own HTTP
+# client, its hand-rolled multipart encoding, and Starlette's parsing of those exact bytes
+# — without pulling in a server that is not installed.
+
+
+class _ASGIOverHTTP(BaseHTTPRequestHandler):
+    """Drive an ASGI app from `http.server`. Test scaffolding, not a production server."""
+
+    protocol_version = "HTTP/1.1"
+    app: Any = None
+
+    def log_message(self, *args: Any) -> None:  # keep pytest output readable
+        return
+
+    def _serve(self, method: str) -> None:
+        length = int(self.headers.get("Content-Length") or 0)
+        body = self.rfile.read(length) if length else b""
+        path, _, query = self.path.partition("?")
+
+        scope: dict[str, Any] = {
+            "type": "http",
+            "asgi": {"version": "3.0", "spec_version": "2.3"},
+            "http_version": "1.1",
+            "method": method,
+            "scheme": "http",
+            "path": path,
+            "raw_path": path.encode(),
+            "query_string": query.encode(),
+            "root_path": "",
+            "headers": [
+                (key.lower().encode(), value.encode())
+                for key, value in self.headers.items()
+            ],
+            "client": ("127.0.0.1", 0),
+            "server": ("127.0.0.1", self.server.server_address[1]),
+            "state": {},
+        }
+
+        status, headers, payload = asyncio.run(_drive(type(self).app, scope, body))
+
+        self.send_response(status)
+        for key, value in headers:
+            if key.lower() not in (b"content-length", b"transfer-encoding"):
+                self.send_header(key.decode(), value.decode())
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+
+    def do_GET(self) -> None:
+        self._serve("GET")
+
+    def do_POST(self) -> None:
+        self._serve("POST")
+
+
+async def _drive(app: Any, scope: dict[str, Any], body: bytes) -> tuple[int, list, bytes]:
+    sent: list[dict[str, Any]] = []
+    delivered = False
+
+    async def receive() -> dict[str, Any]:
+        nonlocal delivered
+        if delivered:
+            return {"type": "http.disconnect"}
+        delivered = True
+        return {"type": "http.request", "body": body, "more_body": False}
+
+    async def send(message: dict[str, Any]) -> None:
+        sent.append(message)
+
+    await app(scope, receive, send)
+
+    status = next((m["status"] for m in sent if m["type"] == "http.response.start"), 500)
+    headers = next(
+        (m.get("headers", []) for m in sent if m["type"] == "http.response.start"), []
+    )
+    payload = b"".join(
+        m.get("body", b"") for m in sent if m["type"] == "http.response.body"
+    )
+    return status, headers, payload
+
+
+@pytest.fixture
+def live_url() -> Any:
+    """The real app, on a real port, for the duration of one test."""
+    from api.config import Config
+    from api.main import create_app
+
+    app = create_app(config=Config(use_fake_provider=True))
+    handler = type("Handler", (_ASGIOverHTTP,), {"app": app})
+    server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_address[1]}"
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_probe_ready_reads_a_real_server_over_a_socket(live_url: str) -> None:
+    """`probe_ready` is pure urllib and never ran under the in-process tests."""
+    facts = timed_run.probe_ready(live_url)
+    assert facts.status == "sample_mode"
+    assert facts.simulated is True
+    assert facts.target_ms == 5000
+    assert facts.budget_ms >= facts.target_ms
+
+
+def test_the_sample_payload_is_fetched_over_a_socket(live_url: str) -> None:
+    """`load_payload` walks `/sample` and then downloads each image by URL."""
+    application, images = timed_run.load_payload(live_url, "", [])
+    assert application["brand_name"]
+    assert len(images) == 2
+    assert all(data.startswith(b"\x89PNG") for _, data in images)
+
+
+def test_the_hand_rolled_multipart_is_parsed_by_a_real_server(live_url: str) -> None:
+    """The encoder's whole reason to exist is running from a laptop against a deployed
+    URL with no dependencies. Nothing proved those bytes parse until this test — the
+    in-process suite handed a body to `TestClient` rather than to a socket."""
+    application, images = timed_run.load_payload(live_url, "", [])
+    post = timed_run.poster_for(live_url)
+
+    run = timed_run.run_once(1, post, application, images)
+
+    assert run.ok, run.detail
+    assert run.request_id.startswith("req_")
+    assert run.server_total_ms is not None
+    assert "preprocess" in run.stages
+    assert run.verified
+
+
+def test_the_whole_command_runs_against_a_real_url(live_url: str, tmp_path: Path) -> None:
+    """End to end: argv in, committable Markdown out, over HTTP."""
+    out = tmp_path / "perf.md"
+    code = timed_run.main(
+        [live_url, "--runs", "3", "--out", str(out), "--note", "socket test"]
+    )
+
+    assert code == 0
+    report = out.read_text()
+    assert "# Timed run" in report
+    assert live_url in report
+    assert "3 requested, 3 succeeded" in report
+    assert "socket test" in report
+    # Sample mode: the gate must be withheld even though every request succeeded.
+    assert "SAMPLE MODE" in report
+    assert "withheld" in report
+
+
+def test_the_clocks_agree_across_a_real_network_boundary(live_url: str) -> None:
+    """LP-126 with actual sockets in the way: the client's stopwatch contains the
+    server's own total plus HTTP framing, so the gap must be positive on every run."""
+    application, images = timed_run.load_payload(live_url, "", [])
+    runs = timed_run.measure(3, timed_run.poster_for(live_url), application, images)
+
+    report = Report(url=live_url, runs=runs, started_at="now", simulated=True)
+    assert not report.impossible_runs, [
+        (r.index, r.client_ms, r.server_total_ms) for r in report.impossible_runs
+    ]
+    assert all((r.overhead_ms or 0) >= 0 for r in runs)
+
+
+def test_an_unreachable_url_is_reported_rather_than_raised() -> None:
+    """`poster_for` swallows connection failures into a status of 0 — a measurement tool
+    reports, it does not crash halfway through a 20-run table."""
+    post = timed_run.poster_for("http://127.0.0.1:1", timeout=1.0)
+    run = timed_run.run_once(1, post, application(), images())
+    assert run.status == 0
+    assert not run.ok
