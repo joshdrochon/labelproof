@@ -383,7 +383,15 @@ stopwatch wins.* Two mechanisms hold the service to that.
 the server's own `timings_ms.total` matches it — and, with a provider that sleeps a known
 duration, that the total actually contains the extraction rather than being computed
 before it. A fabricated total, a total measured too early, or a total that omits a stage
-all fail.
+all fail. There is also a test that makes that check go red on purpose, by making the
+timer report as if the clock had stopped at the top of the request: a guard nobody has
+watched fail is a guard nobody knows works.
+
+The front end carries **tripwires, not tests** — substring assertions on
+`VerifyNow.tsx` read as text. They cannot prove the rendered number is right; they go red
+the day someone deletes the client clock, points the banner at the server's total, or
+wires the progress animation to the result card. A real assertion on the rendered string
+would be a `vitest` test in `web/src`, which this section does not own.
 
 `scripts/timed_run.py` does the same across a real network boundary and prints the gap per
 run. The gap is always positive: the client's stopwatch contains the server's work plus

@@ -766,23 +766,43 @@ def test_a_server_that_stops_its_clock_early_fails_the_check(
         check_stopwatch(response.json()["timings_ms"]["total"], observed_ms)
 
 
-# --- the number that is actually on the screen ----------------------------------------
+# --- tripwires on the front end, and what they are not --------------------------------
 #
-# PRD §232 is about what an agent reads off a result card, not about a JSON field. The
-# web layer is not this wave's to change, so these read it and assert the invariant
-# rather than rewriting it.
+# **These are tripwires against deletion, not a test of the rendered screen.** They are
+# substring assertions on TypeScript source read as text. They cannot tell you the number
+# an agent sees is correct: a correct refactor to a local variable fails them, and they
+# pass if the literal survives in a dead branch or if `startedRef.current` is reset after
+# the upload rather than before it.
 #
-# The invariant is NOT "the screen shows `timings_ms.total`". It is the opposite. The
-# server's total is always the smaller of the two — it cannot contain the upload or the
-# network — so rendering it would make the product under-report its own latency, which is
-# the exact direction PERF-2 exists to prevent. The screen shows a client wall clock
-# spanning submit to response: the stopwatch itself.
+# What they buy is narrow and worth having: the day someone deletes the client clock, or
+# points the banner at the server's total, or wires the progress animation to the result
+# card, something goes red. Without them PERF-2 has no automated guard at all, because
+# `web/src` is not this wave's to change and a `vitest` test asserting the rendered string
+# would have to live there.
+#
+# The invariant they guard is NOT "the screen shows `timings_ms.total`" — it is the
+# opposite. The server's total cannot contain the upload or the network, so it is always
+# the smaller of the two, and rendering it would make the product under-report its own
+# latency. That is the direction PERF-2 exists to prevent. The screen shows a client wall
+# clock spanning submit to response: the stopwatch itself.
 
 
 def _web_source(relative: str) -> str:
-    path = ROOT / "web" / "src" / relative
-    if not path.exists():
-        pytest.skip(f"{relative} is not in this checkout")
+    """The front end's source, as text.
+
+    Skips only when there is no front end in this checkout at all. If `web/src` exists but
+    the named file does not, that fails — a renamed or deleted file is exactly the change
+    these tripwires exist to catch, and skipping on it would make the guard evaporate
+    silently at the moment it was needed.
+    """
+    web = ROOT / "web" / "src"
+    if not web.is_dir():
+        pytest.skip("no front end in this checkout")
+    path = web / relative
+    assert path.exists(), (
+        f"web/src/{relative} is gone. PERF-2's front-end tripwires point at it; if it "
+        f"moved, move them with it rather than deleting them."
+    )
     return path.read_text()
 
 
@@ -836,12 +856,16 @@ def test_the_server_total_still_reaches_the_client_for_the_breakdown() -> None:
         assert f"'{stage}'" in parser, f"the client parser drops timings_ms.{stage}"
 
 
-def test_the_client_measured_elapsed_can_never_be_below_the_server_total() -> None:
-    """The property the two clocks must satisfy, checked over the real HTTP stack.
+def test_the_server_never_claims_more_time_than_an_enclosing_clock_measured() -> None:
+    """A check on the **server's** clock, not on the screen — the name it used to carry
+    oversold it.
 
-    This is the same comparison `scripts/timed_run.py` makes against a deployed URL. Here
-    there is no network, so the margin is thin — which makes it a stricter test, not a
-    weaker one.
+    An outer measurement necessarily contains an inner one, so this can only fail if the
+    server's clock is broken: a total that was fabricated, measured against the wrong
+    epoch, or carried over from another request. That is a real failure mode and worth a
+    test, but it is not evidence about what an agent reads off a result card. The screen
+    is covered by the tripwires above and, across a real network boundary, by
+    `scripts/timed_run.py`.
     """
     client = make_client(provider=SlowProvider(0.25))
 
