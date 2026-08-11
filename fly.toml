@@ -21,18 +21,20 @@ app = "labelproof"
 # --------------------------------------------------------------------------------------
 # Region (LP-127)
 # --------------------------------------------------------------------------------------
-# `iad` — Ashburn, Virginia. Two reasons, in order of weight:
+# `iad` — Ashburn, Virginia. The users are a US federal agency in Washington DC, and
+# Northern Virginia is the closest Fly region to them: roughly 5–15 ms round trip against
+# 60–70 ms from the west coast. Against a multi-second model call that is not decisive,
+# but it is free and it is checkable.
 #
-# 1. The users are a US federal agency in Washington DC. Northern Virginia is the closest
-#    Fly region to them — roughly 5–15 ms round trip against 60–70 ms from the west coast.
-#    On a 5s budget that is not decisive on its own, but it is free.
-# 2. It is the shortest hop to the model provider, which is the term that actually
-#    matters. The vision call dominates the request, so the server→provider leg is on the
-#    critical path twice per verification; us-east is where that traffic terminates.
+# Two reasons that used to be here have been removed because nothing supports them:
 #
-# There is also a boring third reason worth stating for a federal audience: keeping the
-# service and its only outbound dependency inside the continental United States means the
-# data-residency question has a one-word answer.
+#   - "the shortest hop to the model provider" — plausible, never measured from inside
+#     this app against any other region.
+#   - "the service and its only outbound dependency are both inside the continental US,
+#     so data residency has a one-word answer" — NOT TRUE AS SHIPPED. The adapter does
+#     not set `inference_geo`, so model requests follow the workspace default, which is
+#     global unless configured. The compute is in Virginia; where inference runs is a
+#     separate setting. Do not restate this to an agency until the pin ships.
 primary_region = "iad"
 
 # In-flight verifications get a chance to finish before a machine goes away, so a deploy

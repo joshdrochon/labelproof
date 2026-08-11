@@ -15,14 +15,25 @@ the grader's one-click sample returns an error. That is the worst available outc
 take-home, so the manifest the route actually serves is compared against the manifest the
 image actually copies.
 
-**The keep-warm settings must survive editing.** `min_machines_running`,
-`auto_stop_machines` and the pre-warm interval are the whole of PERF-6. They are three
-lines of TOML that look like tuning knobs and are actually the adoption gate.
+**Configuration in one file must agree with code in another.** The latency budget against
+the model's measured latency, the keep-warm interval against the clamp the script
+enforces, the health-check paths against the routes the app registers, the `COPY` set
+against what `.dockerignore` removes, the CSP against what the SPA actually does. Each of
+those pairs can drift silently, and each has exactly one failure mode: production looks
+fine and does not work.
+
+**On what is NOT here.** An earlier version of this file was mostly change-detectors —
+reading a literal out of `fly.toml` and asserting it back. Those cannot fail against a
+broken deployment, and their green was worth nothing. The ones that remain in that shape
+are a deliberate short list guarding values whose *editing* is the risk (HTTPS on, autostop
+off, no volume); they are labelled as guards rather than dressed up as correctness tests.
 """
 
 from __future__ import annotations
 
+import fnmatch
 import re
+import subprocess
 import tomllib
 from pathlib import Path
 from typing import Any
@@ -102,28 +113,100 @@ def test_the_application_package_is_copied() -> None:
     assert _is_copied(Path("api"), _copied_paths())
 
 
-def test_the_image_does_not_carry_the_test_or_eval_trees() -> None:
-    """Production has no business shipping the golden set, the eval harness, or the test
-    suite. Excluded at the context boundary so an over-broad COPY fails the build."""
-    ignored = DOCKERIGNORE.read_text().splitlines()
-    entries = {
-        line.strip().rstrip("/")
-        for line in ignored
-        if line.strip() and not line.startswith("#")
-    }
+def _dockerignore_rules() -> list[tuple[str, bool]]:
+    """(pattern, is_negation) in file order. Order matters — last match wins."""
+    rules: list[tuple[str, bool]] = []
+    for line in DOCKERIGNORE.read_text().splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if stripped.startswith("!"):
+            rules.append((stripped[1:].rstrip("/"), True))
+        else:
+            rules.append((stripped.rstrip("/"), False))
+    return rules
 
-    for tree in ("tests", "eval", "golden"):
-        assert tree in entries, f"{tree}/ is not excluded from the build context"
+
+def excluded_from_build_context(path: str) -> bool:
+    """Would Docker exclude this path, given the rules in `.dockerignore`?
+
+    Models Docker's matching (last matching rule wins, `!` re-includes, a directory
+    pattern excludes everything beneath it) rather than shelling out to `docker build`,
+    so the check runs in CI without a daemon. It is an approximation of Docker's
+    behaviour, and the thing it is really guarding is rule *ordering* — the bug where
+    someone adds a pattern above the `!.env.example` negation, or drops it, and secrets
+    or the sample image quietly change status.
+    """
+    excluded = False
+    for pattern, negated in _dockerignore_rules():
+        segments = path.split("/")
+        prefixes = ["/".join(segments[: i + 1]) for i in range(len(segments))]
+        if any(fnmatch.fnmatch(prefix, pattern) for prefix in prefixes):
+            excluded = not negated
+    return excluded
 
 
-def test_no_secret_reaches_the_build_context() -> None:
-    """There is a real .env with a live key in the working tree. `docker build` reads the
-    working tree, not git, so .gitignore is not the control that matters here."""
-    ignored = {
-        line.strip() for line in DOCKERIGNORE.read_text().splitlines() if line.strip()
-    }
-    assert ".env" in ignored
-    assert ".env.*" in ignored
+@pytest.mark.parametrize(
+    ("path", "should_be_excluded"),
+    [
+        # Secrets. `docker build` reads the working tree, not git, so .gitignore is not
+        # the control that matters here — and there is a real .env with a live key in it.
+        (".env", True),
+        (".env.production", True),
+        (".env.local", True),
+        ("server.key", True),
+        ("cert.pem", True),
+        # ...but the template must survive, which is the rule most likely to break when
+        # someone tightens the pattern above it.
+        (".env.example", False),
+        # Test and evaluation material has no business in a production image.
+        ("tests/test_api.py", True),
+        ("eval/run.py", True),
+        ("golden/set.json", True),
+        (".git/config", True),
+        ("web/node_modules/react/index.js", True),
+        # ...and everything the service actually runs on must get through.
+        ("api/main.py", False),
+        ("api/routes/sample.py", False),
+        ("assets/samples/old_tom.json", False),
+        ("fixtures/labels/tc16_front_back_front.png", False),
+        ("web/src/main.tsx", False),
+        ("pyproject.toml", False),
+    ],
+)
+def test_the_build_context_excludes_what_it_should(path: str, should_be_excluded: bool) -> None:
+    verdict = excluded_from_build_context(path)
+    assert verdict == should_be_excluded, (
+        f"{path} is {'excluded from' if verdict else 'included in'} the build context; "
+        f"expected the opposite. Check the rule ordering in .dockerignore."
+    )
+
+
+def test_every_path_the_dockerfile_copies_survives_the_dockerignore() -> None:
+    """The two files have to agree, and nothing makes them.
+
+    A `COPY` of a path that `.dockerignore` excludes fails the build — loudly, which is
+    fine. The dangerous direction is a *directory* copy whose contents are partly
+    excluded: the build succeeds and the image is missing a file nobody looked for.
+    """
+    # Only tracked files. Local build artifacts (`__pycache__`, `.venv`) are excluded on
+    # purpose and are not what this is about.
+    tracked = subprocess.run(
+        ["git", "ls-files", "-z"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.split("\0")
+
+    copied = _copied_paths()
+    for relative in tracked:
+        if not relative or not _is_copied(Path(relative), copied):
+            continue
+        assert not excluded_from_build_context(relative), (
+            f"the Dockerfile copies '{relative}' into the image but .dockerignore "
+            f"excludes it, so it will be silently missing at runtime"
+        )
 
 
 def test_no_secret_is_baked_into_the_image_or_config() -> None:
@@ -144,22 +227,35 @@ def test_no_secret_is_baked_into_the_image_or_config() -> None:
 # --- no cold-start ambush (PERF-6, LP-134) --------------------------------------------
 
 
-def test_a_machine_is_always_running(fly: dict[str, Any]) -> None:
-    """The adoption gate is 5s from a cold click. A stopped machine cannot meet it."""
-    service = fly["http_service"]
-    assert service["min_machines_running"] >= 1
-    assert service["auto_stop_machines"] == "off", (
+def test_a_machine_is_never_stopped(fly: dict[str, Any]) -> None:
+    """A stopped machine cannot answer a cold click inside any budget.
+
+    Only `auto_stop_machines` is load-bearing. `min_machines_running` is a no-op while
+    autostop is off — Fly consults it when deciding what to leave up *while* autostopping
+    — so it is not asserted here as though it were doing something.
+    """
+    assert fly["http_service"]["auto_stop_machines"] == "off", (
         "auto_stop_machines must be off. 'suspend' still charges the grader's first "
         "request for the resume, and the first request is the one being protected."
     )
 
 
 def test_keepwarm_is_enabled_and_pings_inside_the_cache_ttl(fly: dict[str, Any]) -> None:
-    """Above the provider's five-minute ephemeral TTL, the pre-warm inverts: every ping
-    pays for a cache write that nothing ever reads (LP-324)."""
+    """Cross-checks the deployment's interval against the ceiling keepwarm enforces.
+
+    Above the provider's five-minute ephemeral TTL the pre-warm inverts: every ping pays
+    for a cache write that nothing ever reads (LP-324). The clamp lives in the script and
+    the value lives here, so the two are compared rather than each asserted alone.
+    """
+    from scripts.keepwarm import MAX_INTERVAL_S
+
     env = fly["env"]
     assert env["LABELPROOF_KEEPWARM"] == "1"
-    assert int(env["LABELPROOF_KEEPWARM_INTERVAL_S"]) < 300
+    configured = int(env["LABELPROOF_KEEPWARM_INTERVAL_S"])
+    assert configured <= MAX_INTERVAL_S, (
+        f"fly.toml asks for a {configured}s interval; keepwarm clamps to "
+        f"{MAX_INTERVAL_S}s, so the deployed value is a lie about what runs"
+    )
 
 
 def test_the_latency_budget_fits_the_model_production_will_actually_call() -> None:
@@ -246,16 +342,120 @@ def test_the_other_security_headers_are_present(fly: dict[str, Any]) -> None:
         assert name in headers, f"{name} is not set at the edge"
 
 
-def test_the_csp_allows_what_the_spa_actually_does(fly: dict[str, Any]) -> None:
-    """A policy that blocks the app is worse than no policy: the reviewer sees a blank
-    page and no error. `EvidenceOverlay` positions boxes with a style attribute, and
-    upload previews are object URLs."""
-    csp = fly["http_service"]["http_options"]["response"]["headers"]["Content-Security-Policy"]
-    assert "style-src 'self' 'unsafe-inline'" in csp
-    assert "blob:" in csp and "data:" in csp
-    # The browser never talks to the model provider (NET-2) — same-origin only.
-    assert "connect-src 'self'" in csp
-    assert "frame-ancestors 'none'" in csp
+def _csp_directives(fly: dict[str, Any]) -> dict[str, set[str]]:
+    raw = fly["http_service"]["http_options"]["response"]["headers"]["Content-Security-Policy"]
+    directives: dict[str, set[str]] = {}
+    for part in raw.split(";"):
+        tokens = part.split()
+        if tokens:
+            directives[tokens[0]] = set(tokens[1:])
+    return directives
+
+
+def _web_sources() -> str:
+    files = [ROOT / "web" / "index.html"]
+    files += sorted((ROOT / "web" / "src").rglob("*.ts"))
+    files += sorted((ROOT / "web" / "src").rglob("*.tsx"))
+    files += sorted((ROOT / "web" / "src").rglob("*.css"))
+    return "\n".join(f.read_text() for f in files if f.is_file())
+
+
+def test_the_csp_permits_the_inline_styles_the_spa_actually_uses(fly: dict[str, Any]) -> None:
+    """Derived from the SPA's source, not from the policy string.
+
+    A CSP that blocks the app is worse than no CSP: the reviewer gets a blank page and no
+    error, and `curl` cannot see it. So the allowance is justified by what the code does —
+    if the inline `style=` attributes ever disappear, this fails and the allowance should
+    be removed rather than carried forever.
+    """
+    directives = _csp_directives(fly)
+    uses_inline_style = re.search(r"style=\{\{|style=\"", _web_sources()) is not None
+
+    if uses_inline_style:
+        assert "'unsafe-inline'" in directives["style-src"], (
+            "the SPA sets style attributes (EvidenceOverlay positions boxes that way), "
+            "which only style-src 'unsafe-inline' permits — the page will render unstyled"
+        )
+    else:
+        assert "'unsafe-inline'" not in directives["style-src"], (
+            "nothing in web/src sets an inline style any more; drop the 'unsafe-inline' "
+            "allowance rather than keeping a weaker policy than the app needs"
+        )
+
+
+def test_the_csp_is_no_looser_than_the_spa_requires(fly: dict[str, Any]) -> None:
+    """The other direction, which is the one that rots quietly.
+
+    `index.html` carries no inline `<script>` and nothing in `web/src` reaches a third-party
+    origin — verified here rather than assumed — so script execution and network access
+    stay same-origin. If someone adds a CDN, this fails and the CSP has to be widened
+    deliberately instead of by accident.
+    """
+    directives = _csp_directives(fly)
+    index = (ROOT / "web" / "index.html").read_text()
+    sources = _web_sources()
+
+    assert not re.search(r"<script(?![^>]*\bsrc=)[^>]*>", index), (
+        "index.html now has an inline <script>; script-src 'self' will block it"
+    )
+    assert "'unsafe-inline'" not in directives["script-src"]
+    assert "'unsafe-eval'" not in directives["script-src"]
+
+    external = {
+        match
+        for match in re.findall(r"https?://[a-zA-Z0-9.-]+", sources)
+        if "localhost" not in match and "127.0.0.1" not in match
+    }
+    assert not external, (
+        f"web/ now references external origins {sorted(external)}; connect-src 'self' "
+        f"will block them. Widen the CSP deliberately or remove the dependency (NET-2 "
+        f"says the browser never talks to the provider)."
+    )
+    assert directives["connect-src"] == {"'self'"}
+    assert directives["frame-ancestors"] == {"'none'"}
+
+    # Upload previews and evidence crops are object URLs, so these two are required.
+    assert {"data:", "blob:"} <= directives["img-src"]
+
+
+def test_every_platform_check_hits_a_route_that_exists(fly: dict[str, Any]) -> None:
+    """Cross-checks fly.toml against the routes the app actually registers.
+
+    A health check pointed at a path the app does not serve gets a 404 forever: the
+    machine never passes, the deploy stalls, and the cause is a typo in a file the
+    application code cannot see. Reading the routes off the real app is the only way this
+    can fail for the right reason.
+    """
+    from fastapi.testclient import TestClient
+
+    from api.config import Config
+    from api.main import create_app
+
+    app = create_app(config=Config(anthropic_api_key="k"), provider=object())
+
+    with TestClient(app) as client:
+        for check in fly["http_service"]["checks"]:
+            path = check["path"]
+            response = client.request(check.get("method", "GET"), path)
+
+            # Content type, not status code. The SPA catch-all answers 200 with
+            # index.html for any unclaimed path, so a typo'd check path — `/healthz` —
+            # gets a cheerful 200 from the platform's point of view while measuring
+            # nothing at all. A status-code assertion here passes on a broken config,
+            # which is the exact class of false-green this file exists to catch.
+            assert response.headers.get("content-type", "").startswith("application/json"), (
+                f"fly.toml health-checks '{path}', which does not answer with JSON — it "
+                f"is being served by the single-page-app fallback. The platform would "
+                f"see 200 and report a healthy machine while checking nothing."
+            )
+            # 200 exactly. Together with the JSON check above this catches a mistyped
+            # path in both environments: without a built SPA it is a JSON 404, and with
+            # one it is an HTML 200 — neither passes both assertions.
+            assert response.status_code == 200, (
+                f"'{path}' answered {response.status_code} on a correctly configured "
+                f"app; the platform will treat this release as unhealthy and never "
+                f"promote it"
+            )
 
 
 def test_both_health_endpoints_are_wired_into_platform_checks(fly: dict[str, Any]) -> None:
@@ -263,12 +463,6 @@ def test_both_health_endpoints_are_wired_into_platform_checks(fly: dict[str, Any
     distinction that keeps a provider outage from killing a working container (NET-5)."""
     paths = {check["path"] for check in fly["http_service"]["checks"]}
     assert paths == {"/health", "/ready"}
-
-
-def test_the_region_is_us_east(fly: dict[str, Any]) -> None:
-    """The users are a US federal agency in Washington DC, and the provider's traffic
-    terminates in us-east (LP-127)."""
-    assert fly["primary_region"] == "iad"
 
 
 def test_no_volume_is_mounted(fly: dict[str, Any]) -> None:
