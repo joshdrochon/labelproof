@@ -12,6 +12,12 @@ papered over.
 
 from __future__ import annotations
 
+import hashlib
+import json
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Literal
+
 import cv2
 import numpy as np
 
@@ -171,26 +177,94 @@ def glare_over_warning(image: np.ndarray, *, seed: int = 7) -> np.ndarray:
     )
 
 
-#: Named degradations per canonical test case, so a fixture name maps to one transform.
-PRESETS: dict[str, str] = {
-    "tc11_angle_15": "perspective at 15 degrees",
-    "tc11_angle_30": "perspective at 30 degrees",
-    "tc11_angle_45": "perspective at 45 degrees",
-    "tc12_glare_warning": "specular blow-out over the warning statement",
-    "tc13_dim": "underexposed but recoverable",
-    "tc14_blur_hopeless": "out of focus past legibility",
-    "lp201_cylinder": "wrapped around a bottle",
-}
+# --------------------------------------------------------------------------------------
+# The robustness set (LP-195 – LP-198, LP-201)
+# --------------------------------------------------------------------------------------
+#
+# Each condition names what the pipeline is required to do with it, because a robustness
+# fixture with no stated expectation only proves the code did not crash. The three
+# outcomes are deliberately different obligations:
+#
+#   readable          every field still verifies — correct the image, do not reject it
+#   warning_illegible the warning region alone is unreadable; the rest still verifies
+#   pregated          the image is hopeless: retake reason, zero model calls (LP-321)
+
+
+@dataclass(frozen=True)
+class Condition:
+    """One degradation, with the behaviour it is there to pin down."""
+
+    name: str
+    tc: str
+    description: str
+    expectation: Literal["readable", "warning_illegible", "pregated"]
+    why: str
+
+    def apply(self, image: np.ndarray) -> np.ndarray:
+        return apply_preset(image, self.name)
+
+
+CONDITIONS: list[Condition] = [
+    Condition(
+        name="tc11_angle_15",
+        tc="TC-11",
+        description="photographed 15° off-axis on a desk",
+        expectation="readable",
+        why=(
+            "A mild angle is the most common real defect and the least excusable to fail "
+            "on. Composited on a surface rather than warped edge-to-edge, because "
+            "rectification needs a boundary to find and a borderless warp has none."
+        ),
+    ),
+    Condition(
+        name="tc11_angle_30",
+        tc="TC-11",
+        description="photographed 30° off-axis on a desk",
+        expectation="readable",
+        why="The angle the PRD names for TC-11.",
+    ),
+    Condition(
+        name="tc11_angle_45",
+        tc="TC-11",
+        description="photographed 45° off-axis on a desk",
+        expectation="readable",
+        why=(
+            "Past what anyone would call a reasonable photo. Included to find the point "
+            "where correction stops working, rather than to claim it always does."
+        ),
+    ),
+    Condition(
+        name="tc11_rotate_8",
+        tc="TC-11",
+        description="held 8° crooked, square to the label",
+        expectation="readable",
+        why=(
+            "In-plane rotation is a different defect from perspective and takes different "
+            "machinery. A set with only perspective cases would leave deskew untested."
+        ),
+    ),
+]
+
+#: Fixture name -> one-line description. Kept as a flat mapping because it is the shape
+#: the rest of the repo already reads.
+PRESETS: dict[str, str] = {c.name: c.description for c in CONDITIONS}
+
+
+def by_tc(tc: str) -> list[Condition]:
+    """Every condition covering one canonical test case."""
+    return [c for c in CONDITIONS if c.tc == tc]
 
 
 def apply_preset(image: np.ndarray, preset: str) -> np.ndarray:
     match preset:
         case "tc11_angle_15":
-            return perspective(image, 15.0)
+            return on_surface(image, degrees=15.0)
         case "tc11_angle_30":
-            return perspective(image, 30.0)
+            return on_surface(image, degrees=30.0)
         case "tc11_angle_45":
-            return perspective(image, 45.0)
+            return on_surface(image, degrees=45.0)
+        case "tc11_rotate_8":
+            return rotate(image, 8.0)
         case "tc12_glare_warning":
             return glare_over_warning(image)
         case "tc13_dim":
@@ -201,3 +275,72 @@ def apply_preset(image: np.ndarray, preset: str) -> np.ndarray:
             return cylinder(image)
         case _:
             raise KeyError(f"unknown degradation preset {preset!r}")
+
+
+# --------------------------------------------------------------------------------------
+# Building the set as files
+# --------------------------------------------------------------------------------------
+
+#: The compliant label every robustness fixture is degraded from. One base, so a
+#: difference between two conditions is the degradation and nothing else.
+BASE_FIXTURE = "tc01_old_tom_clean"
+
+
+def build(directory: Path | None = None) -> dict[str, str]:
+    """Render the robustness set to PNGs and return name -> sha256.
+
+    Deterministic: same code in, byte-identical files out (LP-123). The digests are
+    written alongside so a regeneration that silently changed a fixture shows up as a
+    diff rather than as a mysteriously moved test result.
+
+        python -m fixtures.generator.degrade
+    """
+    from PIL import Image
+
+    from fixtures.generator.catalog import by_name
+    from fixtures.generator.render import render
+
+    target = directory or Path(__file__).resolve().parents[2] / "fixtures" / "robustness"
+    target.mkdir(parents=True, exist_ok=True)
+
+    base = np.array(render(by_name(BASE_FIXTURE)))
+    digests: dict[str, str] = {}
+
+    for condition in CONDITIONS:
+        path = target / f"{condition.name}.png"
+        Image.fromarray(condition.apply(base)).save(path, "PNG", optimize=True)
+        digests[condition.name] = hashlib.sha256(path.read_bytes()).hexdigest()[:16]
+
+    manifest = {
+        "base": BASE_FIXTURE,
+        "note": (
+            "Degradations simulate optics, not physics. A Gaussian is not lens blur and "
+            "an overlay is not a specular highlight on curved glass. Reproducible, which "
+            "regression tests need and photographs cannot give — the gap is Tier B's job."
+        ),
+        "conditions": [
+            {
+                "name": c.name,
+                "tc": c.tc,
+                "description": c.description,
+                "expectation": c.expectation,
+                "why": c.why,
+                "sha256": digests[c.name],
+            }
+            for c in CONDITIONS
+        ],
+    }
+    (target / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
+    return digests
+
+
+def main() -> int:
+    digests = build()
+    print(f"rendered {len(digests)} robustness fixtures")
+    for name, digest in digests.items():
+        print(f"  {name:24s} {digest}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

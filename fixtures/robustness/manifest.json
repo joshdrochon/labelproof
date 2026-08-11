@@ -1,0 +1,38 @@
+{
+  "base": "tc01_old_tom_clean",
+  "note": "Degradations simulate optics, not physics. A Gaussian is not lens blur and an overlay is not a specular highlight on curved glass. Reproducible, which regression tests need and photographs cannot give \u2014 the gap is Tier B's job.",
+  "conditions": [
+    {
+      "name": "tc11_angle_15",
+      "tc": "TC-11",
+      "description": "photographed 15\u00b0 off-axis on a desk",
+      "expectation": "readable",
+      "why": "A mild angle is the most common real defect and the least excusable to fail on. Composited on a surface rather than warped edge-to-edge, because rectification needs a boundary to find and a borderless warp has none.",
+      "sha256": "0bff0d04fc6ca247"
+    },
+    {
+      "name": "tc11_angle_30",
+      "tc": "TC-11",
+      "description": "photographed 30\u00b0 off-axis on a desk",
+      "expectation": "readable",
+      "why": "The angle the PRD names for TC-11.",
+      "sha256": "473cf43fc1318a7b"
+    },
+    {
+      "name": "tc11_angle_45",
+      "tc": "TC-11",
+      "description": "photographed 45\u00b0 off-axis on a desk",
+      "expectation": "readable",
+      "why": "Past what anyone would call a reasonable photo. Included to find the point where correction stops working, rather than to claim it always does.",
+      "sha256": "009731ac923d5493"
+    },
+    {
+      "name": "tc11_rotate_8",
+      "tc": "TC-11",
+      "description": "held 8\u00b0 crooked, square to the label",
+      "expectation": "readable",
+      "why": "In-plane rotation is a different defect from perspective and takes different machinery. A set with only perspective cases would leave deskew untested.",
+      "sha256": "1e4f210fb1e71ddd"
+    }
+  ]
+}

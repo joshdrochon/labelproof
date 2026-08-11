@@ -10,6 +10,10 @@ which fields it cannot see — so the test fails if the region scorer stops noti
 glare, which is exactly the regression worth catching.
 """
 
+import hashlib
+import json
+from pathlib import Path
+
 import numpy as np
 import pytest
 
@@ -24,7 +28,8 @@ from fixtures.generator.layout import FIELD_BANDS
 from fixtures.generator.render import render
 from fixtures.generator.spec import LabelSpec
 
-CLEAN = "tc01_old_tom_clean"
+CLEAN = degrade.BASE_FIXTURE
+ROBUSTNESS_DIR = Path(__file__).resolve().parents[1] / "fixtures" / "robustness"
 
 
 @pytest.fixture(scope="module")
@@ -124,3 +129,81 @@ def test_a_clean_label_is_the_control(spec: LabelSpec, clean: np.ndarray) -> Non
     result, _, illegible = run(spec, clean)
     assert illegible == set()
     assert verdict_of(result, FieldName.GOVERNMENT_WARNING) is Verdict.MATCH
+
+
+# --- the robustness set, condition by condition -------------------------------------------
+
+def apply_and_run(spec: LabelSpec, clean: np.ndarray, condition: degrade.Condition):  # type: ignore[no-untyped-def]
+    return run(spec, condition.apply(clean))
+
+
+@pytest.mark.parametrize("condition", degrade.CONDITIONS, ids=lambda c: c.name)
+def test_each_condition_does_what_it_says_it_does(
+    spec: LabelSpec, clean: np.ndarray, condition: degrade.Condition
+) -> None:
+    """A robustness fixture with no stated expectation only proves the code did not crash.
+
+    Each condition declares one of three obligations and this checks that exact one, so a
+    change that turns a recoverable photo into a rejected one fails here rather than
+    quietly halving the set's value.
+    """
+    result, processed, illegible = apply_and_run(spec, clean, condition)
+
+    match condition.expectation:
+        case "readable":
+            assert illegible == set(), condition.name
+            assert (
+                verdict_of(result, FieldName.GOVERNMENT_WARNING) is Verdict.MATCH
+            ), condition.name
+        case "warning_illegible":
+            assert illegible == {FieldName.GOVERNMENT_WARNING}, condition.name
+            assert verdict_of(result, FieldName.BRAND_NAME) is Verdict.MATCH
+        case "pregated":
+            assert quality.should_skip_extraction(processed.quality_before), condition.name
+
+
+@pytest.mark.tc("TC-11")
+@pytest.mark.parametrize("condition", degrade.by_tc("TC-11"), ids=lambda c: c.name)
+def test_an_angled_photo_is_corrected_not_rejected(
+    spec: LabelSpec, clean: np.ndarray, condition: degrade.Condition
+) -> None:
+    """Jenny's "photographed at weird angles". The product answer is to straighten it,
+    not to hand the agent back a retake request they cannot act on."""
+    _, processed, _ = apply_and_run(spec, clean, condition)
+    assert processed.quality_after.verdict != "hopeless"
+    assert abs(processed.quality_after.skew_deg) < 2.0
+
+
+# --- the fixtures on disk ---------------------------------------------------------------------
+
+@pytest.mark.parametrize("condition", degrade.CONDITIONS, ids=lambda c: c.name)
+def test_every_condition_has_a_committed_fixture(condition: degrade.Condition) -> None:
+    """Committed as files so the set survives a change to the generator — a regression in
+    the renderer would otherwise silently rewrite the evidence and the tests would follow
+    it rather than catch it."""
+    assert (ROBUSTNESS_DIR / f"{condition.name}.png").exists()
+
+
+def test_the_manifest_matches_the_files_on_disk() -> None:
+    """LP-123. A regeneration that changed a fixture must show up as a diff, not as a
+    test result that moved for no visible reason."""
+    manifest = json.loads((ROBUSTNESS_DIR / "manifest.json").read_text())
+    for entry in manifest["conditions"]:
+        data = (ROBUSTNESS_DIR / f"{entry['name']}.png").read_bytes()
+        assert hashlib.sha256(data).hexdigest()[:16] == entry["sha256"], entry["name"]
+
+
+def test_regenerating_is_byte_identical(tmp_path: Path) -> None:
+    assert degrade.build(tmp_path) == degrade.build(tmp_path)
+
+
+def test_the_manifest_states_the_simulation_limit() -> None:
+    """The set simulates optics, not physics. Saying so in the artefact itself means the
+    caveat travels with the fixtures rather than living only in a document."""
+    manifest = json.loads((ROBUSTNESS_DIR / "manifest.json").read_text())
+    assert "not physics" in manifest["note"]
+
+
+def test_every_condition_explains_why_it_exists() -> None:
+    for condition in degrade.CONDITIONS:
+        assert condition.why and condition.tc and condition.description

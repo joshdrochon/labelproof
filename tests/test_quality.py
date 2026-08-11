@@ -259,8 +259,11 @@ def test_degradations_are_reproducible(clean: np.ndarray) -> None:
 
 
 def test_every_preset_applies(clean: np.ndarray) -> None:
+    """Shape is not asserted to be unchanged: a label composited onto the desk it was
+    photographed on is a bigger frame than the label, which is the point of that fixture."""
     for preset in degrade.PRESETS:
-        assert degrade.apply_preset(clean, preset).shape == clean.shape
+        out = degrade.apply_preset(clean, preset)
+        assert out.ndim == 3 and out.dtype == np.uint8 and out.size > 0
 
 
 def test_unknown_preset_raises() -> None:
