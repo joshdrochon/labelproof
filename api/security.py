@@ -2,9 +2,10 @@
 
 `harden(app, config)` is the whole front door. One call from the app factory installs the
 rate limiter, the response headers, the strict same-origin CORS rule, the exception
-containment layer, and process-wide traceback containment. One call rather than five because
-the posture is a single thing a reviewer should be able to read end to end, and because every
-extra wiring line in `api/main.py` is another chance to merge half of it.
+containment layer, process-wide traceback containment, and the retention sweeper. One call
+rather than six because the posture is a single thing a reviewer should be able to read end
+to end, and because every extra wiring line in `api/main.py` is another chance to merge half
+of it.
 
 **Order is load-bearing.** Starlette builds the user middleware stack so the *last*
 middleware added is the *outermost*, and `harden` is called after the app factory's own
@@ -128,6 +129,16 @@ def _env_flag(name: str, default: bool = False) -> bool:
     return raw.strip().lower() in ("1", "true", "yes", "on")
 
 
+def _env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
 @dataclass(frozen=True)
 class SecurityPolicy:
     """Everything about the posture that an operator can move, and its defaults."""
@@ -153,6 +164,12 @@ class SecurityPolicy:
 
     #: Replace tracebacks with a scrubbed line everywhere in the process (SEC-4).
     contain_tracebacks: bool = True
+
+    #: Retention (SEC-2). `ttl_hours` is the policy; `sweep_seconds` is how often the timer
+    #: checks, so the real worst-case artefact lifetime is the sum of the two.
+    retention_ttl_hours: int = 24
+    retention_sweep_seconds: int = 900
+    storage_dir: str = "./.data"
 
     warnings: list[str] = field(default_factory=list)
 
@@ -180,6 +197,9 @@ class SecurityPolicy:
             allowed_origins=origins,
             hsts=_env_flag("LABELPROOF_HSTS", True),
             contain_tracebacks=not _env_flag("LABELPROOF_DEBUG_TRACEBACKS", False),
+            retention_ttl_hours=(config.retention_hours if config is not None else 24),
+            retention_sweep_seconds=_env_int("LABELPROOF_RETENTION_SWEEP_SECONDS", 900),
+            storage_dir=(config.storage_dir if config is not None else "./.data"),
         )
 
 
@@ -324,6 +344,10 @@ def harden(app: FastAPI, config: Config | None = None) -> SecurityPolicy:
         install_log_containment()
 
     install_middleware(app, policy)
+
+    from api.retention import install_sweeper
+
+    install_sweeper(app, policy)
 
     app.state.security_policy = policy
     applog.log("security_installed", count=policy.rate_limit_per_minute)
