@@ -663,3 +663,136 @@ def test_the_interactive_paths_are_routes_that_exist() -> None:
     """A typo in INTERACTIVE_PATHS is a silent loss of the priority rule."""
     mounted = set(route_paths(create_app(config=make_config())))
     assert mounted.issuperset(batch_routes.INTERACTIVE_PATHS)
+
+# --- PERF-1: the API layer's own latency (LP-090) ---------------------------------------
+
+
+def api_overhead_ms(body: dict[str, Any]) -> int:
+    """Everything the request spent that was not the model call.
+
+    Ingest, quality scoring, the rules engine, and serialization — the part of PERF-1 this
+    codebase controls.
+    """
+    timings = body["timings_ms"]
+    return int(timings["total"]) - int(timings["extract"])
+
+
+#: Ceiling on our own overhead for a two-image verification, p95 over a warm process.
+#: Measured at ~130 ms on a developer laptop; this sits roughly eight times above that, so
+#: it catches a real regression (an accidental re-decode, an O(n^2) merge, a synchronous
+#: disk write) without flaking on a loaded CI box. It is also the number the 5-second gate
+#: needs: under a second here leaves four for the model.
+API_OVERHEAD_CEILING_MS = 1000
+
+
+def test_the_api_layer_stays_under_its_share_of_the_five_second_budget() -> None:
+    """LP-090, PERF-1 — with the provider stubbed, so this measures OUR overhead only.
+
+    READ THIS BEFORE QUOTING IT. The provider here is a fixture that answers instantly.
+    A green run says the ingest → quality → rules → serialization path is fast; it says
+    NOTHING about whether the deployed p95 is under five seconds, because the model call
+    is the dominant term and it is not in this measurement. A real Opus 5 extraction was
+    measured at 9.6s median and Haiku 4.5 at 5.5s, both of which blow the 5s budget on
+    their own. The deployed claim belongs to LP-144, timed against the deployed URL with
+    a live model.
+
+    What this test can honestly gate is the only part we control, and it gates it tightly.
+    """
+    client = make_client()
+    post_verify(client, roles=["front", "back"])  # warm the process; PERF-6 is LP-144's
+
+    overheads = [
+        api_overhead_ms(post_verify(client, roles=["front", "back"]).json())
+        for _ in range(12)
+    ]
+    p95 = sorted(overheads)[-2]
+    assert p95 < API_OVERHEAD_CEILING_MS, (
+        f"API-layer overhead p95 is {p95}ms against a {API_OVERHEAD_CEILING_MS}ms ceiling "
+        f"(all samples: {overheads})"
+    )
+
+
+def test_the_overhead_measurement_excludes_the_model_call() -> None:
+    """Guards the measurement itself: a slow provider must not inflate the API number.
+
+    Without this, the ceiling test could be made to pass by mis-attributing provider time,
+    or could start failing because someone swapped in a slower fixture — neither of which
+    is a fact about our overhead.
+    """
+    client = make_client(
+        provider=SlowProvider(by_name("tc16_front_back")),
+        request_budget_ms=4000,
+        provider_timeout_ms=3000,
+    )
+    body = post_verify(client).json()
+
+    assert body["timings_ms"]["extract"] >= 900, "the slow provider was not actually slow"
+    assert api_overhead_ms(body) < API_OVERHEAD_CEILING_MS
+
+
+def test_a_pre_gated_request_is_faster_still() -> None:
+    """The cheap path must stay cheap: no model call, no wait for one."""
+    client = make_client(provider=FailingProvider())
+    files = [("images", ("dark.png", png_bytes((2, 2, 2)), "image/png"))]
+    body = post_verify(client, files=files).json()
+    assert body["timings_ms"]["total"] < API_OVERHEAD_CEILING_MS
+
+
+# --- ENG-2: the sample-to-verdict smoke (LP-116) ----------------------------------------
+
+#: PERF-1's headline number. Asserted here in fixture mode, where it is a statement about
+#: this process and nothing else — see the docstring below.
+SMOKE_CEILING_SECONDS = 5.0
+
+
+def test_sample_to_verdict_smoke(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """LP-116, ENG-2 — the grader's whole first minute, in fixture mode, under 5s.
+
+    The walk is the real one: load the page, ask for the sample, fetch both images, post
+    them to /verify, read a recommendation. Every hop goes over HTTP through the app the
+    container serves, with the SPA present, and the only thing swapped out is the model
+    (ENG-3 — CI passes offline or it is not CI).
+
+    THE 5s HERE IS NOT THE DEPLOYED p95. The provider is a fixture that answers instantly,
+    so this bounds our own overhead plus the round trips, not the model. Live extraction
+    was measured at 9.6s median on Opus 5 and 5.5s on Haiku 4.5; the 5-second budget does
+    not hold against either without the split concurrent call, and proving it against the
+    deployed URL is LP-144's job, not this test's. A green run here means the app is
+    wired end to end and adds nothing meaningful to the model's time. It does not mean
+    PERF-1 is met in production, and it must never be quoted as though it did.
+    """
+    built_spa(tmp_path, monkeypatch)
+    client = make_client(storage_dir=str(tmp_path / "data"))
+
+    started = time.perf_counter()
+
+    page = client.get("/")
+    assert page.status_code == 200
+
+    sample = client.get("/sample")
+    assert sample.status_code == 200
+    offer = sample.json()
+
+    files = [
+        ("images", (image["filename"], client.get(image["url"]).content, "image/png"))
+        for image in offer["images"]
+    ]
+    response = post_verify(
+        client,
+        files=files,
+        application=offer["application"],
+        roles=[image["role"] for image in offer["images"]],
+    )
+    elapsed = time.perf_counter() - started
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["aggregate"]["recommendation"] == Recommendation.READY_TO_APPROVE.value
+    assert body["aggregate"]["rationale"]
+    assert len(body["fields"]) == 7
+    assert body["request_id"] == response.headers["X-Request-ID"]
+
+    assert elapsed < SMOKE_CEILING_SECONDS, (
+        f"sample to verdict took {elapsed:.2f}s in fixture mode, against a "
+        f"{SMOKE_CEILING_SECONDS:g}s ceiling"
+    )
