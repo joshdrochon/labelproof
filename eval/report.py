@@ -21,7 +21,7 @@ from __future__ import annotations
 
 from api.models import Verdict
 from eval.gates import FAIL, SKIP, Gate, exit_code_for, gates_for, status_line
-from eval.outcomes import Report
+from eval.outcomes import PASSING, Report
 from eval.tier_b import TierBSet
 
 RULE = "=" * 78
@@ -157,16 +157,39 @@ def confusion_section(report: Report) -> list[str]:
 def warning_section(report: Report) -> list[str]:
     """The release gate, reported with its denominator (OPS-3)."""
     violations = report.warning_violations
+    withheld = report.withheld_violations
     out = [
         "",
         RULE,
-        "GOVERNMENT WARNING — ZERO-FALSE-PASS GATE (OPS-3, release-blocking)",
+        "GOVERNMENT WARNING - ZERO-FALSE-PASS GATE (OPS-3, release-blocking)",
         RULE,
         f"  Warning rows scored:                {len(report.warning_rows):4d}",
-        f"  Of those, violations the set says must NOT pass: {len(violations):4d}",
+        f"  Of those, violations the set says must NOT pass: {len(violations):4d}"
+        f"   (required: {len(report.required_violations)})",
         f"  Of those, reported as passing (FALSE PASSES):    "
         f"{len(report.false_passes):4d}   <- must be 0",
     ]
+
+    if withheld:
+        out.append("")
+        out.append(
+            f"  WITHHELD from the denominator by 'pending': {len(withheld)}. These are"
+        )
+        out.append("  declared violations this run did not count as coverage:")
+        for o in withheld:
+            verdict = "PASSING" if o.actual in PASSING else o.actual.value
+            out.append(f"    {o.fixture:34s} got {verdict:22s} waiting on {o.pending}")
+        out.append("  'pending' cannot hide a false pass — it is still counted above.")
+
+    if report.missing_required_violations:
+        out.append("")
+        out.append("  COVERAGE SHORTFALL — required violation row(s) were not scored:")
+        for name in report.missing_required_violations:
+            out.append(f"    {name}")
+        out.append(
+            "  These are pinned in fixtures/generator/catalog.py. Shrinking the gate"
+        )
+        out.append("  means editing that list, in a diff someone has to approve.")
 
     if report.false_passes:
         out.append("")

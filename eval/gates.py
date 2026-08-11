@@ -88,18 +88,30 @@ def gates_for(report: Report) -> list[Gate]:
     false_passes = len(report.false_passes)
     violations = len(report.warning_violations)
 
+    missing = report.missing_required_violations
+    if report.subset:
+        coverage_summary = "subset run — coverage not required"
+    elif missing:
+        coverage_summary = (
+            f"required violation row(s) not scored: {', '.join(missing)} — "
+            f"the denominator shrank"
+        )
+    elif violations:
+        coverage_summary = (
+            f"{violations} warning-violation row(s) scored, "
+            f"{len(report.required_violations)} required"
+        )
+    else:
+        coverage_summary = (
+            "NO warning-violation rows scored; the zero-false-pass gate proved nothing"
+        )
+
     coverage = Gate(
         name="warning_gate_exercised",
-        status=SKIP if report.subset else _status(bool(violations)),
+        status=SKIP if report.subset else _status(report.warning_coverage_ok),
         blocking=True,
         exit_code=EXIT_WARNING_COVERAGE,
-        summary=(
-            "subset run — coverage not required"
-            if report.subset
-            else f"{violations} warning-violation row(s) scored"
-            if violations
-            else "NO warning-violation rows scored; the zero-false-pass gate proved nothing"
-        ),
+        summary=coverage_summary,
     )
 
     return [

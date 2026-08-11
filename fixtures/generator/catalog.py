@@ -201,6 +201,27 @@ NOT_GENERATED: dict[str, str] = {
 }
 
 
+#: Fixtures that MUST be scored as government-warning violations on every full run.
+#:
+#: The zero-false-pass gate's denominator, pinned in the repository. Without this, marking
+#: a fixture `pending` silently drops a check and the report still says "0 false passes",
+#: just across a smaller set — the cheapest way there is to clear a red build. Shrinking
+#: the gate now means shrinking this list, which is a line in a diff someone has to
+#: approve. Growing it is free and encouraged.
+#:
+#: `tc06_buried_warning` is deliberately absent: it is pending LP-211 and currently
+#: produces a live false pass (see the eval report). It joins this list when prominence
+#: heuristics land and it stops passing.
+REQUIRED_WARNING_VIOLATIONS: frozenset[str] = frozenset(
+    {
+        "tc03_title_case_warning",
+        "tc04_bold_warning_body",
+        "tc05_reworded_warning",
+        "tc07_missing_warning",
+    }
+)
+
+
 def by_name(name: str) -> LabelSpec:
     for spec in CATALOG:
         if spec.name == name:

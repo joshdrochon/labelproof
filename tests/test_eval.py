@@ -37,10 +37,33 @@ from eval.gates import (
 from eval.outcomes import ACCURACY_FLOOR, FieldOutcome, Report, evaluate
 from eval.report import render
 from eval.run import main, payload
-from fixtures.generator.catalog import CATALOG
+from fixtures.generator.catalog import CATALOG, REQUIRED_WARNING_VIOLATIONS
 from fixtures.generator.spec import LabelSpec
 
 REPO = Path(__file__).resolve().parents[1]
+
+#: Fixtures on which the PIPELINE currently fails open — a declared government-warning
+#: violation that comes back as a passing verdict.
+#:
+#: `tc06_buried_warning` renders a verbatim warning that is shrunk and low-contrast. The
+#: rules engine has no prominence heuristics yet (LP-211), so it answers `match`. That is
+#: a live false pass, and since the `pending` hole was closed the gate says so:
+#: `python -m eval.run` exits 3 today, and CI is correctly blocked until LP-211 merges.
+#:
+#: This register is NOT an override — `eval.run` has none, and that is the point of the
+#: fix. It exists so the developer suite can assert the true current state instead of a
+#: fiction. Every assertion below is written to pass BOTH before and after LP-211 lands,
+#: so the warning agent's fix cannot mask whether the gate hole is really closed.
+KNOWN_LIVE_FALSE_PASSES: frozenset[str] = frozenset({"tc06_buried_warning"})
+
+
+def live_false_passes() -> frozenset[str]:
+    return frozenset(o.fixture for o in evaluate(CATALOG).false_passes)
+
+
+def golden_exit() -> int:
+    """What a full run exits with today — EXIT_OK the moment the pipeline fails closed."""
+    return EXIT_WARNING_FALSE_PASS if live_false_passes() else EXIT_OK
 
 
 def outcome(**kw: object) -> FieldOutcome:
@@ -67,14 +90,41 @@ def warning_violation(**kw: object) -> FieldOutcome:
 
 # --- the real golden set ----------------------------------------------------------------
 
-def test_golden_set_passes() -> None:
+def test_the_golden_set_hides_no_false_pass_we_have_not_named() -> None:
+    """The register may shrink to nothing; it may never quietly grow.
+
+    Passes before LP-211 (tc06 is the one known gap) and after (no gap at all), so the
+    warning agent's fix landing cannot disguise a regression here.
+    """
+    assert live_false_passes() <= KNOWN_LIVE_FALSE_PASSES, (
+        f"unacknowledged false pass: {sorted(live_false_passes() - KNOWN_LIVE_FALSE_PASSES)}"
+    )
+
+
+def test_the_gate_fires_while_a_live_false_pass_exists() -> None:
+    """A known gap is still a red build. There is no register inside the gate itself."""
     report = evaluate(CATALOG)
-    assert report.passed, render(report)
+    if live_false_passes():
+        assert not report.passed, "a live false pass must fail the run"
+        assert exit_code_for(gates_for(report)) == EXIT_WARNING_FALSE_PASS
+    else:
+        assert report.passed, render(report)
 
 
-def test_golden_set_has_no_false_passes_on_warnings() -> None:
-    """OPS-3 — release-blocking, checked independently of overall accuracy."""
-    assert evaluate(CATALOG).false_passes == []
+def test_every_known_gap_names_a_ticket_in_the_report() -> None:
+    """A gap without an owner is a gap nobody closes."""
+    text = render(evaluate(CATALOG))
+    for fixture in live_false_passes():
+        assert fixture in text
+    assert len(KNOWN_LIVE_FALSE_PASSES) <= 1, (
+        "growing this register is a deliberate act — justify it in the diff"
+    )
+
+
+def test_golden_set_scores_every_required_warning_violation() -> None:
+    report = evaluate(CATALOG)
+    assert report.missing_required_violations == []
+    assert report.required_violations == REQUIRED_WARNING_VIOLATIONS
 
 
 def test_golden_set_actually_exercises_the_warning_gate() -> None:
@@ -212,13 +262,74 @@ def test_pending_outcomes_do_not_count_toward_accuracy() -> None:
     assert report.accuracy == 1.0
 
 
-def test_pending_outcomes_do_not_trip_the_false_pass_gate() -> None:
+def test_pending_does_not_excuse_a_passing_verdict_on_a_warning_violation() -> None:
+    """The bypass, closed. `pending` excuses a WRONG verdict, never a PASSING one.
+
+    Catalog-independent on purpose: this is the assertion that must keep proving the hole
+    is shut no matter what any fixture's expectation becomes later.
+    """
     report = Report(tier="A", outcomes=[
         warning_violation(),
-        warning_violation(actual=Verdict.MATCH, pending="LP-211"),
+        warning_violation(fixture="hidden", actual=Verdict.MATCH, pending="LP-999"),
     ])
+    assert [o.fixture for o in report.false_passes] == ["hidden"]
+    assert not report.passed
+
+
+def test_pending_still_excuses_an_inaccurate_but_fail_closed_verdict() -> None:
+    """The legitimate use survives: a capability we lack may be wrong, not permissive."""
+    report = Report(
+        tier="A",
+        outcomes=[
+            warning_violation(),
+            warning_violation(expected=Verdict.MISSING, actual=Verdict.UNREADABLE,
+                              pending="LP-211"),
+        ],
+    )
     assert report.false_passes == []
     assert report.passed
+
+
+def test_marking_a_required_fixture_pending_fails_the_run() -> None:
+    """The denominator cannot shrink quietly either — the reviewer's suggested addition."""
+    required = frozenset({"tc03_title_case_warning", "tc04_bold_warning_body"})
+    report = Report(
+        tier="A",
+        required_violations=required,
+        outcomes=[
+            warning_violation(fixture="tc03_title_case_warning"),
+            # Marked pending, and answering non-permissively so no false pass fires.
+            warning_violation(fixture="tc04_bold_warning_body", actual=Verdict.UNREADABLE,
+                              pending="LP-999"),
+        ],
+    )
+    assert report.missing_required_violations == ["tc04_bold_warning_body"]
+    assert not report.warning_coverage_ok
+    assert not report.passed
+    assert exit_code_for(gates_for(report)) == EXIT_WARNING_COVERAGE
+
+
+def test_the_report_names_a_shrunken_denominator() -> None:
+    report = Report(
+        tier="A",
+        required_violations=frozenset({"tc03_title_case_warning", "tc04_bold_warning_body"}),
+        outcomes=[warning_violation(fixture="tc03_title_case_warning")],
+    )
+    text = render(report)
+    assert "COVERAGE SHORTFALL" in text
+    assert "tc04_bold_warning_body" in text
+
+
+def test_withheld_violations_are_reported_not_silently_dropped() -> None:
+    report = Report(tier="A", outcomes=[
+        warning_violation(),
+        warning_violation(fixture="tc06_buried_warning", actual=Verdict.UNREADABLE,
+                          pending="LP-211"),
+    ])
+    text = render(report)
+    assert "WITHHELD from the denominator" in text
+    assert "tc06_buried_warning" in text
+    assert "LP-211" in text
 
 
 def test_a_run_with_nothing_scored_does_not_pass() -> None:
@@ -267,7 +378,7 @@ def test_the_warning_section_reports_its_denominator() -> None:
     """A zero without the count of checks behind it is not a result."""
     report = evaluate(CATALOG)
     text = render(report)
-    assert "GOVERNMENT WARNING — ZERO-FALSE-PASS GATE" in text
+    assert "GOVERNMENT WARNING - ZERO-FALSE-PASS GATE" in text
     assert f"must NOT pass: {len(report.warning_violations):4d}" in text
     assert "<- must be 0" in text
 
@@ -311,15 +422,15 @@ def test_errors_are_not_quietly_folded_into_accuracy() -> None:
 
 # --- the CLI --------------------------------------------------------------------------------
 
-def test_cli_exits_zero_when_the_set_passes() -> None:
-    assert main([]) == 0
+def test_cli_exit_code_reflects_the_real_state_of_the_set() -> None:
+    assert main([]) == golden_exit()
 
 
 def test_cli_json_output_is_parseable(capsys: pytest.CaptureFixture[str]) -> None:
     main(["--json"])
     body = json.loads(capsys.readouterr().out)
-    assert body["passed"] is True
-    assert body["false_passes"] == 0
+    assert body["false_passes"] == len(live_false_passes())
+    assert body["passed"] is (golden_exit() == EXIT_OK)
     assert body["warning_violations"] > 0
     assert body["warning_coverage_ok"] is True
 
@@ -345,10 +456,12 @@ def test_payload_round_trips_through_json() -> None:
 
 # --- CI gates (LP-122) ------------------------------------------------------------------------
 
-def test_the_golden_set_clears_every_blocking_gate() -> None:
+def test_only_the_known_gap_fails_a_blocking_gate() -> None:
     gates = gates_for(evaluate(CATALOG))
-    assert [g.name for g in gates if g.status == "fail"] == []
-    assert exit_code_for(gates) == EXIT_OK
+    failing = {g.name for g in gates if g.status == "fail"}
+    expected = {"warning_zero_false_pass"} if live_false_passes() else set()
+    assert failing == expected
+    assert exit_code_for(gates) == golden_exit()
 
 
 def test_gates_agree_with_report_passed() -> None:
@@ -440,7 +553,7 @@ def test_the_failing_report_names_its_exit_code() -> None:
 
 
 def test_cli_exit_code_matches_the_payload() -> None:
-    assert main(["--json"]) == EXIT_OK
+    assert main(["--json"]) == golden_exit()
 
 
 def test_cli_usage_error_code_is_distinct_from_every_gate() -> None:
@@ -453,11 +566,10 @@ def test_cli_writes_a_report_artifact(tmp_path: object) -> None:
     from pathlib import Path
 
     out = Path(str(tmp_path)) / "nested" / "report.json"
-    assert main(["--report-json", str(out)]) == EXIT_OK
+    assert main(["--report-json", str(out)]) == golden_exit()
     body = json.loads(out.read_text())
-    assert body["status"] == "pass"
     assert body["gates"]
-    assert body["exit_code"] == EXIT_OK
+    assert body["exit_code"] == golden_exit()
 
 
 def test_documented_ci_command_matches_the_parser() -> None:
@@ -488,8 +600,8 @@ def test_the_documented_ci_command_runs_and_passes(tmp_path: Path) -> None:
     """The exact command in eval/README.md, end to end, as CI will invoke it."""
     artifact = tmp_path / "report.json"
     done = _run(["-m", "eval.run", "--report-json", str(artifact)])
-    assert done.returncode == EXIT_OK, done.stdout + done.stderr
-    assert json.loads(artifact.read_text())["status"] == "pass"
+    assert done.returncode == golden_exit(), done.stdout + done.stderr
+    assert json.loads(artifact.read_text())["exit_code"] == golden_exit()
 
 
 def test_the_ci_run_makes_no_live_provider_call(tmp_path: Path) -> None:
@@ -507,7 +619,7 @@ def test_the_ci_run_makes_no_live_provider_call(tmp_path: Path) -> None:
         "sys.exit(code)"
     )
     done = _run(["-c", probe], ANTHROPIC_API_KEY="sk-ant-not-a-real-key")
-    assert done.returncode == EXIT_OK, done.stdout + done.stderr
+    assert done.returncode == golden_exit(), done.stdout + done.stderr
 
 
 def test_the_run_records_which_extractor_produced_the_number(
@@ -526,14 +638,16 @@ def test_a_seeded_regression_trips_the_threshold_gate(
     broken = [CATALOG[0].with_(expect={"brand_name": "mismatch"}), *CATALOG[1:]]
     monkeypatch.setattr(run_module, "CATALOG", broken)
 
-    # One wrong row out of ~98 is still above the 95% floor — the default run passes.
-    assert main([]) == EXIT_OK
-    # Raise the bar and the same run is blocked.
-    assert main(["--min-accuracy", "1.0"]) == EXIT_ACCURACY
+    # One wrong row out of ~98 is still above the 95% floor, so accuracy is not what
+    # blocks: the run exits on whatever the set already exits on.
+    assert main([]) == golden_exit()
+    # Raise the bar and accuracy becomes the binding gate — unless a false pass, which
+    # outranks it, is already live.
+    assert main(["--min-accuracy", "1.0"]) == (golden_exit() or EXIT_ACCURACY)
 
 
 def test_the_threshold_can_be_raised() -> None:
-    assert main(["--min-accuracy", "1.0"]) == EXIT_OK
+    assert main(["--min-accuracy", "1.0"]) == golden_exit()
 
 
 def test_the_threshold_cannot_be_lowered_below_the_ops3_floor() -> None:
@@ -566,7 +680,7 @@ def test_two_runs_produce_byte_identical_text_output() -> None:
     """
     first = _run(["-m", "eval.run"], PYTHONHASHSEED="0")
     second = _run(["-m", "eval.run"], PYTHONHASHSEED="12345")
-    assert first.returncode == second.returncode == EXIT_OK
+    assert first.returncode == second.returncode == golden_exit()
     assert first.stdout == second.stdout
 
 
@@ -700,7 +814,7 @@ def test_a_tier_b_false_pass_does_not_change_the_exit_code() -> None:
     """Tier B is reported, never gating — including its safety-critical rows."""
     tier_a = evaluate(CATALOG)
     broken = Report(tier="B", outcomes=[warning_violation(actual=Verdict.MATCH)])
-    assert exit_code_for(gates_for(tier_a)) == EXIT_OK
+    assert exit_code_for(gates_for(tier_a)) == golden_exit()
     text = render(tier_a, tier_b.load(), broken)
     assert "Tier B does not gate" in text
     assert text.strip().endswith("subset=false")
@@ -792,7 +906,7 @@ def test_a_broken_manifest_fails_the_run_that_asked_for_tier_b(
     monkeypatch.setattr(tier_b, "MANIFEST", path)
     assert main(["--tier", "b"]) == EXIT_USAGE
     # ...and does not break the run that never asked for it.
-    assert main([]) == EXIT_OK
+    assert main([]) == golden_exit()
 
 
 def test_tier_b_skips_rather_than_fails_without_credentials(
@@ -803,7 +917,7 @@ def test_tier_b_skips_rather_than_fails_without_credentials(
     monkeypatch.setattr(tier_b, "MANIFEST", path)
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
 
-    assert main(["--json", "--tier", "b"]) == EXIT_OK
+    assert main(["--json", "--tier", "b"]) == golden_exit()
     body = json.loads(capsys.readouterr().out)["tier_b"]
     assert body["accuracy"] is None
     assert "ANTHROPIC_API_KEY" in body["note"]
@@ -853,7 +967,17 @@ class _Harness:
         return [ImageInput(index=i, data=b"x", role=r) for i, r in enumerate(roles)]
 
     def extract(self, request: ExtractionRequest) -> ExtractionResponse:
-        response = SpecBackedProvider(self.spec).extract(request)
+        # A model that FAILS CLOSED where the rules engine currently fails open. These
+        # tests exercise the sweep's table, disqualification rule and recommendation; the
+        # pipeline's own LP-211 gap is asserted separately and would otherwise turn every
+        # simulated model into a false-pass disqualification for a reason unrelated to
+        # what is under test.
+        illegible = (
+            {FieldName.GOVERNMENT_WARNING}
+            if self.spec.name in KNOWN_LIVE_FALSE_PASSES
+            else set()
+        )
+        response = SpecBackedProvider(self.spec, illegible=illegible).extract(request)
         response.usage = ProviderUsage(
             input_tokens=self.tokens[0], output_tokens=self.tokens[1], model=self.name
         )
@@ -982,13 +1106,13 @@ def test_the_sweep_is_opt_in_and_never_runs_by_default(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """The CI command cannot reach the live path — that is what keeps the build free."""
-    assert main([]) == EXIT_OK
+    assert main([]) == golden_exit()
     assert "MODEL-TIER SWEEP" not in capsys.readouterr().out
 
 
 def test_a_dry_run_estimates_the_spend_and_stops() -> None:
     done = _run(["-m", "eval.run", "--model", "claude-opus-5", "--dry-run"])
-    assert done.returncode == EXIT_OK
+    assert done.returncode == golden_exit()
     assert "Estimated spend" in done.stdout
     assert "Nothing was spent" in done.stdout
     assert "MODEL-TIER SWEEP" not in done.stdout
@@ -997,7 +1121,7 @@ def test_a_dry_run_estimates_the_spend_and_stops() -> None:
 def test_the_sweep_skips_rather_than_fails_offline() -> None:
     """An offline machine has not regressed; it has not measured."""
     done = _run(["-m", "eval.run", "--model", "claude-haiku-4-5"], ANTHROPIC_API_KEY="")
-    assert done.returncode == EXIT_OK
+    assert done.returncode == golden_exit()
     assert "ANTHROPIC_API_KEY is not set" in done.stdout
     assert "not a failure" in done.stdout
 

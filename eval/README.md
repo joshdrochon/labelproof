@@ -40,15 +40,36 @@ Branch on these. When several gates fail, the worst one wins, in this order:
 | `4` | `harness_ran_clean` | a fixture crashed and was never scored |
 | `5` | `warning_gate_exercised` | no warning-violation rows were scored, so the zero proves nothing |
 
-**Code 3 is hard-blocking and has no override.** There is no flag, environment variable or
-threshold that lets a run with a warning false pass exit zero. A false pass on the
+**Code 3 is hard-blocking and has no override.** No flag, environment variable, threshold
+or fixture annotation lets a run with a warning false pass exit zero. A false pass on the
 government warning is the worst outcome this product can produce (PRD §What it must never
 do), so it fails the run on its own regardless of overall accuracy. If CI ever needs to
 land a change while code 3 is red, the change is wrong, not the gate.
 
-Code 5 exists because `0 false passes` out of zero checks is arithmetically true and
-worthless — it is exactly what a broken fixture load produces. A gate that reports green
-after checking nothing is worse than no gate.
+That sentence was **false until 2026-08-11**, and the fix is worth knowing about. A
+fixture marked `pending="LP-nnn"` used to drop out of both the numerator and the
+denominator of this gate, so one word in `fixtures/generator/catalog.py` turned a live
+false pass into `"false_passes": 0`, exit `0`, `PASS`. `pending` now excuses an
+*inaccurate* verdict and never a *passing* one — see `FieldOutcome.is_warning_false_pass`.
+
+Code 5 has two triggers, both about the denominator:
+
+- **No violation rows scored at all.** `0 false passes` out of zero checks is
+  arithmetically true and worthless — it is what a broken fixture load produces.
+- **The denominator shrank.** `REQUIRED_WARNING_VIOLATIONS` in
+  `fixtures/generator/catalog.py` pins the fixtures that must be checked on every full
+  run. Marking one `pending` no longer quietly reduces five checks to four; it fails here
+  and the report names the missing fixture. Shrinking the gate means editing that list, in
+  a diff someone has to approve.
+
+### Current known gap
+
+`tc06_buried_warning` is a **live false pass** on this branch: a shrunk, low-contrast but
+verbatim warning, which the rules engine reports as `match` because prominence heuristics
+(LP-211) are not implemented here. `python -m eval.run` therefore exits `3` and CI is
+correctly blocked. LP-211 has landed on `wave/warning`; merging it clears this. The
+developer test suite asserts this exact state and is written to keep passing once the gap
+closes, so the fix landing cannot disguise whether the gate hole is really shut.
 
 ## Machine-readable output
 

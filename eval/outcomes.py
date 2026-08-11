@@ -30,6 +30,7 @@ from api.models import Application, FieldName, Verdict
 from api.provider.base import ExtractionProvider, ImageInput
 from api.provider.fake import SpecBackedProvider
 from api.verify import verify
+from fixtures.generator.catalog import REQUIRED_WARNING_VIOLATIONS
 from fixtures.generator.spec import LabelSpec
 
 #: Verdicts that mean "this field is fine". A warning row expected to be MISMATCH or
@@ -62,19 +63,46 @@ class FieldOutcome:
         return self.field is FieldName.GOVERNMENT_WARNING
 
     @property
-    def is_warning_violation(self) -> bool:
-        """A warning row the golden set says must NOT pass.
+    def declares_warning_violation(self) -> bool:
+        """A warning row the golden set says must NOT pass, pending or not."""
+        return self.is_warning_row and self.expected not in PASSING
 
-        These are the only rows on which a false pass is possible, so they are what the
-        release gate is measured over. A pending row is excluded: the capability provably
-        does not exist yet, so it can neither pass nor prove the gate was exercised.
+    @property
+    def is_warning_violation(self) -> bool:
+        """A declared violation that COUNTS TOWARD COVERAGE — the gate's denominator.
+
+        A pending row is excluded here because a capability that provably does not exist
+        cannot prove the gate works. It is emphatically **not** excluded from
+        `is_warning_false_pass`: see the asymmetry note there.
         """
-        return not self.pending and self.is_warning_row and self.expected not in PASSING
+        return not self.pending and self.declares_warning_violation
+
+    @property
+    def is_withheld_warning_violation(self) -> bool:
+        """A declared violation held out of the denominator by `pending`.
+
+        Reported in its own right so shrinking the denominator is a visible act rather
+        than a silent one.
+        """
+        return bool(self.pending) and self.declares_warning_violation
 
     @property
     def is_warning_false_pass(self) -> bool:
-        """Expected a warning violation, got a passing verdict. Release-blocking."""
-        return self.is_warning_violation and self.actual in PASSING
+        """Expected a warning violation, got a passing verdict. Release-blocking.
+
+        **`pending` does not apply here, and the asymmetry is the whole point.** Until
+        2026-08-11 this read `is_warning_violation`, so one word in the catalog removed a
+        row from both the numerator and the denominator — an override of the gate the
+        README swore had none, and the obvious move for anyone wanting to clear a red
+        build. A reviewer reproduced it in one line.
+
+        The rule now: `pending` excuses an INACCURATE verdict; it never excuses a PASSING
+        one on a warning violation. That is not a technicality — PRD §Constraints says
+        warning checks fail closed, so a capability we have not built yet must surface as
+        Unreadable or Needs review. A pipeline answering `match` because it cannot see the
+        defect is failing open, which is the one thing this gate exists to catch.
+        """
+        return self.declares_warning_violation and self.actual in PASSING
 
 
 @dataclass
@@ -95,6 +123,16 @@ class Report:
     floor: float = ACCURACY_FLOOR
     """Accuracy threshold for this run. May be raised above OPS-3's 95%, never lowered —
     `eval.run` rejects a lower value rather than accepting a gate that cannot fail."""
+
+    required_violations: frozenset[str] = frozenset()
+    """Fixtures that MUST appear as scored warning violations.
+
+    The second half of the `pending` fix. Even with a false pass now impossible to
+    suppress, marking a fixture pending still shrinks the gate's denominator — five
+    checks quietly becoming four, with the report cheerfully reporting "0 false passes
+    across 4 violation row(s)". This is the committed list the run is measured against,
+    so a shrinking denominator has to shrink this list too, in a reviewable diff.
+    """
 
     subset: bool = False
     """True when the operator narrowed the run with --fixture.
@@ -144,17 +182,35 @@ class Report:
         return [o for o in self.outcomes if o.is_warning_violation]
 
     @property
+    def withheld_violations(self) -> list[FieldOutcome]:
+        """Declared violations held out of the denominator by `pending`."""
+        return [o for o in self.outcomes if o.is_withheld_warning_violation]
+
+    @property
     def false_passes(self) -> list[FieldOutcome]:
         return [o for o in self.outcomes if o.is_warning_false_pass]
 
     @property
-    def warning_coverage_ok(self) -> bool:
-        """Did this run actually exercise the zero-false-pass gate?
+    def missing_required_violations(self) -> list[str]:
+        """Fixtures the committed list requires but this run did not score.
 
-        Zero false passes out of zero checks is not evidence of anything. A narrowed
-        run is exempt because the operator chose the narrowing.
+        Names them rather than counting them: "coverage dropped by one" sends someone
+        hunting, "tc04_bold_warning_body is no longer checked" does not.
         """
-        return self.subset or bool(self.warning_violations)
+        scored = {o.fixture for o in self.warning_violations}
+        return sorted(self.required_violations - scored)
+
+    @property
+    def warning_coverage_ok(self) -> bool:
+        """Did this run actually exercise the zero-false-pass gate, in full?
+
+        Two ways to fail. Zero checks is not evidence of anything, and neither is a
+        denominator that quietly shrank below what the repository declares. A narrowed
+        `--fixture` run is exempt from both because the operator chose the narrowing.
+        """
+        if self.subset:
+            return True
+        return bool(self.warning_violations) and not self.missing_required_violations
 
     # --- verdicts ---------------------------------------------------------------------
 
@@ -225,6 +281,7 @@ def evaluate(
     subset: bool = False,
     floor: float = ACCURACY_FLOOR,
     provider_name: str = "fake:spec",
+    required_violations: frozenset[str] | None = None,
     provider_for: ProviderFactory | None = None,
 ) -> Report:
     """Run the given specs through the real pipeline and score the result.
@@ -240,6 +297,9 @@ def evaluate(
         fixtures=len(specs),
         floor=floor,
         provider=provider_name,
+        required_violations=(
+            REQUIRED_WARNING_VIOLATIONS if required_violations is None else required_violations
+        ),
     )
 
     for spec in specs:
