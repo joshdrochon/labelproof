@@ -9,11 +9,13 @@ truth for requirements.
 
 ## Security, privacy, and data retention
 
-> **Wiring status.** Every control below is installed by one call — `api.security.harden(app,
-> config)` — from the app factory. If `api/main.py` does not make that call, none of it is
-> live: no CSP, no rate limiting, no CORS enforcement, no exception containment, no retention
-> sweeper. Four `xfail(strict)` tests in `tests/test_security.py` hold that line and turn the
-> suite red the moment the wiring lands, so it cannot be dropped or added quietly.
+> **Wiring.** Every control below is installed by one call — `api.security.harden(app,
+> config)` — made from the app factory in `api/main.py`, after `_install_middleware` so the
+> security layers end up outermost. If that call is ever removed, none of it is live: no CSP,
+> no rate limiting, no CORS enforcement, no exception containment, no retention sweeper. Five
+> tests in `tests/test_security.py` take the app exactly as the process serves it and assert
+> the controls are on; they are the only tests here that can see the wiring, so do not give
+> them their own `harden()` call to make them pass.
 
 Marcus set the posture: *"there's PII considerations, document retention policies, the usual
 federal compliance stuff. But for a prototype? Just don't do anything crazy."* This section is
@@ -50,14 +52,24 @@ sweep therefore follows a purge with `VACUUM` and `PRAGMA wal_checkpoint(TRUNCAT
 test reads **every byte of every file** under the storage root — database, write-ahead log and
 all — to assert the brand name, the producer address and the artwork are gone.
 
-That cleanup is an *obligation*, not a side effect of a successful purge. A `.compaction-owed`
-marker is written next to the database the moment anything is deleted and removed only once a
-compaction has verifiably finished — VACUUM did not raise, `wal_checkpoint(TRUNCATE)` reported
-not-busy (it **returns** `(busy, log, checkpointed)`; it does not raise, and an earlier version
-read success into a measured `(1, 17, 0)`), and the WAL is measurably empty. A compaction that
-loses the database lock to a running batch warns, leaves the marker, and is retried on the next
-sweep. The marker is a file so the obligation survives a restart between the delete and the
-rebuild. Tests: `tests/test_retention.py`.
+That cleanup is an *obligation*, and the sweep works out whether it is owed **from the
+database file rather than from whoever did the deleting**. It records a fingerprint (size and
+mtime of `jobs.db` and its sidecars) each time a compaction verifiably finishes, and compacts
+unless the file still matches. A delete cannot avoid writing to the database, so there is no
+delete path — present or future — that can leave residue this does not notice.
+
+That matters because not every delete is the sweep's. `api/routes/batch.py` purges on its way
+into `POST /batch`, and an earlier design that had the deleter record the obligation missed it
+entirely: rows gone, nothing marked, next sweep reporting clean over a database from which
+`strings` still yielded every brand name. Inserts move the fingerprint too, so this compacts
+somewhat more often than strictly necessary — the correct direction to be wrong in, at the cost
+of a VACUUM of a small database on a fifteen-minute timer.
+
+A compaction is only treated as finished when VACUUM did not raise, `wal_checkpoint(TRUNCATE)`
+reported not-busy (it **returns** `(busy, log, checkpointed)`; it does not raise, and an
+earlier version read success into a measured `(1, 17, 0)`), and the WAL is measurably empty.
+One that loses the database lock to a running batch warns and is retried next sweep. Tests:
+`tests/test_retention.py`.
 
 **Known gap, another file's to close.** `GET /batch/{id}` and `GET /batch/{id}/export.csv`
 serve a job for as long as its row survives, which is at least TTL + one sweep interval — while
@@ -88,12 +100,17 @@ which on the extraction path is the label the model just read. So:
 - an exception-containment middleware catches every unhandled exception before it can escape
   to the server, logs one scrubbed line naming only the exception class, and returns the
   taxonomy 500 with a request ID;
+- the retention timer re-asserts the guard every sweep, because a library installing its own
+  `logging.setLogRecordFactory` after startup would otherwise switch it off for the life of
+  the process with nothing to notice;
 - process-wide containment replaces the log record factory, `sys.excepthook` and
   `threading.excepthook`, so a traceback logged by *any* library, on *any* thread, is reduced
   to `<ExceptionType> suppressed: traceback withheld (SEC-4)`. Exception objects passed as
   ordinary log arguments (`logger.error("failed: %s", exc)` — no `exc_info`, and the most
-  common way anyone writes that line) are replaced with their class name. Everything else
-  keeps its message, so uvicorn's startup and bind lines still read normally.
+  common way anyone writes that line) are replaced with their class name, including
+  exceptions nested inside lists, tuples, sets and dicts, which is the shape a batch worker
+  collects them in. Everything else keeps its message, so uvicorn's startup and bind lines
+  still read normally.
 
 Set `LABELPROOF_DEBUG_TRACEBACKS=1` to turn the second layer off while debugging locally. It is
 off by default in every other configuration. Tests: `tests/test_security.py`, including one
