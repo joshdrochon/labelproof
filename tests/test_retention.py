@@ -1,9 +1,11 @@
-"""Retention TTL: configurable, defaulted to 24h, and driven by a timer (SEC-2, LP-084).
+"""Retention TTL and its proof (SEC-2, LP-084, LP-085, LP-250).
 
-The finding this ticket exists to fix is that `POST /batch` sweeps on its way in, so a
-server that receives no new batches never sweeps at all. The test named for that drives
-the sweeper with zero requests of any kind, which is the deployment the policy is
-actually written for: a container left running overnight with one batch on disk.
+"Provably gone" is taken literally here. Every assertion about a purge reads the filesystem:
+the image path is checked with `Path.exists`, and the brand name is searched for in **every
+byte of every file** under the storage root — `jobs.db`, its write-ahead log and its shared
+index included. A test that trusted `purge_expired()`'s return value would have passed over
+the finding in `test_deleted_rows_leave_no_residue_in_the_database`, which is exactly the
+kind of thing this ticket exists to catch.
 """
 
 from __future__ import annotations
@@ -83,6 +85,15 @@ def seed_job(store: BatchStore, *, created: float, ttl_hours: int = 24) -> tuple
     return job.job_id, store.images_root / job.job_id / stored_name("front.png")
 
 
+def every_byte_under(root: Path) -> bytes:
+    """Everything on disk under `root`, concatenated. The only honest way to say 'gone'."""
+    chunks: list[bytes] = []
+    for path in sorted(root.rglob("*")):
+        if path.is_file():
+            chunks.append(path.read_bytes())
+    return b"".join(chunks)
+
+
 def policy_for(tmp_path: Path, *, ttl_hours: int = 24) -> RetentionPolicy:
     return RetentionPolicy(storage_dir=tmp_path, ttl_hours=ttl_hours, sweep_seconds=900)
 
@@ -119,6 +130,45 @@ def test_an_expired_job_loses_its_results_too(tmp_path: Path) -> None:
 
     sweep(policy_for(tmp_path), now=created + 25 * HOUR, store=store)
     assert store.items(job_id) == []
+
+
+def test_deleted_rows_leave_no_residue_in_the_database(tmp_path: Path) -> None:
+    """The finding that makes 'provably' mean something.
+
+    SQLite's `secure_delete` is off by default: a DELETE unlinks rows from the b-tree and
+    leaves their bytes in freed pages. `purge_expired()` would return a tidy list of job IDs
+    while three hundred applications' brand names and producer addresses stayed recoverable
+    from `jobs.db` with `strings`. The sweep follows a purge with VACUUM and a WAL truncate,
+    and this reads every byte back to prove it.
+    """
+    store = BatchStore(tmp_path)
+    created = time.time()
+    seed_job(store, created=created)
+
+    assert BRAND.encode() in every_byte_under(tmp_path), "precondition: it is on disk now"
+
+    sweep(policy_for(tmp_path), now=created + 25 * HOUR, store=store)
+
+    remains = every_byte_under(tmp_path)
+    assert BRAND.encode() not in remains, "brand name survived the purge inside the database"
+    assert ADDRESS.encode() not in remains, "producer address survived the purge"
+    assert IMAGE_BYTES not in remains, "label artwork survived the purge"
+
+
+def test_deleting_alone_would_not_have_been_enough(tmp_path: Path) -> None:
+    """Names the failure the VACUUM prevents, so a future refactor cannot quietly undo it."""
+    store = BatchStore(tmp_path)
+    created = time.time()
+    store_root = tmp_path
+    seed_job(store, created=created)
+
+    # Exactly what `purge_expired` does, and nothing after it.
+    store.purge_expired(now=created + 25 * HOUR)
+
+    assert BRAND.encode() in every_byte_under(store_root), (
+        "if this ever stops being true, secure_delete was turned on upstream and the "
+        "VACUUM in api/retention.py can be dropped — the property test above still holds"
+    )
 
 
 def test_a_job_inside_its_ttl_is_untouched(tmp_path: Path) -> None:

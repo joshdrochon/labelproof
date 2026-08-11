@@ -10,9 +10,18 @@ with one batch on disk keeps it forever, and that is precisely the deployment th
 written for. The existing hook is harmless and stays; this adds the trigger that does not
 depend on traffic.
 
-**Why the sweep runs on a thread.** It does blocking SQLite and filesystem work. Doing that
-on the event loop would put the 5-second gate at risk for whoever happens to be
+**Why the sweep runs on a thread.** It does blocking SQLite work, including a `VACUUM`.
+Doing that on the event loop would put the 5-second gate at risk for whoever happens to be
 mid-verification when the timer fires (PERF-1).
+
+**Why `VACUUM`.** This is the part that makes "provably gone" mean something. SQLite's
+default `secure_delete` is off, so a `DELETE` unlinks rows from the b-tree and leaves their
+bytes in freed pages inside `jobs.db`. After a purge returns a tidy list of job IDs, three
+hundred applications' brand names and producer addresses are still sitting in that file and
+`strings` will find them. `VACUUM` rebuilds the file without the free pages, and
+`wal_checkpoint(TRUNCATE)` makes sure the residue does not survive in the write-ahead log
+either. `tests/test_retention.py` asserts the property by reading every byte of every file
+under the storage root — not by trusting the return value.
 
 **Single verifications persist nothing.** `POST /verify` reads uploads into memory, ingests
 them, and returns the result in the response body. There is no artefact for the TTL to
@@ -90,6 +99,7 @@ class SweepReport:
     jobs_purged: int = 0
     paths_removed: int = 0
     bytes_removed: int = 0
+    compacted: bool = False
     removed: list[str] = field(default_factory=list)
 
     @property
@@ -120,7 +130,10 @@ def sweep(
 
     resolved = _store_for(policy, store)
     if resolved is not None:
-        report.jobs_purged = len(resolved.purge_expired(now=moment))
+        purged = resolved.purge_expired(now=moment)
+        report.jobs_purged = len(purged)
+        if purged:
+            report.compacted = _compact(resolved.db_path)
 
     _sweep_orphans(policy, resolved, moment, report)
     _sweep_loose_files(policy, moment, report)
@@ -141,6 +154,28 @@ def _store_for(policy: RetentionPolicy, store: BatchStore | None) -> BatchStore 
     from api.batch.store import BatchStore as _BatchStore
 
     return _BatchStore(policy.storage_dir)
+
+
+def _compact(db_path: Path) -> bool:
+    """`VACUUM` then truncate the WAL, so deleted rows leave no residue in the file.
+
+    Failure-tolerant on purpose: a `VACUUM` that loses a race with a batch worker's write
+    lock is a missed compaction, not a failed sweep, and the rows are already deleted either
+    way. The next sweep that purges anything tries again.
+    """
+    try:
+        connection = sqlite3.connect(db_path, timeout=10.0, isolation_level=None)
+    except sqlite3.Error:
+        return False
+    try:
+        connection.execute("VACUUM")
+        connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        return True
+    except sqlite3.Error:
+        applog.warn("retention_compaction_skipped", code="sqlite_busy")
+        return False
+    finally:
+        connection.close()
 
 
 def _live_job_ids(store: BatchStore | None) -> set[str] | None:
