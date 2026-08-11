@@ -72,6 +72,17 @@ class Preprocessed:
     """
 
     image: np.ndarray
+    original: np.ndarray
+    """The pixels exactly as they arrived, kept so a prominence check can still see them.
+
+    Not a luxury. Lifting a *dim* photograph raises the warning band's contrast relative
+    to the rest of the label — measured on TC-06's fixture, 0.379 before and 0.521 after —
+    so a WARN-5 prominence judgement made on the processed image would see a violation as
+    less severe than it is. The rules need the photograph, not our improved copy of it, and
+    "carried forward in the report" has to mean pixels rather than a pair of whole-image
+    scores that say nothing about one band.
+    """
+
     quality_before: ImageQuality
     quality_after: ImageQuality
     rotation_deg: float = 0.0
@@ -83,6 +94,25 @@ class Preprocessed:
     """The geometric pass, kept so callers can follow their coordinates through it."""
 
     notes: list[str] = field(default_factory=list)
+
+    def region_before(self, box: BoundingBox) -> np.ndarray:
+        """The same region, cut from the image as uploaded rather than as improved.
+
+        `box` is in the *preprocessed* frame, matching everything else that handles
+        evidence regions, and is carried backwards through the geometry here so callers
+        never have to hold two coordinate systems at once.
+        """
+        from api.pipeline.quality import crop
+
+        if self.geometry is None or self.geometry.transform is None:
+            return crop(self.original, box)
+
+        inverse = deskew_mod.Deskewed(
+            image=self.original,
+            transform=np.linalg.inv(np.asarray(self.geometry.transform, dtype=np.float64)),
+            source_size=self.image.shape[:2],
+        )
+        return crop(self.original, inverse.map_box(box))
 
     def map_box(self, box: BoundingBox) -> BoundingBox:
         """Carry a box from the uploaded frame into the preprocessed one.
@@ -217,6 +247,7 @@ def preprocess(image: np.ndarray, *, allow_perspective: bool = True) -> Preproce
 
     return Preprocessed(
         image=working,
+        original=image,
         quality_before=before,
         quality_after=quality_mod.assess(working),
         rotation_deg=geometry.rotation_deg,

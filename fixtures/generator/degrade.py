@@ -263,6 +263,23 @@ class Condition:
     def apply(self, image: np.ndarray) -> np.ndarray:
         return apply_preset(image, self.name)
 
+    @property
+    def has_label_boundary(self) -> bool:
+        """Does this fixture actually put a label edge in front of a corner detector?
+
+        Only the ones composited onto a surface. Everything else degrades a label that
+        already fills its own frame — including the rotation, which replicates its border
+        — so there is no boundary by construction and a detector missing one says nothing
+        about the detector. Scoring those as failures is how a detection rate ends up
+        measuring the fixture set instead.
+        """
+        return self.name in (
+            "tc11_angle_15",
+            "tc11_angle_30",
+            "tc11_angle_45",
+            "lp201_cylinder_angled",
+        )
+
     def geometry(self, shape: tuple[int, ...]) -> np.ndarray | None:
         """Where this degradation moves pixels to, or None when it moves none.
 

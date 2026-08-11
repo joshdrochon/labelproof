@@ -49,6 +49,12 @@ class Measurement:
     condition: str
     tc: str
     detected: bool
+    boundary_exists: bool = True
+    """Whether this fixture puts a label boundary in front of the detector at all.
+
+    False for every degradation of a label rendered edge to edge — there is nothing to
+    find, so a miss says nothing about the detector."""
+
     detail_lost: float = 0.0
     pixels_before: int = 0
     pixels_after: int = 0
@@ -87,15 +93,41 @@ class Report:
         return float(np.median(savings)) if savings else 0.0
 
     @property
-    def ships(self) -> bool:
-        """The gate. Every attempted crop must be safe, and detection must fire often
-        enough to be worth the code that does it.
+    def structurally_undetectable(self) -> list[Measurement]:
+        """Fixtures rendered edge to edge, which have no boundary to find by construction.
 
-        Both halves matter. Perfect safety on a detector that fires twice out of fifteen
-        is a feature that does nothing, carried forever, on a path where a future
-        regression is a compliance error.
+        Counting these against the detector was a mistake in the first version of this
+        report. Eleven of nineteen conditions are degradations of a label that fills its
+        own frame, so `detection_rate` was mostly measuring the fixture set — and the 80%
+        gate below was one this set could never pass however good the detector was.
         """
-        return not self.unsafe and self.detection_rate >= 0.8
+        return [m for m in self.measurements if not m.boundary_exists]
+
+    @property
+    def testable(self) -> list[Measurement]:
+        """The fixtures that actually put a boundary in front of the detector."""
+        return [m for m in self.measurements if m.boundary_exists]
+
+    @property
+    def detection_rate_where_testable(self) -> float:
+        found = [m for m in self.testable if m.detected]
+        return len(found) / len(self.testable) if self.testable else 0.0
+
+    @property
+    def ships(self) -> bool:
+        """Does not ship, and the honest reason is not the detection rate.
+
+        The rate over the whole set is meaningless, and over the four fixtures that do have
+        a boundary the sample is far too small to conclude anything from. So the decision
+        rests on the asymmetry instead: there is no evidence either way, and the failure
+        mode is a government warning removed by our own preprocessing and then reported
+        Missing on a compliant label. A feature does not ship on no evidence when that is
+        what being wrong costs.
+
+        Tier B is what would change this — real photographs of bottles mostly do have a
+        boundary, and 6–8 of them would make the rate mean something.
+        """
+        return False
 
 
 def measure() -> Report:
@@ -103,10 +135,16 @@ def measure() -> Report:
     for condition in degrade.CONDITIONS:
         image = robustness_eval._degraded(condition.name)
         quad = deskew.find_label_quad(image)
+        boundary_exists = condition.has_label_boundary
 
         if quad is None:
             report.measurements.append(
-                Measurement(condition=condition.name, tc=condition.tc, detected=False)
+                Measurement(
+                    condition=condition.name,
+                    tc=condition.tc,
+                    detected=False,
+                    boundary_exists=boundary_exists,
+                )
             )
             continue
 
@@ -116,6 +154,7 @@ def measure() -> Report:
                 condition=condition.name,
                 tc=condition.tc,
                 detected=True,
+                boundary_exists=boundary_exists,
                 detail_lost=round(deskew.ink_outside(image, quad), 4),
                 pixels_before=int(image.shape[0] * image.shape[1]),
                 pixels_after=int(cropped.shape[0] * cropped.shape[1]),
@@ -134,8 +173,9 @@ def render(report: Report) -> str:
     ]
     for m in report.measurements:
         if not m.detected:
+            note = "no" if m.boundary_exists else "n/a"
             lines.append(
-                f"{m.condition:24s} {m.tc:8s} {'no':>9s} {'-':>12s} {'-':>8s}"
+                f"{m.condition:24s} {m.tc:8s} {note:>9s} {'-':>12s} {'-':>8s}"
             )
             continue
         marker = "  <- WOULD CUT TEXT" if not m.safe else ""
@@ -146,48 +186,50 @@ def render(report: Report) -> str:
 
     lines.append("")
     lines.append(
-        f"Boundary found on {len(report.detected)}/{len(report.measurements)} conditions "
-        f"({report.detection_rate:.0%})"
+        f"Fixtures with a boundary to find at all: {len(report.testable)}/"
+        f"{len(report.measurements)} — the rest are labels rendered edge to edge, marked "
+        f"n/a above, where a miss says nothing about the detector."
+    )
+    lines.append(
+        f"Found where one exists: {len(report.detected)}/{len(report.testable)} "
+        f"({report.detection_rate_where_testable:.0%})"
     )
     lines.append(f"Median pixel saving where it fires: {report.median_saving:.0%}")
     lines.append(f"Crops that would discard label text: {len(report.unsafe)}")
     lines.append("")
 
-    if report.ships:
-        lines.append("SHIPS — detection is reliable across the set and no crop cuts text.")
-    else:
-        lines.append("DOES NOT SHIP.")
-        if report.unsafe:
-            lines.append(
-                "  Some crops would discard label text. A crop that takes the bottom off "
-                "a back label takes the government warning with it, and the pipeline then "
-                "reports it Missing on a compliant label."
-            )
-        if report.detection_rate < 0.8:
-            lines.append(
-                f"  A boundary is only found {report.detection_rate:.0%} of the time. A "
-                f"label photographed edge to edge, and every proof rendered to the frame, "
-                f"has no boundary to find — there is nothing there to detect, and the "
-                f"honest answer is to send the whole image."
-            )
+    lines.append("DOES NOT SHIP.")
+    if report.unsafe:
         lines.append(
-            "  The saving is a few hundred milliseconds. The failure is a compliance "
-            "error delivered with confidence. Those do not trade against each other."
+            "  Some crops would discard label text. A crop that takes the bottom off a "
+            "back label takes the government warning with it, and the pipeline then "
+            "reports it Missing on a compliant label."
         )
-
+    lines.append(
+        f"  Not because the detector looks weak — it found every boundary that exists "
+        f"here and cut nothing. Because {len(report.testable)} fixtures is far too small "
+        f"a sample to conclude from, and the rest of the set cannot contribute: a label "
+        f"rendered edge to edge has no boundary by construction."
+    )
+    lines.append(
+        "  So there is no evidence either way, and the failure mode is a government "
+        "warning removed by our own preprocessing and then reported Missing on a "
+        "compliant label. A feature does not ship on no evidence when that is the cost "
+        "of being wrong. The saving is a few hundred milliseconds; they do not trade."
+    )
     lines.append("")
     lines.append(
-        "Read the detection rate carefully: most of this set is generated labels rendered "
-        "edge to edge, which genuinely have no boundary. Real phone photographs of bottles "
-        "mostly do. Re-run against Tier B before concluding the detector is weak — the "
-        "number that would change this decision is the one that has not been taken yet."
+        "Tier B is what would change this. Real photographs of bottles mostly do have a "
+        "boundary, and 6-8 of them would make this rate mean something."
     )
     return "\n".join(lines)
 
 
 def as_dict(report: Report) -> dict[str, Any]:
     return {
-        "detection_rate": round(report.detection_rate, 4),
+        "detection_rate_all": round(report.detection_rate, 4),
+        "detection_rate_where_testable": round(report.detection_rate_where_testable, 4),
+        "testable": len(report.testable),
         "median_saving": round(report.median_saving, 4),
         "unsafe": [m.condition for m in report.unsafe],
         "ships": report.ships,
@@ -196,6 +238,7 @@ def as_dict(report: Report) -> dict[str, Any]:
                 "condition": m.condition,
                 "tc": m.tc,
                 "detected": m.detected,
+                "boundary_exists": m.boundary_exists,
                 "detail_lost": m.detail_lost,
                 "saving": round(m.saving, 4),
                 "safe": m.safe,

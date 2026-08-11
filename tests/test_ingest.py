@@ -260,10 +260,10 @@ def test_pdf_output_carries_its_source_type(config: Config) -> None:
 
 # --- off the event loop -------------------------------------------------------------------
 #
-# Ingest and quality scoring measured 132ms for a two-image upload. Run inline on an async
-# server that is 132ms during which every other request in the process is frozen, so two
-# agents submitting at once take 132ms and 264ms rather than 132ms each. Invisible in
-# single-user testing, which is where it would have stayed.
+# Ingest and quality scoring measured ~700ms for a two-image upload of 2400x3360 PNGs.
+# Run inline on an async server that is 700ms during which every other request in the
+# process is frozen, so two agents submitting at once take 700ms and 1400ms rather than
+# 700ms each. Invisible in single-user testing, which is where it would have stayed.
 
 
 def test_ingest_does_not_run_on_the_event_loop(config: Config) -> None:
@@ -375,3 +375,68 @@ def test_errors_still_surface_through_the_wrapper(config: Config) -> None:
     concurrent.futures wrapper the error taxonomy has never heard of."""
     with pytest.raises(errors.UserError, match="empty"):
         asyncio.run(ingest.ingest_async([b""], config))
+
+
+# --- the route actually uses the wrappers ---------------------------------------------
+#
+# The tests above prove ingest_async and assess_async behave. They say nothing about
+# whether anything calls them, and the two lines in api/routes/verify.py that do sit in a
+# block several other branches rewrite. A conflict resolved the other way would delete the
+# fix and leave every test above green, because they exercise the wrappers directly.
+#
+# So this drives a real request over HTTP and asserts the route went through them.
+
+
+def test_the_verify_route_ingests_off_the_event_loop() -> None:
+    """Goes red if `verify_endpoint` calls `ingest_mod.ingest` synchronously again."""
+    from tests.test_api import label_files, make_client, post_verify
+
+    calls: list[str] = []
+    real_ingest = ingest.ingest_async
+    real_assess = ingest.assess_async
+
+    async def spy_ingest(*args: object, **kwargs: object):  # type: ignore[no-untyped-def]
+        calls.append("ingest_async")
+        return await real_ingest(*args, **kwargs)  # type: ignore[arg-type]
+
+    async def spy_assess(*args: object, **kwargs: object):  # type: ignore[no-untyped-def]
+        calls.append("assess_async")
+        return await real_assess(*args, **kwargs)  # type: ignore[arg-type]
+
+    with (
+        mock.patch.object(ingest, "ingest_async", spy_ingest),
+        mock.patch.object(ingest, "assess_async", spy_assess),
+    ):
+        response = post_verify(
+            make_client(), files=label_files("tc01_old_tom_clean.png")
+        )
+
+    assert response.status_code == 200
+    assert calls == ["ingest_async", "assess_async"], (
+        "api/routes/verify.py is not going through the off-loop wrappers — a merge has "
+        "reverted the event-loop fix"
+    )
+
+
+def test_the_verify_route_does_not_call_the_blocking_ingest_directly() -> None:
+    """The same claim from the other side, so neither a revert nor a partial one passes."""
+    from tests.test_api import label_files, make_client, post_verify
+
+    on_loop: list[bool] = []
+    real = ingest.ingest
+
+    def watch(*args: object, **kwargs: object):  # type: ignore[no-untyped-def]
+        try:
+            asyncio.get_running_loop()
+            on_loop.append(True)
+        except RuntimeError:
+            on_loop.append(False)
+        return real(*args, **kwargs)  # type: ignore[arg-type]
+
+    with mock.patch.object(ingest, "ingest", watch):
+        response = post_verify(
+            make_client(), files=label_files("tc01_old_tom_clean.png")
+        )
+
+    assert response.status_code == 200
+    assert on_loop == [False], "ingest ran on the event loop during a real request"

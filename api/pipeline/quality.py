@@ -225,9 +225,15 @@ class RegionQuality:
     """How readable one rectangle of the frame is.
 
     `verdict` carries a fourth value the whole-image assessment has no use for: `blank`,
-    meaning the region is perfectly visible and there is simply nothing printed in it.
-    That distinction is the difference between Missing and Unreadable, and collapsing the
-    two would either invent a legibility problem or hide one.
+    meaning the region is *certainly* visible and there is *certainly* nothing printed in
+    it. That distinction is the difference between Missing and Unreadable, and collapsing
+    the two would either invent a legibility problem or hide one.
+
+    `blank` is the only verdict here that is legible without anything being readable, so
+    it is deliberately hard to earn — a region merely too faint to resolve is `hopeless`,
+    not `blank`. Faint print and noisy blank stock are not distinguishable by contrast
+    alone, and the band where they overlap is exactly where WARN-5 prominence violations
+    live.
     """
 
     blur: float
@@ -262,13 +268,24 @@ def crop(image: np.ndarray, box: BoundingBox) -> np.ndarray:
 _MIN_REGION_PX = 8
 
 
-#: Relative contrast below which a region is treated as bare stock rather than print.
-#: Blank paper under sensor noise sits near 0.02; text sits above 0.8 even at a tenth of
-#: normal exposure.
-_CONTENT_CONTRAST_RATIO = 0.12
+#: Relative contrast at or above which a region certainly carries print. Normal label text
+#: sits above 0.9 even at a tenth of normal exposure; a warning rendered at 15% of full
+#: contrast — already a prominence violation — measures 0.141.
+_CONTENT_CONTRAST_RATIO = 0.15
+
+#: …and at or below which it is certainly bare stock. Clean label stock measures 0.000.
+_BLANK_CONTRAST_RATIO = 0.04
+
+# Between the two is a band nothing can resolve, and pretending otherwise was a real bug.
+# Measured on the generator: a warning printed at 12% contrast reads 0.113, and blank stock
+# under σ=16 sensor noise reads 0.106. Those overlap. There is no threshold that separates
+# "very faint print" from "empty paper photographed badly", so the honest outcome in that
+# band is "could not tell", and "could not tell" has to fail closed — it is exactly where
+# WARN-5 prominence violations live, and calling one of those blank would report a buried
+# warning as Missing while marking the field legible on the way past.
 
 
-def _has_content(region: np.ndarray) -> bool:
+def _content_ratio(region: np.ndarray) -> float:
     """Is anything printed here, as opposed to bare label stock?
 
     Measured as contrast *relative* to the region's own brightness, over a median-filtered
@@ -285,19 +302,32 @@ def _has_content(region: np.ndarray) -> bool:
     """
     gray = _to_gray(region)
     if gray.size == 0:
-        return False
+        return 0.0
     smoothed = cv2.medianBlur(gray, 3) if min(gray.shape[:2]) >= 3 else gray
     low, high = float(smoothed.min()), float(smoothed.max())
-    return bool((high - low) / max(high, 1.0) >= _CONTENT_CONTRAST_RATIO)
+    return (high - low) / max(high, 1.0)
 
 
-def assess_region(image: np.ndarray, box: BoundingBox) -> RegionQuality:
+def assess_region(
+    image: np.ndarray,
+    box: BoundingBox,
+    whole: ImageQuality | None = None,
+) -> RegionQuality:
     """Score one region of the label on the same 0..1 scale the whole image uses.
 
-    Blur is only allowed to condemn a region that has something printed in it. Laplacian
-    variance over bare label stock is legitimately near zero, and calling that "too
-    blurry to read" would flag every field whose evidence box happens to include a margin
-    — a wall of false flags, which is its own adoption failure (UX-7).
+    Blur is only allowed to condemn a region that has something printed in it. Gradient
+    variance over bare label stock is legitimately near zero, and calling that "too blurry
+    to read" would flag every field whose evidence box happens to include a margin — a
+    wall of false flags, which is its own adoption failure (UX-7).
+
+    `whole` is the assessment of the entire image, and passing it closes a gap the two
+    measurements had between them. Contrast is stretched per region and variance is
+    diluted by blank area, so a dense band of text scores better on its own than the
+    picture containing it: on a radius-16 defocus the whole image scored 0.000 and hopeless
+    while the warning region of that same image scored 0.307 and legible. The global gate
+    said nobody could read this photograph and the region gate — the one that decides
+    Unreadable — said the warning was fine. No region of an image the pre-gate rejected is
+    legible, and saying so here is cheaper than reconciling two numbers later.
     """
     region = crop(image, box)
     if min(region.shape[:2]) < _MIN_REGION_PX:
@@ -315,16 +345,28 @@ def assess_region(image: np.ndarray, box: BoundingBox) -> RegionQuality:
     blur = blur_score(region)
     exposure = exposure_score(region)
     glare = glare_score(region)
-    content = _has_content(region)
+    ratio = _content_ratio(region)
+    content = ratio >= _CONTENT_CONTRAST_RATIO
+    certainly_blank = ratio <= _BLANK_CONTRAST_RATIO
 
     applicable = [exposure, glare] + ([blur] if content else [])
     worst = min(applicable)
 
-    if worst < T.HOPELESS:
+    if whole is not None and whole.verdict == "hopeless":
+        verdict = "hopeless"
+        reason = whole.reason or "This image could not be read."
+    elif worst < T.HOPELESS:
         verdict = "hopeless"
         reason = _region_reason(blur if content else 1.0, exposure, glare)
-    elif not content:
+    elif certainly_blank:
         verdict, reason = "blank", "Nothing is printed in this part of the label."
+    elif not content:
+        # The unresolvable band. Faint print and noisy blank stock overlap here, so the
+        # only honest answer is that we could not tell — which must not read as legible.
+        verdict = "hopeless"
+        reason = (
+            "This part of the label is too faint to tell print from blank paper."
+        )
     elif worst < T.DEGRADED:
         verdict = "degraded"
         reason = "This part of the label is hard to read."
@@ -344,8 +386,13 @@ def assess_region(image: np.ndarray, box: BoundingBox) -> RegionQuality:
 def assess_regions[K](
     image: np.ndarray, boxes: Mapping[K, BoundingBox]
 ) -> dict[K, RegionQuality]:
-    """Score several named regions of one image."""
-    return {key: assess_region(image, box) for key, box in boxes.items()}
+    """Score several named regions of one image.
+
+    The whole-image assessment is computed once and shared, so every region is judged
+    against the same picture rather than each one re-deriving it.
+    """
+    whole = assess(image)
+    return {key: assess_region(image, box, whole) for key, box in boxes.items()}
 
 
 def illegible_regions[K](image: np.ndarray, boxes: Mapping[K, BoundingBox]) -> set[K]:

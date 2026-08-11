@@ -8,10 +8,12 @@ rules depend on, and it would do it invisibly.
 import numpy as np
 import pytest
 
+from api.models import FieldName
 from api.pipeline import preprocess, quality
 from api.rules import thresholds as T
 from fixtures.generator import degrade
 from fixtures.generator.catalog import by_name
+from fixtures.generator.layout import FIELD_BANDS
 from fixtures.generator.render import render
 
 
@@ -69,16 +71,104 @@ def test_a_well_exposed_photo_is_not_touched(clean: np.ndarray) -> None:
     assert np.array_equal(result.image, clean)
 
 
+def warning_spread(image: np.ndarray) -> float:
+    """Contrast across the government warning's own band.
+
+    The band matters. An earlier version of this read `y >= 0.62`, which on this renderer
+    is bare label stock — grayscale min and max both 248, spread 0. It compared nothing to
+    nothing and could not have failed.
+    """
+    band = quality.crop(image, FIELD_BANDS[FieldName.GOVERNMENT_WARNING])
+    return float(band.max()) - float(band.min())
+
+
 @pytest.mark.tc("TC-06")
-def test_a_buried_warning_keeps_its_low_contrast(clean: np.ndarray) -> None:
+def test_the_buried_warning_fixture_is_actually_buried(clean: np.ndarray) -> None:
+    """Guards the test below. If the fixture stopped being low-contrast, that test would
+    pass while proving nothing."""
+    buried = np.array(render(by_name("tc06_buried_warning")))
+    assert warning_spread(buried) < warning_spread(clean) * 0.75
+
+
+@pytest.mark.tc("TC-06")
+def test_normalization_can_lift_a_buried_warning_if_it_runs(clean: np.ndarray) -> None:
+    """The negative control, and the reason the next test means anything.
+
+    Applied directly, contrast normalization *does* raise the warning band toward
+    legibility. So the measurement below can detect a lift; it is not reporting "unchanged"
+    because it is blind.
+    """
+    buried = np.array(render(by_name("tc06_buried_warning")))
+    lifted = preprocess.normalize_exposure(buried)
+    assert warning_spread(lifted) > warning_spread(buried)
+
+
+@pytest.mark.tc("TC-06")
+def test_preprocessing_leaves_a_buried_warning_buried(clean: np.ndarray) -> None:
+    """The WARN-5 guarantee. A warning printed pale on cream is a prominence violation with
+    every word present; lifting it would deliver a real violation to the extractor looking
+    perfectly legible and turn it into a pass."""
     buried = np.array(render(by_name("tc06_buried_warning")))
     result = preprocess.preprocess(buried)
+    assert warning_spread(result.image) == pytest.approx(warning_spread(buried), abs=4)
 
-    def spread(image: np.ndarray) -> float:
-        band = image[int(image.shape[0] * 0.62) :]
-        return float(band.max()) - float(band.min())
 
-    assert spread(result.image) == pytest.approx(spread(buried), abs=12)
+def relative_prominence(image: np.ndarray) -> float:
+    """The warning band's contrast as a share of the whole label's — what WARN-5 turns on."""
+    whole = float(image.max()) - float(image.min())
+    return warning_spread(image) / whole if whole else 0.0
+
+
+@pytest.mark.tc("TC-06")
+def test_lifting_a_dim_photo_does_make_a_buried_warning_look_better(
+    clean: np.ndarray,
+) -> None:
+    """The case where the two rules collide, recorded rather than wished away.
+
+    A dim photograph has to be lifted or nothing on it can be read. Doing that raises the
+    warning band's contrast *relative* to the rest of the label — 0.379 to 0.521 on this
+    fixture — which is the direction that makes a prominence violation look less severe
+    than it is. Asserting the opposite would be asserting something untrue.
+    """
+    buried = np.array(render(by_name("tc06_buried_warning")))
+    result = preprocess.preprocess(degrade.dim(buried, 0.25))
+
+    assert result.exposure_normalized
+    assert relative_prominence(result.image) > relative_prominence(buried)
+
+
+@pytest.mark.tc("TC-06")
+def test_the_photograph_as_it_arrived_is_still_available(clean: np.ndarray) -> None:
+    """Which is what keeps the case above from being a false-pass path.
+
+    A prominence judgement must be made on the pixels the camera produced, not on our
+    improved copy. The original travels with the result, so the rules can still ask what
+    the label actually looked like.
+    """
+    buried = np.array(render(by_name("tc06_buried_warning")))
+    result = preprocess.preprocess(degrade.dim(buried, 0.25))
+
+    band = FIELD_BANDS[FieldName.GOVERNMENT_WARNING]
+    before = result.region_before(band)
+    after = quality.crop(result.image, band)
+
+    def spread_of(region: np.ndarray) -> float:
+        return float(region.max()) - float(region.min())
+
+    assert spread_of(before) < spread_of(after)
+    assert np.array_equal(result.original, degrade.dim(buried, 0.25))
+
+
+def test_the_original_survives_a_geometric_correction(clean: np.ndarray) -> None:
+    """The awkward case: after a deskew the two images have different shapes, so a region
+    of one is not a region of the other without carrying the box back through."""
+    result = preprocess.preprocess(degrade.rotate(clean, 9.0))
+    assert result.image.shape != result.original.shape
+
+    band = FIELD_BANDS[FieldName.BRAND_NAME]
+    before = result.region_before(result.map_box(band))
+    assert before.size > 0
+    assert float(before.max()) - float(before.min()) > 100  # it found the text
 
 
 def test_the_normalization_bar_is_the_exposure_floor(clean: np.ndarray) -> None:

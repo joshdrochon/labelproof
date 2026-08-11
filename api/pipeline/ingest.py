@@ -16,14 +16,14 @@ high-resolution vision tier, and dropping below it is what makes small warning t
 illegible. Downscaling further would save upload bytes and cost the one field that must
 never be misread.
 
-**All of this is CPU-bound, and none of it may run on the event loop.** Measured at 132ms
-for a two-image upload — decode, resize, re-encode, then the quality scoring on top. On an
-async server that is 132ms during which *every other request in the process is frozen*,
-so two agents submitting at once do not take 132ms each, they take 132 and 264. Against a
-five-second budget that is not a rounding error, and it is invisible in single-user
-testing, which is where it would have stayed. `ingest_async` and `assess_async` move the
-work to a worker thread; the synchronous functions stay exactly as they were, because the
-batch worker is already off the loop and does not need a second hop.
+**All of this is CPU-bound, and none of it may run on the event loop.** Measured on two
+2400x3360 PNGs: 535ms to decode, resize and re-encode, then 173ms of quality scoring on
+top. On an async server that is ~700ms during which *every other request in the process is
+frozen*, so two agents submitting at once do not take 700ms each, they take 700 and 1400.
+Against a five-second budget that is not a rounding error, and it is invisible in
+single-user testing, which is where it would have stayed. `ingest_async` and `assess_async`
+move the work to a worker thread; the synchronous functions stay exactly as they were,
+because the batch worker is already off the loop and does not need a second hop.
 """
 
 from __future__ import annotations

@@ -324,3 +324,130 @@ def test_every_preset_applies(clean: np.ndarray) -> None:
 def test_unknown_preset_raises() -> None:
     with pytest.raises(KeyError):
         degrade.apply_preset(np.zeros((10, 10, 3), np.uint8), "nope")
+
+
+# --- blank must be earned, not assumed --------------------------------------------------
+
+@pytest.mark.tc("TC-06")
+@pytest.mark.parametrize("contrast", [0.12, 0.10, 0.07])
+def test_a_faint_warning_is_never_called_blank(contrast: float) -> None:
+    """The band where WARN-5 violations live.
+
+    A warning printed this faintly measures 0.09–0.11 relative contrast; blank stock under
+    heavy sensor noise measures 0.106. They overlap, so nothing can separate them — and
+    calling one of them blank would report a buried warning as Missing *and* mark the
+    field legible on the way past.
+    """
+    spec = by_name("tc01_old_tom_clean").with_(warning_contrast=contrast)
+    image = np.array(render(spec))
+    assessment = quality.assess_region(image, REGIONS[FieldName.GOVERNMENT_WARNING])
+
+    assert assessment.verdict != "blank"
+    assert not assessment.legible
+
+
+@pytest.mark.tc("TC-06")
+@pytest.mark.parametrize("contrast", [1.0, 0.5, 0.35, 0.2])
+def test_low_contrast_alone_never_reads_as_blur(contrast: float) -> None:
+    """Contrast is normalized away before the blur measure, and this is what proves it.
+
+    A warning printed at a fifth of full contrast still scores a perfect 1.000 for
+    sharpness, so "faint" and "soft" stay the separate problems they are and each retake
+    reason names the one the agent can actually fix.
+    """
+    spec = by_name("tc01_old_tom_clean").with_(warning_contrast=contrast)
+    image = np.array(render(spec))
+    assert quality.assess_region(image, REGIONS[FieldName.GOVERNMENT_WARNING]).blur == 1.0
+
+
+@pytest.mark.tc("TC-06")
+def test_tc06s_shrunken_warning_is_unreadable_at_this_resolution(clean: np.ndarray) -> None:
+    """TC-06 shrinks the warning to 45% as well as burying it, and at that size on a
+    1400px render the strokes are ~10px — genuinely past reading.
+
+    So the region comes back Unreadable rather than legible. That is a blunter answer than
+    the prominence violation LP-211 wants to report, but it is the honest one and it still
+    blocks approval. What matters here is which way it fails: not `blank`, which would
+    read as Missing *and* mark the field legible.
+    """
+    buried = np.array(render(by_name("tc06_buried_warning")))
+    assessment = quality.assess_region(buried, REGIONS[FieldName.GOVERNMENT_WARNING])
+
+    assert assessment.has_content
+    assert assessment.verdict == "hopeless"
+    assert not assessment.legible
+
+
+@pytest.mark.tc("TC-06")
+def test_the_size_is_what_makes_it_unreadable_not_the_faintness(clean: np.ndarray) -> None:
+    """Separating the two factors, because conflating them would hide a real defect in the
+    measure. At full size and 35% contrast the region reads perfectly; at 45% size and full
+    contrast it does not."""
+    faint = np.array(render(by_name("tc01_old_tom_clean").with_(warning_contrast=0.35)))
+    small = np.array(render(by_name("tc01_old_tom_clean").with_(warning_scale=0.45)))
+    band = REGIONS[FieldName.GOVERNMENT_WARNING]
+
+    assert quality.assess_region(faint, band).legible
+    assert not quality.assess_region(small, band).legible
+
+
+def test_genuinely_blank_stock_is_still_blank(clean: np.ndarray) -> None:
+    """The other side. If everything faint became illegible, every field whose box
+    included a margin would flag."""
+    assert quality.assess_region(clean, BLANK).verdict == "blank"
+
+
+# --- the region gate is never more optimistic than the pre-gate ---------------------------
+
+@pytest.mark.tc("TC-14")
+def test_no_region_of_a_rejected_image_reads_as_legible(clean: np.ndarray) -> None:
+    """Contrast is stretched per region and variance is diluted by blank area, so a dense
+    band of text scores better on its own than the picture containing it. Measured before
+    this guard: whole image 0.000 and hopeless, warning region of that same image 0.307
+    and legible. The global gate said nobody could read it and the region gate — the one
+    that decides Unreadable — disagreed, in the unsafe direction."""
+    wrecked = degrade.blur(clean, 16.0)
+    assert quality.assess(wrecked).verdict == "hopeless"
+    assert quality.illegible_regions(wrecked, REGIONS) == set(REGIONS)
+
+
+def test_a_readable_image_still_gets_per_region_answers(clean: np.ndarray) -> None:
+    """The clamp must not swallow the TC-12 case, where the picture is fine and one
+    region is not."""
+    glared = degrade.glare_over_warning(clean)
+    assert quality.assess(glared).verdict != "hopeless"
+    assert quality.illegible_regions(glared, REGIONS) == {FieldName.GOVERNMENT_WARNING}
+
+
+def test_the_clamp_is_optional_so_a_region_can_be_scored_alone(clean: np.ndarray) -> None:
+    wrecked = degrade.blur(clean, 16.0)
+    alone = quality.assess_region(wrecked, REGIONS[FieldName.BRAND_NAME])
+    clamped = quality.assess_region(
+        wrecked, REGIONS[FieldName.BRAND_NAME], quality.assess(wrecked)
+    )
+    assert alone.blur == clamped.blur
+    assert clamped.verdict == "hopeless"
+
+
+# --- a hazard this wave cannot fix, pinned so it cannot be forgotten -----------------------
+
+def test_the_fake_providers_evidence_bands_do_not_match_the_renderer() -> None:
+    """A live trap for whoever wires region readability into the route.
+
+    `api/provider/fake.py` places the government warning at y 0.66–0.88. The renderer puts
+    it at 0.450–0.540, and everything below 0.62 is bare stock — so feeding the fake's box
+    to `assess_region` lands on blank label, scores `blank`, and reads as legible. That is
+    a false pass waiting for the wiring.
+
+    This wave does not own `api/provider/**`, so this asserts the mismatch rather than
+    fixing it. When the bands are corrected this test goes red, which is the point: it is
+    a note that cannot be lost, and deleting it is a deliberate act.
+    """
+    from api.provider.fake import _APPROX_REGIONS
+
+    fake = _APPROX_REGIONS[FieldName.GOVERNMENT_WARNING]
+    real = REGIONS[FieldName.GOVERNMENT_WARNING]
+    assert fake.y0 > real.y1, (
+        "api/provider/fake.py now agrees with the renderer — delete this test and the "
+        "warning beside it in api/pipeline/limitations.py::WIRING"
+    )

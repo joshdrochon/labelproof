@@ -281,48 +281,147 @@ def test_the_centre_of_a_curved_label_stays_sharpest(clean: np.ndarray) -> None:
 
 
 # --- LP-194 · the fabrication sweep (TC-14) ------------------------------------------------------
+#
+# The first version of this sweep could not fail, and it is worth saying exactly how,
+# because it looked thorough. It ran a spec-backed extractor that returns the spec's own
+# fields, then asserted every extracted value appeared in a string built by joining those
+# same fields. `spec.brand_name in " ".join(spec fields)` is true for reasons that have
+# nothing to do with the pipeline, and parametrising it over nineteen conditions multiplied
+# a tautology by nineteen.
+#
+# What is actually checkable here, without an OCR engine, is narrower and real: values pass
+# through *our* layers unaltered, and a field nobody could see comes back with no value at
+# all. So the extractor emits per-field sentinels that appear nowhere else, and anything in
+# the output that is not a sentinel was introduced between the provider and the agent.
+#
+# Whether the *model* fabricates is a different question that needs a model to answer. The
+# negative control below is what proves this assertion has teeth.
 
-def printed_on(spec: LabelSpec) -> str:
-    """Everything the generator actually drew on this label, as one lowercase string.
 
-    Ground truth for "was this value read, or was it made up". The generator drew the
-    label, so anything not in here was not on it.
+SENTINELS: dict[FieldName, str] = {
+    field: f"SENTINEL-{field.value.upper()}-4f27b1"
+    for field in (
+        FieldName.BRAND_NAME,
+        FieldName.CLASS_TYPE,
+        FieldName.ALCOHOL_CONTENT,
+        FieldName.NET_CONTENTS,
+        FieldName.PRODUCER,
+        FieldName.GOVERNMENT_WARNING,
+    )
+}
+
+
+class SentinelProvider:
+    """Returns tagged values, so anything untagged in the output was invented downstream.
+
+    Deliberately not the spec's real values. If the extractor returned "OLD TOM DISTILLERY"
+    and a comparator substituted the *application's* copy of that same string into the
+    extracted column, nothing would look wrong — the strings match. With sentinels that
+    substitution is visible immediately.
     """
-    parts = [
-        spec.brand_name,
-        spec.class_type,
-        spec.alcohol_text,
-        spec.net_contents,
-        spec.producer,
-        spec.country_of_origin or "",
-        spec.rendered_warning() if spec.include_warning else "",
+
+    name = "fake:sentinel"
+
+    def __init__(self, illegible: set[FieldName] | None = None) -> None:
+        self.illegible = illegible or set()
+
+    def extract(self, request):  # type: ignore[no-untyped-def]
+        from api.models import ExtractedField, Extraction
+        from api.provider.base import ExtractionResponse, ProviderUsage
+
+        fields = {}
+        for name, value in SENTINELS.items():
+            if name in self.illegible:
+                fields[name] = ExtractedField(value=None, confidence=0.0, legible=False)
+            else:
+                fields[name] = ExtractedField(value=value, confidence=0.95, legible=True)
+
+        warning = None if FieldName.GOVERNMENT_WARNING in self.illegible else SENTINELS[
+            FieldName.GOVERNMENT_WARNING
+        ]
+        return ExtractionResponse(
+            extractions=[
+                Extraction(
+                    image_index=image.index,
+                    is_label=True,
+                    fields=fields,
+                    warning_text=warning,
+                )
+                for image in request.images
+            ],
+            usage=ProviderUsage(model="fake:sentinel"),
+        )
+
+
+class FabricatingProvider(SentinelProvider):
+    """Answers every field, including the ones it was told it could not see.
+
+    The negative control. If the sweep below stays green against this, the sweep is not
+    checking anything.
+    """
+
+    name = "fake:fabricating"
+
+    def extract(self, request):  # type: ignore[no-untyped-def]
+        self.illegible = set()
+        response = super().extract(request)
+        for extraction in response.extractions:
+            for name in extraction.fields:
+                extraction.fields[name].value = "PLAUSIBLE INVENTED VALUE"
+            extraction.warning_text = "GOVERNMENT WARNING: invented but well formed."
+        return response
+
+
+def unsourced_values(result, allowed: set[str]) -> list[str]:  # type: ignore[no-untyped-def]
+    """Extracted values that did not come from the extractor."""
+    return [
+        f.extracted
+        for f in result.fields
+        if f.extracted is not None and f.extracted not in allowed
     ]
-    return " ".join(parts).lower()
+
+
+def run_with(spec: LabelSpec, image: np.ndarray, provider, condition=None):  # type: ignore[no-untyped-def]
+    processed = preprocess.preprocess(image)
+    illegible = quality.illegible_regions(
+        processed.image, bands(image, processed, condition)
+    )
+    provider.illegible = illegible
+    return (
+        verify(
+            Application.model_validate(spec.application()),
+            [ImageInput(index=0, data=b"", role="single")],
+            provider,
+        ),
+        illegible,
+    )
 
 
 @pytest.mark.tc("TC-14")
 @pytest.mark.parametrize("condition", degrade.CONDITIONS, ids=lambda c: c.name)
-def test_no_condition_produces_a_value_that_was_not_on_the_label(
+def test_no_condition_introduces_a_value_the_extractor_did_not_return(
     spec: LabelSpec, clean: np.ndarray, condition: degrade.Condition
 ) -> None:
-    """The sweep. Across every degradation, every value reported as extracted must be
-    something the generator actually printed.
+    """Across every degradation, every value the agent sees traces back to the extractor.
 
-    This is the failure that matters more than any accuracy number. A pipeline that
-    returns nothing under bad conditions is annoying; one that returns a plausible
-    government warning it could not see is dangerous, and the damage is invisible because
-    the output looks exactly like a correct one.
+    This catches our own layers inventing: a comparator writing the application's expected
+    value into the extracted column, a merge filling a gap from another image without
+    saying so, an aggregate substituting a default. All of those look like a correct
+    answer on screen.
     """
-    result, _, _ = apply_and_run(spec, clean, condition)
-    printed = printed_on(spec)
+    result, _ = run_with(spec, condition.apply(clean), SentinelProvider(), condition)
+    assert unsourced_values(result, set(SENTINELS.values())) == [], condition.name
 
-    for field in result.fields:
-        if field.extracted is None:
-            continue
-        assert field.extracted.lower() in printed, (
-            f"{condition.name}: {field.field.value} reported "
-            f"{field.extracted!r}, which is not printed on the label"
-        )
+
+@pytest.mark.tc("TC-14")
+def test_the_sweep_catches_a_fabricated_value(spec: LabelSpec, clean: np.ndarray) -> None:
+    """The negative control, and the reason the assertion above is worth running.
+
+    An extractor that answers a field it was told it could not see produces values the
+    check does not recognise. If this ever goes green, the sweep has stopped checking.
+    """
+    result, _ = run_with(spec, degrade.glare_over_warning(clean), FabricatingProvider())
+    assert unsourced_values(result, set(SENTINELS.values())) != []
 
 
 @pytest.mark.tc("TC-14")
@@ -336,6 +435,21 @@ def test_an_illegible_field_is_never_given_a_value(
     for field in result.fields:
         if field.verdict is Verdict.UNREADABLE:
             assert field.extracted is None, f"{condition.name}: {field.field.value}"
+
+
+@pytest.mark.tc("TC-12")
+def test_a_region_the_scorer_condemned_comes_back_empty(
+    spec: LabelSpec, clean: np.ndarray
+) -> None:
+    """Ties the region scorer to the output. The glare makes the warning region illegible,
+    the extractor is told so, and the field arrives with no value — a chain where every
+    link is exercised rather than assumed."""
+    result, illegible = run_with(
+        spec, degrade.glare_over_warning(clean), SentinelProvider()
+    )
+    assert FieldName.GOVERNMENT_WARNING in illegible
+    assert extracted_of(result, FieldName.GOVERNMENT_WARNING) is None
+    assert extracted_of(result, FieldName.BRAND_NAME) == SENTINELS[FieldName.BRAND_NAME]
 
 
 PREGATED = [c for c in degrade.CONDITIONS if c.expectation == "pregated"]
@@ -368,7 +482,7 @@ def test_the_retake_reason_names_a_fixable_problem(
 def test_the_sweep_covers_every_kind_of_expectation() -> None:
     """Guards the sweep itself. A condition added without a stated expectation would be
     swept but assert nothing, and the suite would look broader than it is."""
-    assert len(degrade.CONDITIONS) >= 13
+    assert len(degrade.CONDITIONS) >= 19
     assert {c.expectation for c in degrade.CONDITIONS} == {
         "readable",
         "warning_illegible",
@@ -499,10 +613,22 @@ def test_tier_b_is_never_averaged_into_tier_a(photo_dir: Path) -> None:
 
 # --- LP-200 · the calibration harness -------------------------------------------------------
 
+# Every sweep level re-runs all nineteen conditions, so a full seven-level grid is
+# half a minute of CI for logic that three levels exercise just as well. The grids below
+# keep the shape that matters — a level that produces a false pass, the shipped value, and
+# a level that over-flags — and the script keeps the full range for when someone is
+# actually choosing a threshold (LP-247).
+def _narrow(name: str, values: tuple[float, ...]) -> calibrate_quality.Knob:
+    original = calibrate_quality.SWEEPS[name]
+    return calibrate_quality.Knob(
+        values, stricter=original.stricter, effect=original.effect
+    )
+
+
 @pytest.fixture(scope="module")
 def blur_sweep() -> calibrate_quality.Sweep:
     return calibrate_quality.sweep_one(
-        "BLUR_HOPELESS_VARIANCE", calibrate_quality.SWEEPS["BLUR_HOPELESS_VARIANCE"]
+        "BLUR_HOPELESS_VARIANCE", _narrow("BLUR_HOPELESS_VARIANCE", (30, 60, 110, 140))
     )
 
 
@@ -510,7 +636,7 @@ def blur_sweep() -> calibrate_quality.Sweep:
 def glare_sweep() -> calibrate_quality.Sweep:
     return calibrate_quality.sweep_one(
         "GLARE_SATURATION_FRACTION",
-        calibrate_quality.SWEEPS["GLARE_SATURATION_FRACTION"],
+        _narrow("GLARE_SATURATION_FRACTION", (0.05, 0.25, 0.5)),
     )
 
 
@@ -597,17 +723,19 @@ def test_the_calibration_report_serializes(blur_sweep: calibrate_quality.Sweep) 
 
 def test_calibrating_against_photos_uses_the_photo_set(photo_dir: Path) -> None:
     """The Tier B path — the one that decides these values once real photographs land."""
-    sweep = calibrate_quality.sweep_one(
-        "HOPELESS", calibrate_quality.SWEEPS["HOPELESS"], photos=photo_dir
-    )
+    knob = _narrow("HOPELESS", (0.15, 0.2, 0.25))
+    sweep = calibrate_quality.sweep_one("HOPELESS", knob, photos=photo_dir)
     assert sweep.tier == "B"
-    assert len(sweep.levels) == len(calibrate_quality.SWEEPS["HOPELESS"].values)
+    assert len(sweep.levels) == len(knob.values)
 
 
 def test_tier_b_calibration_says_it_is_the_honest_number(photo_dir: Path) -> None:
-    text = calibrate_quality.render(
-        calibrate_quality.sweep_all(["HOPELESS"], photos=photo_dir)
-    )
+    with mock.patch.dict(
+        calibrate_quality.SWEEPS, {"HOPELESS": _narrow("HOPELESS", (0.2,))}
+    ):
+        text = calibrate_quality.render(
+            calibrate_quality.sweep_all(["HOPELESS"], photos=photo_dir)
+        )
     assert "never averaged with Tier A" in text
 
 
@@ -801,11 +929,30 @@ def test_no_crop_this_detector_proposes_would_cut_text(
 def test_the_feature_does_not_ship_on_this_evidence(
     crop_report: crop_before_send.Report,
 ) -> None:
-    """The ticket's condition: ships only if detection proves reliable across the set. It
-    fires on roughly a quarter of it, so it does not. Recording the negative result is the
-    deliverable — the alternative is shipping it because it seemed obviously good."""
+    """The ticket's condition, with the reasoning corrected.
+
+    The first version of this failed the feature on a detection rate of 27%, which was
+    measuring the fixture set rather than the detector: most of these are labels rendered
+    edge to edge, with no boundary to find by construction, so the 80% gate was one this
+    set could never pass however good the detector was. Where a boundary does exist it is
+    found every time and cuts nothing.
+
+    It still does not ship, for the reason that actually holds: four fixtures is no
+    evidence either way, and the cost of being wrong is a government warning removed by
+    our own preprocessing and reported Missing on a compliant label.
+    """
     assert not crop_report.ships
-    assert crop_report.detection_rate < 0.8
+    assert len(crop_report.testable) < 8, "sample is still too small to conclude from"
+    assert crop_report.detection_rate_where_testable == 1.0
+
+
+def test_the_detection_rate_is_not_computed_over_undetectable_fixtures(
+    crop_report: crop_before_send.Report,
+) -> None:
+    """A label rendered edge to edge has no boundary, so a miss on it says nothing. If
+    those were counted, the rate would be a fact about the fixtures."""
+    assert len(crop_report.structurally_undetectable) > len(crop_report.testable)
+    assert all(not m.detected for m in crop_report.structurally_undetectable)
 
 
 def test_the_saving_is_real_where_detection_fires(
@@ -830,23 +977,27 @@ def test_a_crop_that_loses_detail_is_unsafe() -> None:
     assert not bad.safe
 
 
-def test_a_perfect_detector_that_never_fires_still_does_not_ship() -> None:
-    """Both halves of the gate. Perfect safety on a detector that fires twice in fifteen
-    is a feature that does nothing, carried forever, on a path where a future regression
-    is a compliance error."""
+def test_no_measurement_on_this_set_can_make_it_ship() -> None:
+    """The decision does not rest on a number this set can produce, and encoding that is
+    the point — a later change that happened to raise the rate must not flip it silently."""
     report = crop_before_send.Report()
     report.measurements = [
-        crop_before_send.Measurement(condition=f"c{i}", tc="TC-11", detected=False)
-        for i in range(10)
+        crop_before_send.Measurement(
+            condition=f"c{i}", tc="TC-11", detected=True, detail_lost=0.0,
+            pixels_before=100, pixels_after=50,
+        )
+        for i in range(50)
     ]
     assert report.unsafe == []
+    assert report.detection_rate_where_testable == 1.0
     assert not report.ships
 
 
 def test_the_report_says_why_not_just_no(crop_report: crop_before_send.Report) -> None:
     text = crop_before_send.render(crop_report)
     assert "DOES NOT SHIP" in text
-    assert "no boundary to find" in text
+    assert "no boundary by construction" in text
+    assert "not because the detector looks weak" in text.lower()
 
 
 def test_the_report_flags_that_tier_b_could_change_the_answer(
@@ -855,7 +1006,7 @@ def test_the_report_flags_that_tier_b_could_change_the_answer(
     """Most of this set is rendered edge to edge and genuinely has no boundary. Real
     photographs mostly do. Reporting 27% without that caveat would read as "the detector
     is weak", which is not what was measured."""
-    assert "Re-run against Tier B" in crop_before_send.render(crop_report)
+    assert "Tier B is what would change this" in crop_before_send.render(crop_report)
 
 
 def test_the_measurement_runs_as_a_command() -> None:
@@ -896,17 +1047,21 @@ def test_the_limitations_cover_every_condition_family() -> None:
         assert topic in text, topic
 
 
-def test_the_hardest_admissions_are_actually_in_there() -> None:
+def test_the_hardest_admissions_are_actually_in_there(
+    report: robustness_eval.Report,
+) -> None:
     """The three a reviewer would find on their own: a cat photo passes the gate, glare
     is never painted over, and the thresholds have never seen a photograph."""
-    text = robustness_eval.render_docs(robustness_eval.evaluate()).lower()
+    text = robustness_eval.render_docs(report).lower()
     assert "photograph of a cat" in text
     assert "no inpainting" in text
     assert "calibrated against generated labels, not photographs" in text
 
 
-def test_the_document_says_how_to_reproduce_every_number() -> None:
-    text = robustness_eval.render_docs(robustness_eval.evaluate())
+def test_the_document_says_how_to_reproduce_every_number(
+    report: robustness_eval.Report,
+) -> None:
+    text = robustness_eval.render_docs(report)
     for command in (
         "python -m scripts.robustness_eval",
         "python -m scripts.calibrate_quality",
@@ -924,10 +1079,6 @@ def test_the_document_names_the_tier_a_gap(report: robustness_eval.Report) -> No
     assert "never averaged" in text
 
 
-def test_regenerating_the_document_is_idempotent(report: robustness_eval.Report) -> None:
-    assert robustness_eval.render_docs(report) == robustness_eval.render_docs(report)
-
-
 def test_an_unswept_value_is_reported_as_unmeasured() -> None:
     """If someone edits a threshold without widening the sweep, every level was measured
     and none of them was the value in use. The summary must not then report a clean bill
@@ -935,9 +1086,7 @@ def test_an_unswept_value_is_reported_as_unmeasured() -> None:
     original = T.HOPELESS
     try:
         T.HOPELESS = 0.99
-        sweep = calibrate_quality.sweep_one(
-            "HOPELESS", calibrate_quality.SWEEPS["HOPELESS"]
-        )
+        sweep = calibrate_quality.sweep_one("HOPELESS", _narrow("HOPELESS", (0.15, 0.2)))
     finally:
         T.HOPELESS = original
 
@@ -951,3 +1100,40 @@ def test_a_swept_value_is_not_reported_as_unmeasured(
     blur_sweep: calibrate_quality.Sweep,
 ) -> None:
     assert blur_sweep.on_grid and not blur_sweep.unproven
+
+
+def test_the_document_separates_what_ships_from_what_does_not(
+    report: robustness_eval.Report,
+) -> None:
+    """The claim that started this: per-region readability was listed under Handled in a
+    document whose whole premise is not overclaiming, while `verify_endpoint` has never
+    called it."""
+    text = robustness_eval.render_docs(report)
+    assert "## Running in the product" in text
+    assert "## Built and tested, but NOT wired into the product" in text
+    assert "currently unreachable from the API" in text
+
+
+def test_the_unwired_half_is_not_empty_and_names_the_region_check() -> None:
+    """If someone wires it up, they should move the entry rather than delete this test."""
+    unwired = [x.area for x in limitations.LIMITATIONS if not x.runs_in_production]
+    assert "Region readability" in unwired
+    assert "Glare" in unwired
+
+
+def test_the_pre_gate_is_listed_as_running() -> None:
+    """It genuinely does run — `verify_endpoint` calls quality.assess and pre-gates on it.
+    Understating that would be the opposite error."""
+    live = [x.area for x in limitations.LIMITATIONS if x.runs_in_production]
+    assert "Blur" in live
+    assert "Thresholds" in live
+
+
+def test_the_document_carries_the_exact_wiring_change(
+    report: robustness_eval.Report,
+) -> None:
+    """"Wire up preprocessing" is not an instruction anyone can act on."""
+    text = robustness_eval.render_docs(report)
+    assert "preprocess_mod.preprocess" in text
+    assert "assess_region" in text
+    assert "Order matters" in text

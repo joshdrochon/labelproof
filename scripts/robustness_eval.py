@@ -41,7 +41,7 @@ import numpy as np
 
 from api.models import Application, BoundingBox, FieldName, Verdict
 from api.pipeline import deskew, preprocess, quality
-from api.pipeline.limitations import LIMITATIONS
+from api.pipeline.limitations import LIMITATIONS, WIRING, Limitation
 from api.provider.base import ImageInput
 from api.provider.fake import SpecBackedProvider
 from api.verify import verify
@@ -449,25 +449,61 @@ def render_docs(report: Report) -> str:
         f"with {len(report.false_passes)} false passes and {len(report.false_flags)} "
         f"false flags.",
         "",
-        "## Boundaries",
-        "",
     ]
 
-    for limitation in LIMITATIONS:
-        lines += [
-            f"### {limitation.area}",
-            "",
-            f"**Handled.** {limitation.handled}",
-            "",
-            f"**Not handled.** {limitation.not_handled}",
-            "",
-            f"**Why.** {limitation.why}",
-            "",
-            f"*Evidence:* `{limitation.evidence}`",
-            "",
-        ]
+    def section(items: list[Limitation]) -> list[str]:
+        out: list[str] = []
+        for limitation in items:
+            out += [
+                f"### {limitation.area}",
+                "",
+                f"**Handled.** {limitation.handled}",
+                "",
+                f"**Not handled.** {limitation.not_handled}",
+                "",
+                f"**Why.** {limitation.why}",
+                "",
+                f"*Evidence:* `{limitation.evidence}`",
+                "",
+            ]
+        return out
 
     lines += [
+        "## Running in the product",
+        "",
+        "`verify_endpoint` sanitises the upload and scores whole-image quality, so the",
+        "pre-gate is live: a hopeless photograph gets a plain-language retake reason and",
+        "costs nothing. Everything in this section executes on a real request.",
+        "",
+    ]
+    lines += section([x for x in LIMITATIONS if x.runs_in_production])
+
+    lines += [
+        "## Built and tested, but NOT wired into the product",
+        "",
+        "**These do not execute on a request today.** `verify_endpoint` never calls",
+        "`preprocess.preprocess`, `assess_region` or `illegible_regions`, so deskewing,",
+        "exposure lifting, glare recovery and per-region readability run in the test suite",
+        "and the harnesses and nowhere else.",
+        "",
+        "Concretely: an image that is sharp everywhere except a smeared warning region",
+        "scores `blur=1.000, verdict='ok'` on a real request and goes to the model with no",
+        "per-field caveat. The TC-12 behaviour described below is real, tested, and",
+        "currently unreachable from the API.",
+        "",
+        "Listing them as handled would be the exact failure this document exists to",
+        "prevent. The route belongs to another wave; the next section is the change.",
+        "",
+    ]
+    lines += section([x for x in LIMITATIONS if not x.runs_in_production])
+
+    lines += [
+        "## Wiring the unwired half",
+        "",
+        "```",
+        WIRING.strip(),
+        "```",
+        "",
         "## Reproducing every number here",
         "",
         "```",
