@@ -11,6 +11,17 @@ import json
 import pytest
 
 from api.models import FieldName, Verdict
+from eval.gates import (
+    EXIT_ACCURACY,
+    EXIT_HARNESS_ERROR,
+    EXIT_OK,
+    EXIT_USAGE,
+    EXIT_WARNING_COVERAGE,
+    EXIT_WARNING_FALSE_PASS,
+    exit_code_for,
+    gates_for,
+    status_line,
+)
 from eval.outcomes import ACCURACY_FLOOR, FieldOutcome, Report, evaluate
 from eval.report import render
 from eval.run import main, payload
@@ -315,6 +326,134 @@ def test_cli_rejects_an_unknown_fixture() -> None:
 
 def test_payload_round_trips_through_json() -> None:
     assert json.loads(json.dumps(payload(evaluate(CATALOG))))["tier"] == "A"
+
+
+# --- CI gates (LP-122) ------------------------------------------------------------------------
+
+def test_the_golden_set_clears_every_blocking_gate() -> None:
+    gates = gates_for(evaluate(CATALOG))
+    assert [g.name for g in gates if g.status == "fail"] == []
+    assert exit_code_for(gates) == EXIT_OK
+
+
+def test_gates_agree_with_report_passed() -> None:
+    """The two implementations of the same conditions must never disagree (J-05)."""
+    reports = [
+        evaluate(CATALOG),
+        Report(tier="A", outcomes=[warning_violation()]),
+        Report(tier="A", outcomes=[warning_violation(actual=Verdict.MATCH)]),
+        Report(tier="A", outcomes=[outcome()]),
+        Report(tier="A", outcomes=[outcome()], subset=True),
+        Report(tier="A", outcomes=[warning_violation()], errors=[("f", "boom")]),
+        Report(tier="A"),
+        Report(
+            tier="A",
+            outcomes=[warning_violation()]
+            + [outcome(expected=Verdict.MISMATCH, actual=Verdict.MATCH) for _ in range(9)],
+        ),
+    ]
+    for report in reports:
+        gates = gates_for(report)
+        assert report.passed == (exit_code_for(gates) == EXIT_OK), render(report)
+
+
+def test_a_false_pass_exits_three() -> None:
+    """The safety-critical failure gets its own code so CI can page differently."""
+    report = Report(tier="A", outcomes=[warning_violation(actual=Verdict.MATCH)])
+    assert exit_code_for(gates_for(report)) == EXIT_WARNING_FALSE_PASS
+
+
+def test_no_warning_coverage_exits_five() -> None:
+    report = Report(tier="A", outcomes=[outcome() for _ in range(20)])
+    assert exit_code_for(gates_for(report)) == EXIT_WARNING_COVERAGE
+
+
+def test_a_crashed_fixture_exits_four() -> None:
+    report = Report(tier="A", outcomes=[warning_violation()], errors=[("f", "boom")])
+    assert exit_code_for(gates_for(report)) == EXIT_HARNESS_ERROR
+
+
+def test_low_accuracy_exits_one() -> None:
+    outcomes = [warning_violation()]
+    outcomes += [outcome(expected=Verdict.MISMATCH, actual=Verdict.MATCH) for _ in range(9)]
+    outcomes += [outcome() for _ in range(10)]
+    report = Report(tier="A", outcomes=outcomes)
+    assert exit_code_for(gates_for(report)) == EXIT_ACCURACY
+
+
+def test_a_false_pass_outranks_every_other_failure() -> None:
+    """A compliance failure must never be masked by a co-occurring accuracy dip."""
+    outcomes = [warning_violation(actual=Verdict.MATCH)]
+    outcomes += [outcome(expected=Verdict.MISMATCH, actual=Verdict.MATCH) for _ in range(9)]
+    report = Report(tier="A", outcomes=outcomes, errors=[("f", "boom")])
+    assert exit_code_for(gates_for(report)) == EXIT_WARNING_FALSE_PASS
+
+
+def test_the_false_pass_gate_is_always_blocking() -> None:
+    """There is no configuration under which OPS-3 becomes advisory."""
+    for report in (evaluate(CATALOG), Report(tier="A", subset=True), Report(tier="A")):
+        gate = next(g for g in gates_for(report) if g.name == "warning_zero_false_pass")
+        assert gate.blocking
+        assert gate.exit_code == EXIT_WARNING_FALSE_PASS
+
+
+def test_the_coverage_gate_is_skipped_not_failed_on_a_subset_run() -> None:
+    gates = gates_for(Report(tier="A", outcomes=[outcome()], subset=True))
+    gate = next(g for g in gates if g.name == "warning_gate_exercised")
+    assert gate.status == "skip"
+    assert gate.ok
+
+
+def test_the_gate_table_is_printed_in_the_report() -> None:
+    text = render(evaluate(CATALOG))
+    assert "CI gates (OPS-6)" in text
+    for name in ("warning_zero_false_pass", "warning_gate_exercised",
+                 "harness_ran_clean", "field_accuracy"):
+        assert name in text
+
+
+def test_the_report_ends_with_a_greppable_status_line() -> None:
+    report = evaluate(CATALOG)
+    line = render(report).strip().split("\n")[-1]
+    assert line == status_line(report, gates_for(report))
+    assert line.startswith("::labelproof-eval::")
+
+
+def test_the_failing_report_names_its_exit_code() -> None:
+    report = Report(tier="A", outcomes=[warning_violation(actual=Verdict.MATCH)])
+    assert f"FAIL (exit {EXIT_WARNING_FALSE_PASS})" in render(report)
+
+
+def test_cli_exit_code_matches_the_payload() -> None:
+    assert main(["--json"]) == EXIT_OK
+
+
+def test_cli_usage_error_code_is_distinct_from_every_gate() -> None:
+    gate_codes = {g.exit_code for g in gates_for(evaluate(CATALOG))}
+    assert EXIT_USAGE not in gate_codes
+    assert main(["--fixture", "nope"]) == EXIT_USAGE
+
+
+def test_cli_writes_a_report_artifact(tmp_path: object) -> None:
+    from pathlib import Path
+
+    out = Path(str(tmp_path)) / "nested" / "report.json"
+    assert main(["--report-json", str(out)]) == EXIT_OK
+    body = json.loads(out.read_text())
+    assert body["status"] == "pass"
+    assert body["gates"]
+    assert body["exit_code"] == EXIT_OK
+
+
+def test_documented_ci_command_matches_the_parser() -> None:
+    """eval/README.md is the handoff artifact for whoever wires the workflow."""
+    from pathlib import Path
+
+    readme = (Path(__file__).resolve().parents[1] / "eval" / "README.md").read_text()
+    assert "python -m eval.run --report-json eval/out/report.json" in readme
+    for code in (EXIT_OK, EXIT_ACCURACY, EXIT_USAGE, EXIT_WARNING_FALSE_PASS,
+                 EXIT_HARNESS_ERROR, EXIT_WARNING_COVERAGE):
+        assert f"`{code}`" in readme
 
 
 # --- expectations are honest -----------------------------------------------------------------

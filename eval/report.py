@@ -20,6 +20,7 @@ duration or an absolute path for the same reason.
 from __future__ import annotations
 
 from api.models import Verdict
+from eval.gates import FAIL, SKIP, Gate, exit_code_for, gates_for, status_line
 from eval.outcomes import ACCURACY_FLOOR, Report
 
 RULE = "=" * 78
@@ -187,13 +188,33 @@ def warning_section(report: Report) -> list[str]:
     return out
 
 
+_GATE_MARK: dict[str, str] = {FAIL: "FAIL", SKIP: "skip", "pass": "pass"}
+
+
+def gates_section(gates: list[Gate]) -> list[str]:
+    """The CI contract, printed where a human can see what the exit code meant."""
+    out = ["", "CI gates (OPS-6) — blocking gates set the exit code:"]
+    for gate in gates:
+        blocking = "blocking" if gate.blocking else "advisory"
+        out.append(
+            f"  [{_GATE_MARK[gate.status]:4s}] {gate.name:24s} {blocking:9s} "
+            f"exit {gate.exit_code}   {gate.summary}"
+        )
+    return out
+
+
 def render(report: Report) -> str:
     """The human-readable report. Byte-stable across runs (LP-123)."""
+    gates = gates_for(report)
+    code = exit_code_for(gates)
+
     lines: list[str] = []
     lines += header(report)
     lines += errors_section(report)
     lines += accuracy_section(report)
     lines += confusion_section(report)
     lines += warning_section(report)
-    lines += ["", "PASS" if report.passed else "FAIL"]
+    lines += gates_section(gates)
+    lines += ["", "PASS" if code == 0 else f"FAIL (exit {code})"]
+    lines += ["", status_line(report, gates)]
     return "\n".join(lines)

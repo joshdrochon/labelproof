@@ -32,6 +32,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from eval.gates import EXIT_USAGE, exit_code_for, gates_for
 from eval.outcomes import (
     ACCURACY_FLOOR,
     FieldOutcome,
@@ -47,6 +48,7 @@ ROOT = Path(__file__).resolve().parents[1]
 #: Re-exported so existing importers keep working after the module split.
 __all__ = [
     "ACCURACY_FLOOR",
+    "EXIT_USAGE",
     "FieldOutcome",
     "Report",
     "evaluate",
@@ -56,13 +58,14 @@ __all__ = [
     "render",
 ]
 
-#: Exit code for a usage error — an unknown fixture name, a bad flag.
-EXIT_USAGE = 2
-
 
 def payload(report: Report) -> dict[str, Any]:
-    """The machine-readable form of a report."""
+    """The machine-readable form of a report, gates included (LP-122)."""
+    gates = gates_for(report)
     return {
+        "gates": [g.as_dict() for g in gates],
+        "exit_code": exit_code_for(gates),
+        "status": "pass" if exit_code_for(gates) == 0 else "fail",
         "tier": report.tier,
         "subset": report.subset,
         "fixtures": report.fixtures,
@@ -111,6 +114,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="append",
         help="run only the named fixture(s). Marks the run a subset — diagnostic, not a gate.",
     )
+    parser.add_argument(
+        "--report-json",
+        metavar="PATH",
+        help="also write the machine-readable payload here, for CI to keep as an artifact",
+    )
     return parser
 
 
@@ -132,13 +140,23 @@ def main(argv: list[str] | None = None) -> int:
         return EXIT_USAGE
 
     report = evaluate(specs, subset=bool(args.fixture))
+    body = payload(report)
 
     if args.json:
-        print(json.dumps(payload(report), indent=2, sort_keys=True))
+        print(json.dumps(body, indent=2, sort_keys=True))
     else:
         print(render(report))
 
-    return 0 if report.passed else 1
+    if args.report_json:
+        artifact = Path(args.report_json)
+        artifact.parent.mkdir(parents=True, exist_ok=True)
+        artifact.write_text(json.dumps(body, indent=2, sort_keys=True) + "\n")
+        if not args.json:
+            # The status line is the last thing on stdout; keep it there.
+            print(f"wrote {artifact}", file=sys.stderr)
+
+    code: int = body["exit_code"]
+    return code
 
 
 if __name__ == "__main__":
