@@ -197,6 +197,13 @@ def test_a_buried_warning_is_read_but_its_prominence_is_not_yet_judged(
     The case is automated here rather than left to the eval so that the gap is visible
     in the suite as well as in the accuracy report. The capability itself is pinned in
     the xfail below.
+
+    An earlier version of this test ended with `assert spec.pending` — asserting that
+    the catalog still carries the marker which switches TC-06 off the release-blocking
+    false-pass gate. That is this suite requiring a bypass to stay in place, in the
+    layer that exists to find bypasses. It is gone. The gap belongs in the xfail below,
+    which turns red when the capability lands; the marker is bounded in
+    tests/contract/test_golden_set_contract.py, which turns red when the bypass closes.
     """
     spec = by_name("tc06_buried_warning")
     client = _client(SpecBackedProvider(spec))
@@ -207,7 +214,6 @@ def test_a_buried_warning_is_read_but_its_prominence_is_not_yet_judged(
     warning = _row(body, FieldName.GOVERNMENT_WARNING)
     assert warning["extracted"], "the statement is legible and should be read"
     assert warning["verdict"] != Verdict.MISSING.value
-    assert spec.pending, "TC-06's expectation is waiting on a ticket; see the xfail below"
 
 
 @pytest.mark.tc("TC-06")

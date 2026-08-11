@@ -160,6 +160,149 @@ def test_every_expected_finding_code_is_one_the_engine_can_raise(
                 assert code in emitted, f"{entry['name']}.{field}: unknown code {code!r}"
 
 
+# --------------------------------------------------------------------------------------
+# The zero-false-pass gate cannot be annotated away (LP-290, OPS-3)
+# --------------------------------------------------------------------------------------
+#
+# `eval/run.py` computes `is_warning_false_pass` — the one release-blocking metric this
+# product has — and two annotations in the catalog can switch it off for a fixture:
+#
+#   pending="LP-211"   -> `is_warning_false_pass` returns False outright
+#   expect={}          -> there is no violation to fail to detect, so the case vanishes
+#
+# Both are legitimate mechanisms and neither should exist on a government-warning case.
+# Setting `expect={}` on tc06 removes it from the gate entirely and the eval still exits
+# 0. This file is the layer that bounds the annotations; the harness is the layer that
+# reads them, and it is not this branch's file.
+#
+# These assertions are about the *data*, so they hold whatever `eval/run.py` does with
+# the flags next.
+
+#: Canonical cases whose whole purpose is a warning violation. If one of these stops
+#: expecting a violation, the case has been turned off rather than fixed.
+WARNING_VIOLATION_CASES = {"TC-03", "TC-04", "TC-05", "TC-06", "TC-07"}
+
+#: Verdicts that mean "this field is fine". Mirrors `eval.run._PASSING`, restated rather
+#: than imported so that widening it there cannot silently widen the gate here.
+_PASSING_VERDICTS = {"match", "not_applicable"}
+
+
+def _case_of(entry: dict[str, Any]) -> str:
+    return f"TC-{entry['name'][2:4]}"
+
+
+def _pending_exempts_a_warning_from_the_gate() -> bool:
+    """Does the harness currently let a `pending` marker suppress a warning false pass?
+
+    Asked of `FieldOutcome` rather than assumed, so this file states the invariant and
+    lets either owner satisfy it. The hole needs *both* halves — a harness that honours
+    `pending` and a warning fixture that sets it — so closing either one closes it.
+    """
+    from api.models import FieldName, Verdict
+    from eval.run import FieldOutcome
+
+    return not FieldOutcome(
+        fixture="probe",
+        field=FieldName.GOVERNMENT_WARNING,
+        expected=Verdict.MISMATCH,
+        actual=Verdict.MATCH,
+        pending="LP-000",
+    ).is_warning_false_pass
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "OPEN: the release-blocking zero-false-pass gate is switched off for TC-06 by "
+        "one word. eval.run.FieldOutcome.is_warning_false_pass returns False whenever "
+        "`pending` is set, and catalog.py sets pending='LP-211' on tc06_buried_warning "
+        "— a government-warning case the tool currently passes. So the metric the "
+        "product's central claim (LP-290, OPS-3) is measured by silently excludes one "
+        "of the five warning cases, and the eval still reports PASS.\n"
+        "The gap it marks is real — prominence heuristics do not exist — but 'the "
+        "capability is missing' and 'this case no longer counts against the false-pass "
+        "gate' are different statements and only the first is true. The missing "
+        "capability is already tracked by a strict xfail in "
+        "tests/e2e/test_verify_flows.py, which is the honest place for it.\n"
+        "Closing EITHER half clears this: stop honouring `pending` in "
+        "is_warning_false_pass (owner: eval/run.py), or drop the marker from the "
+        "warning expectation (owner: fixtures/generator/catalog.py)."
+    ),
+)
+def test_no_government_warning_case_is_exempted_from_the_false_pass_gate(
+    entries: list[dict[str, Any]]
+) -> None:
+    """Nothing in the catalog may take a warning case out of the gate."""
+    if not _pending_exempts_a_warning_from_the_gate():
+        return  # the harness no longer honours the marker; the data cannot bypass it
+    offenders = [
+        entry["name"]
+        for entry in entries
+        if entry["pending"] and "government_warning" in entry["expect"]
+    ]
+    assert offenders == [], (
+        f"these fixtures are excluded from the warning false-pass gate: {offenders}"
+    )
+
+
+def test_every_warning_violation_case_still_expects_a_violation(
+    entries: list[dict[str, Any]]
+) -> None:
+    """The second bypass: emptying `expect` makes the case vanish rather than fail.
+
+    With `expect={}` a fixture has no violation to detect, so it cannot produce a false
+    pass and drops out of the gate silently — the suite stays green and the exit code
+    stays 0. Nothing about the label changed; only the expectation did.
+
+    So the five canonical warning-violation cases are required by name to keep
+    expecting a non-passing government-warning verdict. Turning one off now takes an
+    edit to this list, which is a conversation rather than a one-word diff.
+    """
+    by_case = {_case_of(entry): entry for entry in entries}
+    for case in sorted(WARNING_VIOLATION_CASES):
+        entry = by_case.get(case)
+        assert entry is not None, f"{case} has no fixture; the gate has nothing to measure"
+        expected = entry["expect"].get("government_warning")
+        assert expected is not None, (
+            f"{entry['name']} no longer expects a government_warning verdict, so it "
+            f"cannot register a false pass"
+        )
+        assert expected not in _PASSING_VERDICTS, (
+            f"{entry['name']} expects {expected!r}, which counts as a pass — the case "
+            f"can no longer detect the failure it exists for"
+        )
+
+
+def test_the_warning_false_pass_gate_reads_the_expectations_this_file_bounds() -> None:
+    """The two halves are wired together, so bounding the data bounds the gate.
+
+    Without this, the assertions above could be bounding a field the harness had
+    stopped consulting — true statements about data nobody reads. Asserted against the
+    harness's own outcome object rather than against its source text.
+    """
+    from api.models import FieldName, Verdict
+    from eval.run import FieldOutcome
+
+    violation = FieldOutcome(
+        fixture="probe",
+        field=FieldName.GOVERNMENT_WARNING,
+        expected=Verdict.MISMATCH,
+        actual=Verdict.MATCH,
+    )
+    assert violation.is_warning_false_pass, (
+        "a warning expected to mismatch and returning match is not being counted as a "
+        "false pass"
+    )
+
+    not_a_violation = FieldOutcome(
+        fixture="probe",
+        field=FieldName.GOVERNMENT_WARNING,
+        expected=Verdict.MATCH,
+        actual=Verdict.MATCH,
+    )
+    assert not not_a_violation.is_warning_false_pass
+
+
 def test_every_pending_marker_names_a_ticket(entries: list[dict[str, Any]]) -> None:
     """"Pending" without a ticket is an expectation nobody owns.
 
