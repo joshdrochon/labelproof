@@ -63,29 +63,36 @@ kill_timeout = "15s"
   # cannot be inherited from a stray machine environment (LP-132).
   LABELPROOF_FAKE_PROVIDER = "0"
 
-  # --- latency budget: PINNED, NOT INHERITED -----------------------------------------
+  # --- latency budget: PINNED, AND CHECKED AGAINST THE MODEL ---------------------------
   #
-  # These were previously left to api/config.py's defaults, on the reasoning that config
-  # should own its own defaults. That reasoning shipped a production where every real
-  # verification returned 503.
+  # These were originally unpinned, on the reasoning that api/config.py owns its own
+  # defaults. That shipped a production where every real verification returned 503: the
+  # defaults were a 4,000 ms deadline sized for the 5-second gate, silently applied to a
+  # model measuring 9.4-10.1 s. The file describing production made no claim about the
+  # two numbers that decide whether production works.
   #
-  # The defaults were a 4,000 ms provider timeout against a 5,000 ms request budget,
-  # sized for the 5-second adoption gate. The configured extraction model measures
-  # 9.4-10.1 s for a single-image call. The deadline expired, the retry started with
-  # nothing left, and the grader got "the label reading service is not responding" 4.4
-  # seconds after clicking Try a sample. Nothing in the deployment was wrong; a default
-  # written for one model was silently applied to another.
+  # `api/config.py` has since been fixed to derive both from the configured model's
+  # measured latency, which removes that failure at the source. Pinning static numbers
+  # here therefore carries a NEW risk in the opposite direction: change the model to
+  # something slower and these become the next stale constant. Both risks are real, so
+  # both are handled rather than traded off —
   #
-  # So they are pinned here, at values sized to the model this app actually calls, and a
-  # change to either side is now visible in a diff instead of arriving by inheritance.
+  #   - the values are explicit here, so production's budget is visible in a diff;
+  #   - they match what `api/config.py` derives for the configured model today;
+  #   - and `tests/test_deploy_config.py` compares them against that derivation, so
+  #     changing the model turns a stale pin into a CI failure instead of a 503.
   #
-  # THESE VALUES DO NOT MEET PERF-1. The 5-second gate is not reachable with a model
-  # that takes ten seconds to answer, and a timeout short enough to pretend otherwise
-  # just converts slow into broken. Getting under 5s is a model decision (the LP-329
-  # sweep), not a timeout decision. scripts/smoke.sh reports the gap on every deploy so
-  # it cannot quietly become normal, and enforces it the day it is met.
-  LABELPROOF_PROVIDER_TIMEOUT_MS = "14000"
-  LABELPROOF_REQUEST_BUDGET_MS = "18000"
+  # Change the model and this file fails the build until these move with it. That is the
+  # intended behaviour, not an inconvenience.
+  #
+  # THESE VALUES DO NOT MEET PERF-1, and the gap is deliberate rather than hidden. A 5s
+  # gate is not reachable with a model that takes ten seconds to answer, and a deadline
+  # short enough to pretend otherwise only converts slow into broken — which is exactly
+  # what happened. Closing it is the LP-329 model sweep's job. scripts/smoke.sh reports
+  # the gap on every deploy so it cannot quietly become normal, and SMOKE_ENFORCE_PERF1
+  # turns it into a rollback trigger the day it is met.
+  LABELPROOF_PROVIDER_TIMEOUT_MS = "19200"
+  LABELPROOF_REQUEST_BUDGET_MS = "20700"
   LABELPROOF_ADJUDICATION_RESERVE_MS = "1500"
 
   # Keep-warm and prompt-cache pre-warm (LP-134, LP-324). Opt-in by design — the same

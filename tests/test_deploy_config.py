@@ -267,7 +267,7 @@ def test_the_latency_budget_fits_the_model_production_will_actually_call() -> No
     sized for one model and silently applied to another is invisible in any single file,
     which is exactly why it survived to production.
     """
-    from api.config import Config
+    from api.config import Config, measured_latency_ms
 
     with FLY_TOML.open("rb") as handle:
         env = tomllib.load(handle)["env"]
@@ -284,28 +284,30 @@ def test_the_latency_budget_fits_the_model_production_will_actually_call() -> No
 
     # Whichever model production ends up on, its measured latency has to fit.
     model = Config().extraction_model
-    measured = _measured_latency_ms(model)
-    assert measured is not None, (
-        f"scripts/smoke.sh has no measured latency for '{model}', the model "
-        f"api/config.py defaults to. Add it to model_p50_ms() so the budget can be "
-        f"checked against something."
-    )
+    measured = measured_latency_ms(model)
     assert timeout_ms > measured, (
         f"the provider deadline is {timeout_ms} ms and {model} measures {measured} ms. "
         f"Every real verification will hit the deadline and return 503 while /health "
         f"and /ready stay green."
     )
 
-
-def _measured_latency_ms(model: str) -> int | None:
-    """Read the measured-latency table out of scripts/smoke.sh.
-
-    Parsed rather than duplicated: a second copy of these numbers would drift, and the
-    drift would only show up as a production timeout.
-    """
-    smoke = (ROOT / "scripts" / "smoke.sh").read_text()
-    match = re.search(rf"^\s*{re.escape(model)}\)\s*echo\s+(\d+)", smoke, re.MULTILINE)
-    return int(match.group(1)) if match else None
+    # And the pins must not fall behind what the app derives for that model.
+    #
+    # This is the other direction of the same bug. `api/config.py` now sizes both budgets
+    # from the model's measured latency, so it is correct by construction — a static pin
+    # here is only correct until someone changes the model. Comparing the two turns a
+    # stale pin into a CI failure instead of a production timeout, which is the whole
+    # reason pinning them is safe at all.
+    derived = Config(extraction_model=model)
+    assert timeout_ms >= derived.provider_timeout_ms, (
+        f"fly.toml pins a {timeout_ms} ms deadline, but api/config.py derives "
+        f"{derived.provider_timeout_ms} ms for {model}. The pin is stale — it was "
+        f"written for a different model. Update fly.toml, do not lower the derivation."
+    )
+    assert budget_ms >= derived.request_budget_ms, (
+        f"fly.toml pins a {budget_ms} ms budget against a derived "
+        f"{derived.request_budget_ms} ms for {model}. Same problem, same fix."
+    )
 
 
 def test_production_cannot_be_put_into_sample_mode_by_omission(fly: dict[str, Any]) -> None:

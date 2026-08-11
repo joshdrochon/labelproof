@@ -57,19 +57,32 @@ ENFORCE_PERF1="${SMOKE_ENFORCE_PERF1:-0}"
 BUDGET_GRACE_MS="${SMOKE_BUDGET_GRACE_MS:-2000}"
 
 # A sanity ceiling on the advertised budget itself, so a release cannot be made green by
-# widening the budget until nothing can fail.
-MAX_ADVERTISED_BUDGET_MS="${SMOKE_MAX_BUDGET_MS:-20000}"
+# widening the budget until nothing can fail. Set above what the slowest model on record
+# derives (measured latency x2 headroom, plus the adjudication reserve) and no higher —
+# it is a backstop against an absurd value, not a second budget.
+MAX_ADVERTISED_BUDGET_MS="${SMOKE_MAX_BUDGET_MS:-30000}"
 
-# Measured single-call latency per extraction model, for the assertion that the request
-# budget is actually large enough for the model in front of it. Sourced from the LP-329 /
-# LP-331 spikes; update alongside them.
+# Measured single-call latency for an extraction model, used to assert that the request
+# budget is large enough for the model in front of it.
+#
+# Read from `api/config.py`, which owns the table and sizes its own budgets from it. A
+# second copy of these numbers here would be one more pair of files that can disagree —
+# and disagreement between a budget and a model's real latency is the specific bug this
+# check exists to catch, so duplicating the numbers to check them would be absurd.
+#
+# Falls back to 0 ("unknown, cannot assert") when run from outside a checkout, rather than
+# to a guess.
 model_p50_ms() {
-  case "$1" in
-    claude-opus-5)   echo 10100 ;;
-    claude-sonnet-5) echo 7000  ;;
-    claude-haiku-4-5) echo 5500 ;;
-    *)               echo 0     ;;   # unknown model: cannot assert, say so
-  esac
+  python3 - "$1" <<'PY' 2>/dev/null || echo 0
+import sys
+sys.path.insert(0, ".")
+try:
+    from api.config import measured_latency_ms
+except Exception:
+    print(0)
+else:
+    print(measured_latency_ms(sys.argv[1]))
+PY
 }
 
 WORK_DIR="$(mktemp -d)"
