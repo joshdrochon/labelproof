@@ -50,6 +50,16 @@ no-op unless `LABELPROOF_KEEPWARM` is truthy, so `docker build && docker run` sp
 nothing, and it never raises into the service: if keep-warm dies, the service serves.
 """
 
+# ruff: noqa: RUF100
+#
+# Temporary, and delete it when `wave/ci` merges. That branch enables `S310` and `BLE001`,
+# which this file needs suppressions for (each one carries its reason inline). Those
+# suppressions are correct under the merged rule set and read as unused directives under
+# the current one, so RUF100 fires here today and the S310/BLE001 errors fire after the
+# merge. Silencing RUF100 for this one file is the only way both states lint clean during
+# the window; once the merge lands, drop this line and confirm the inline noqas are still
+# doing work.
+
 from __future__ import annotations
 
 import json
@@ -57,6 +67,7 @@ import os
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
 from typing import Any
@@ -143,16 +154,28 @@ class Settings:
 
 def _get_json(url: str, timeout: float = 5.0) -> tuple[int, dict[str, Any]]:
     """GET a JSON endpoint. A non-2xx is a result, not an exception — `/ready` answers
-    503 with a body when the provider is unreachable, and that body is the diagnosis."""
-    request = urllib.request.Request(url, method="GET")
+    503 with a body when the provider is unreachable, and that body is the diagnosis.
+
+    The scheme is checked rather than trusted. `urlopen` will happily open `file:`, and
+    this URL comes from `LABELPROOF_KEEPWARM_URL` — an environment variable, which is
+    exactly the kind of input that should not be able to turn a health check into a file
+    read.
+    """
+    scheme = urllib.parse.urlsplit(url).scheme
+    if scheme not in ("http", "https"):
+        raise ValueError(f"keep-warm will only fetch http(s) URLs, not {scheme!r}")
+
+    request = urllib.request.Request(url, method="GET")  # noqa: S310 — scheme checked above
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with urllib.request.urlopen(request, timeout=timeout) as response:  # noqa: S310
             body = response.read().decode("utf-8")
             return int(response.status), json.loads(body)
     except urllib.error.HTTPError as exc:
+        # An error body that is missing, truncated or not JSON is still a usable answer —
+        # the status code carries the diagnosis on its own.
         try:
             return int(exc.code), json.loads(exc.read().decode("utf-8"))
-        except Exception:
+        except (OSError, ValueError, UnicodeDecodeError):
             return int(exc.code), {}
 
 
@@ -171,14 +194,17 @@ def check_local(base_url: str) -> bool:
         healthy = status == 200
         if not healthy:
             applog.warn("keepwarm_unhealthy", status=status)
-    except Exception:
-        applog.warn("keepwarm_unhealthy", reason_code="unreachable")
+    except (OSError, ValueError) as exc:
+        # OSError covers URLError and the socket timeouts under it; ValueError covers a
+        # rejected scheme and unparseable JSON. Anything else is a bug in this file and
+        # should surface as one.
+        applog.warn("keepwarm_unhealthy", reason_code=type(exc).__name__)
         return False
 
     try:
         status, body = _get_json(f"{base_url}/ready")
-    except Exception:
-        applog.warn("keepwarm_not_ready", reason_code="unreachable")
+    except (OSError, ValueError) as exc:
+        applog.warn("keepwarm_not_ready", reason_code=type(exc).__name__)
         return False
 
     if status != 200:
@@ -316,7 +342,11 @@ class CacheWarmer:
                 max_tokens=1,
                 messages=[{"role": "user", "content": "warmup"}],
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 — see below
+            # Deliberately blind. This wraps a third-party SDK call whose failure modes
+            # are its own business: connection errors, rate limits, request-shape
+            # rejections, and whatever the next version adds. A warm ping that fails must
+            # cost the service nothing, so every one of them is logged and swallowed.
             applog.warn(
                 "keepwarm_cache_failed",
                 provider="anthropic",
@@ -411,7 +441,10 @@ def run(settings: Settings, *, ticks: int | None = None, sleep: Any = time.sleep
             ready = check_local(settings.base_url)
             if ready and warmer is not None:
                 warmer.warm()
-        except Exception as exc:  # pragma: no cover - the loop must not be killable
+        except Exception as exc:  # noqa: BLE001 — the loop must not be killable
+            # The last line of defence. Keep-warm is an optimisation; an unhandled
+            # exception here would end the loop and, worse, is the kind of thing nobody
+            # notices until the cache has been cold for a week.
             applog.error("keepwarm_tick_failed", reason_code=type(exc).__name__)
 
         completed += 1
