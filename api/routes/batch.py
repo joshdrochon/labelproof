@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import csv
 import io
+import time
 import zipfile
 from collections.abc import Awaitable, Callable, Sequence
 from pathlib import Path
@@ -49,6 +50,7 @@ from api.batch.models import (
     EXPORT_FIELDS,
     BatchAccepted,
     BatchItem,
+    BatchJob,
     BatchStatus,
     ItemState,
     JobCounts,
@@ -548,9 +550,31 @@ def _nothing_queueable_message(
 # --- reading --------------------------------------------------------------------------
 
 
-def _require_job(store: BatchStore, job_id: str, retention_hours: int) -> None:
-    if store.get_job(job_id) is not None:
-        return
+def _require_job(
+    store: BatchStore, job_id: str, retention_hours: int, *, now: float | None = None
+) -> BatchJob:
+    """The job, or the same refusal for "never existed" and "past its life".
+
+    The expiry half of this is not belt-and-braces. Purging is driven by `POST /batch`,
+    so a server that takes one importer dump and then goes quiet never sweeps — and
+    without this check every read path went on serving that job: full status, every item,
+    and an export carrying 300 applications' brand names, addresses and extracted label
+    text. Not merely retained past the promise, but actively handed back, while the
+    message two lines below told the caller the data was deleted hours ago. A false
+    statement to a government user about what we still hold is a worse failure than the
+    disk usage (SEC-2, LP-152).
+
+    So expiry is enforced where it is read, not where it is swept. Deleting the bytes is
+    still the sweeper's job — this only guarantees nobody is served them in the meantime,
+    which is the part that has to be true at every instant rather than eventually.
+
+    Expired and absent answer identically on purpose. They are the same fact from the
+    agent's seat — the batch is gone and a new one is needed — and the existing message
+    already says retention is why.
+    """
+    job = store.get_job(job_id)
+    if job is not None and job.expires_at > (time.time() if now is None else now):
+        return job
     raise errors.UserError(
         f"No batch with that reference is on this server. Batches and their images are "
         f"deleted {retention_hours} hours after they are started, so this one may have "
@@ -589,10 +613,7 @@ def batch_status(
     """Counts, summary, and the finished items so far — while the job runs (BATCH-5)."""
     config = get_config(request)
     store = get_store(request)
-    _require_job(store, job_id, config.retention_hours)
-
-    job = store.get_job(job_id)
-    assert job is not None  # _require_job just proved it
+    job = _require_job(store, job_id, config.retention_hours)
     counts = store.counts(job_id)
     everything = store.items(job_id)
 

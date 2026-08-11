@@ -613,6 +613,76 @@ def test_a_live_batch_is_not_purged(tmp_path: Path) -> None:
     assert store.get_job(job_id) is not None
 
 
+def expire(client: TestClient, job_id: str) -> None:
+    """Push a job's TTL into the past without sweeping it, which is the real situation.
+
+    Purging is driven by POST /batch. A server that takes one dump and goes quiet has
+    exactly this on disk: a job past its life that nothing has come along to delete.
+    """
+    store: BatchStore = client.app.state.batch_store
+    # Reaches into the store on purpose: there is no public setter for `expires_at` and
+    # there should not be one. Only the clock moves a job past its life in production.
+    with store._conn() as connection:
+        connection.execute(
+            "UPDATE jobs SET expires_at = ? WHERE job_id = ?", (time.time() - 60, job_id)
+        )
+
+
+def test_an_expired_batch_is_not_served_even_before_it_is_swept(tmp_path: Path) -> None:
+    """SEC-2 — the promise is about what we hand back, not only about what we store.
+
+    Between expiry and the next upload there is no sweep, and without an expiry check on
+    the read paths the API went on serving the whole job: status, items, and an export
+    carrying 300 applications' brand names and extracted label text — while the 'not
+    found' message on the very same endpoint told the caller it had been deleted hours
+    ago. Retaining data past a promise is a bug; answering with it while denying you have
+    it is a false statement to a government user.
+    """
+    client = make_client(tmp_path, provider=spec_provider())
+    job_id = post_batch(client, [row()]).json()["job_id"]
+    drain(client)
+    assert client.get(f"/batch/{job_id}").status_code == 200
+
+    expire(client, job_id)
+
+    for path in (f"/batch/{job_id}", f"/batch/{job_id}/export.csv"):
+        response = client.get(path)
+        assert response.status_code == 400, path
+        assert response.json()["error"]["code"] == "batch_not_found", path
+
+    retry = client.post(f"/batch/{job_id}/retry")
+    assert retry.status_code == 400
+    assert retry.json()["error"]["code"] == "batch_not_found"
+
+
+def test_an_expired_export_leaks_no_label_text(tmp_path: Path) -> None:
+    """The export is the leak that matters: every extracted field of every application."""
+    client = make_client(tmp_path, provider=spec_provider())
+    job_id = post_batch(client, [row()]).json()["job_id"]
+    drain(client)
+    assert "OLD TOM" in client.get(f"/batch/{job_id}/export.csv").text
+
+    expire(client, job_id)
+    body = client.get(f"/batch/{job_id}/export.csv").text
+    assert "OLD TOM" not in body
+    assert "Bardstown" not in body
+
+
+def test_an_expired_batch_answers_the_same_way_as_one_that_never_existed(
+    tmp_path: Path,
+) -> None:
+    """Same fact from the agent's seat: the batch is gone and a new one is needed."""
+    client = make_client(tmp_path, provider=spec_provider())
+    job_id = post_batch(client, [row()]).json()["job_id"]
+    drain(client)
+    expire(client, job_id)
+
+    expired = client.get(f"/batch/{job_id}").json()["error"]
+    missing = client.get("/batch/job_never_existed").json()["error"]
+    assert expired == missing
+    assert "24 hours" in expired["message"]
+
+
 # --- per-item isolation (BATCH-6, TC-20) — the requirement most easily lost ------------
 
 
