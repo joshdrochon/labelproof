@@ -942,25 +942,59 @@ def test_no_container_size_and_no_signal_combination_rescues_a_bad_warning() -> 
             )
 
 
-def test_the_warning_path_consults_no_threshold() -> None:
-    """WARN-6. If a knob ever appears in this path, this test names it.
+def _import_closure(*modules: str) -> set[str]:
+    """Every `api.*` module reachable from these, following imports transitively.
 
-    The check is structural rather than behavioural on purpose: a behavioural test can
-    only cover the thresholds that exist today.
+    Transitively is the point. A direct-import check passes the moment somebody adds
+    `from api.rules import compare` to this path and `compare` reaches a threshold two
+    hops away — which is exactly how a knob gets into the warning path without anybody
+    deciding to put one there.
     """
     import ast
     from pathlib import Path
 
-    root = Path(warning.__file__).parent
-    for module in ("warning.py", "typography.py"):
-        tree = ast.parse((root / module).read_text())
-        imported = [
-            node
-            for node in ast.walk(tree)
-            if isinstance(node, ast.Import | ast.ImportFrom)
-            and "thresholds" in ast.dump(node)
-        ]
-        assert imported == [], f"{module} imports a threshold module"
+    package = Path(warning.__file__).parents[1]
+    seen: set[str] = set()
+    queue = list(modules)
+
+    while queue:
+        name = queue.pop()
+        if name in seen:
+            continue
+        seen.add(name)
+        path = package.parent / (name.replace(".", "/") + ".py")
+        if not path.exists():
+            continue
+        for node in ast.walk(ast.parse(path.read_text())):
+            if isinstance(node, ast.Import):
+                queue += [a.name for a in node.names if a.name.startswith("api")]
+            elif isinstance(node, ast.ImportFrom) and (node.module or "").startswith("api"):
+                base = node.module or ""
+                queue.append(base)
+                queue += [f"{base}.{a.name}" for a in node.names]
+
+    return seen
+
+
+def test_the_import_closure_actually_follows_imports() -> None:
+    """The guard below is worthless if the walker returns nothing. Prove it walks."""
+    reached = _import_closure("api.rules.warning")
+    assert "api.canon" in reached
+    assert "api.models" in reached
+    assert "api.rules.typography" in reached
+
+
+def test_the_warning_path_consults_no_threshold() -> None:
+    """WARN-6. If a knob ever appears in this path, at any depth, this test names it.
+
+    Structural rather than behavioural on purpose: a behavioural test can only cover the
+    thresholds that exist today. Note that nothing in the repo imports `thresholds` yet,
+    so this currently guards a property that holds for the whole codebase — it is here to
+    keep holding for this path specifically, whatever the rest of the engine does later.
+    """
+    reached = _import_closure("api.rules.warning", "api.rules.typography")
+    offenders = {name for name in reached if "thresholds" in name}
+    assert offenders == set(), f"the warning path reaches {sorted(offenders)}"
 
 
 # --- casefolding trap -----------------------------------------------------------------
