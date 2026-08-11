@@ -23,13 +23,12 @@ from __future__ import annotations
 
 import asyncio
 import json
-import time
 from typing import Annotated, Any
 
 from fastapi import APIRouter, File, Form, Request, UploadFile
 from pydantic import ValidationError
 
-from api import errors
+from api import errors, timing
 from api import logging as applog
 from api.models import (
     Aggregate,
@@ -232,23 +231,23 @@ async def verify_endpoint(
     roles: Annotated[list[str] | None, Form()] = None,
 ) -> VerificationResult:
     """Verify one application against its label artwork."""
-    started = time.perf_counter()
+    # The one clock that decides what `total` means. Started before a byte is parsed, so
+    # the number the agent reads covers the whole request and not just the parts someone
+    # remembered to instrument (OPS-1, LP-126).
+    timer = timing.RequestTimer()
     config = get_config(request)
     request_id = applog.current_request_id() or applog.new_request_id()
-    timings = Timings()
 
     parsed = parse_application(application)
     uploads = await _read_uploads(images, config.max_images)
 
-    ingest_started = time.perf_counter()
-    ingested = ingest_mod.ingest([data for _, data in uploads], config)
-    timings.ingest = int((time.perf_counter() - ingest_started) * 1000)
+    with timer.stage("ingest"):
+        ingested = ingest_mod.ingest([data for _, data in uploads], config)
 
-    quality_started = time.perf_counter()
-    scores: list[ImageQuality] = [
-        quality_mod.assess(ingest_mod.to_array(image)) for image in ingested
-    ]
-    timings.quality = int((time.perf_counter() - quality_started) * 1000)
+    with timer.stage("quality"):
+        scores: list[ImageQuality] = [
+            quality_mod.assess(ingest_mod.to_array(image)) for image in ingested
+        ]
 
     faces = _roles_for(len(ingested), roles)
     reports = [
@@ -283,7 +282,8 @@ async def verify_endpoint(
             (s.reason for s in scores if s.reason),
             "The images are too poor to read the label.",
         )
-        timings.total = int((time.perf_counter() - started) * 1000)
+        timings = timer.seal()
+        timing.emit(timings, ok=False, count=len(reports))
         applog.log("verify_pregated", count=len(reports), duration_ms=timings.total)
         return _unverified(
             parsed,
@@ -298,14 +298,15 @@ async def verify_endpoint(
         )
 
     provider = provider_for(request, [name for name, _ in uploads])
-    remaining_ms = config.request_budget_ms - (time.perf_counter() - started) * 1000
+    remaining_ms = timer.remaining_ms(config.request_budget_ms)
 
     result = await _verify_within_budget(
         parsed, usable, provider, remaining_ms=remaining_ms
     )
 
     if result is None:
-        timings.total = int((time.perf_counter() - started) * 1000)
+        timings = timer.seal()
+        timing.emit(timings, ok=False, count=len(usable))
         applog.log(
             "verify_over_budget",
             duration_ms=timings.total,
@@ -328,11 +329,12 @@ async def verify_endpoint(
 
     result.request_id = request_id
     result.images = reports
-    result.timings_ms.ingest = timings.ingest
-    result.timings_ms.quality = timings.quality
-    result.timings_ms.total = int((time.perf_counter() - started) * 1000)
+    # The pipeline measured extract and compare from inside itself; this adds the two
+    # stages only the route can see and stops the one clock that owns `total`.
+    timer.merge_into(result.timings_ms)
     result.cost.usd = _estimated_usd(result.cost)
 
+    timing.emit(result.timings_ms, count=len(result.fields))
     applog.log(
         "verify_complete",
         recommendation=result.aggregate.recommendation.value,
@@ -340,6 +342,7 @@ async def verify_endpoint(
         duration_ms=result.timings_ms.total,
         input_tokens=result.cost.input_tokens,
         output_tokens=result.cost.output_tokens,
+        usd=result.cost.usd,
     )
     return result
 

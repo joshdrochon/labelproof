@@ -77,12 +77,17 @@ def set_request_id(rid: str) -> None:
     _request_id.set(rid)
 
 
-def log(event: str, level: int = logging.INFO, **fields: object) -> None:
+def log(event: str, level: int = logging.INFO, /, **fields: object) -> None:
     """Emit one structured line.
 
     Raises ContentInLogError if any field is outside the allowlist — see the module
     docstring. Add genuinely safe fields to ALLOWED_FIELDS deliberately; do not work
     around this.
+
+    `level` is positional-only on purpose. With it available by keyword, a caller
+    forwarding `**fields` could supply `level` from a dict and change the severity of a
+    line by accident — and the type checker cannot tell that apart from a real level, so
+    it flags every forwarding call site instead.
     """
     rejected = sorted(set(fields) - ALLOWED_FIELDS)
     if rejected:
@@ -100,11 +105,11 @@ def log(event: str, level: int = logging.INFO, **fields: object) -> None:
 
 
 def warn(event: str, **fields: object) -> None:
-    log(event, level=logging.WARNING, **fields)
+    log(event, logging.WARNING, **fields)
 
 
 def error(event: str, **fields: object) -> None:
-    log(event, level=logging.ERROR, **fields)
+    log(event, logging.ERROR, **fields)
 
 
 class stage:
