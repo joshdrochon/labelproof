@@ -68,6 +68,11 @@ def ready(request: Request) -> JSONResponse:
         "provider": getattr(provider, "name", "unknown"),
         "model": "none (sample mode)" if simulated else config.extraction_model,
         "request_budget_ms": config.request_budget_ms,
+        # PERF-1's number, reported separately from the deadline the service enforces.
+        # The two are allowed to disagree (api/config.py), and anything grading the gate
+        # from the outside — `scripts/timed_run.py` — has to read the target rather than
+        # the budget, or a deadline relaxed to fit a slow model becomes a lower bar.
+        "latency_target_ms": config.latency_target_ms,
     }
     if simulated:
         body["notice"] = (

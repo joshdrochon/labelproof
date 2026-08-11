@@ -132,18 +132,43 @@ class ImageReport(BaseModel):
 
 
 class Timings(BaseModel):
+    """Per-stage wall time in milliseconds (OPS-1).
+
+    A stage that did not run reports **null**, not `0`. Those are different facts and the
+    difference is the whole reason this model exists: `0` reads as "instant", and a
+    reader who takes `"adjudicate": 0` at face value concludes Tier-3 adjudication ran and
+    cost nothing. It does not run in this build at all.
+
+    `preprocess` is a roll-up of `ingest + quality`, so summing every field double-counts.
+    See `api/timing.py`.
+    """
+
     ingest: int = 0
     quality: int = 0
     preprocess: int = 0
     extract: int = 0
     compare: int = 0
-    adjudicate: int = 0
+    #: Tier-3 text adjudication. Not implemented in this build — always null. See
+    #: `api/timing.UNIMPLEMENTED_STAGES`.
+    adjudicate: int | None = None
     total: int = 0
 
 
 class Cost(BaseModel):
+    """What one verification cost (OPS-4).
+
+    The two cache counters are carried separately because they are *priced* separately:
+    a cached read costs a tenth of an input token, and writing a cache entry costs 1.25x
+    one. The provider's `input_tokens` excludes both, so leaving either field off does not
+    make the number conservative — it makes those tokens free. A cost analysis that
+    under-claims is as wrong as one that over-claims, and under-claiming is the direction
+    that gets a number into a budget it cannot support.
+    """
+
     input_tokens: int = 0
     output_tokens: int = 0
+    cache_read_tokens: int = 0
+    cache_creation_tokens: int = 0
     usd: float = 0.0
 
 

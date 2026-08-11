@@ -43,12 +43,11 @@ class ProviderUsage:
     input_tokens: int = 0
     output_tokens: int = 0
     cache_read_tokens: int = 0
-
-    #: Tokens written INTO the cache, billed at 1.25x input. Counted separately because
-    #: they are neither free nor the same price as anything else, and because omitting
-    #: them under-reports every cold request — which is every first click a grader makes.
+    #: Tokens written to the prompt cache, billed at 1.25x an input token. Separate from
+    #: `cache_read_tokens`, which is billed at 0.1x — and separate from `input_tokens`,
+    #: which excludes both. A provider that leaves this at zero on a request that did
+    #: write a cache entry under-reports that request's cost.
     cache_creation_tokens: int = 0
-
     model: str = ""
 
     def merge(self, other: ProviderUsage) -> None:

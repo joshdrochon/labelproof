@@ -1,11 +1,542 @@
 # LabelProof
 
-AI-powered alcohol label verification for TTB compliance review. `PRD.md` is the source of
-truth for requirements.
+AI label verification for TTB compliance review. An agent uploads the label artwork and
+the application; LabelProof returns a per-field checklist and a recommendation. It
+recommends — the agent decides.
 
-<!-- Setup, approach, tools, assumptions, egress table and the rest of the README are owned
-     elsewhere. The section below is the security, privacy and retention documentation
-     (SEC-1..SEC-10). Append around it. -->
+`PRD.md` is the source of truth for what this is, why, and what it must do.
+
+**Contents**
+
+- [Observability](#observability) — the log, the fields, the timings, what the numbers actually are
+- [Ops runbook](#ops-runbook) — read the log, the timings, the cost; the honesty check
+- [Network egress](#network-egress) — every external domain, allowlist-ready (NET-1)
+- [Security, privacy, and data retention](#security-privacy-and-data-retention) — SEC-1…SEC-10
+
+---
+
+## Observability
+
+The vendor pilot that came before this one died of *unexplained* slowness: 30 to 40
+seconds a label, with nothing anyone could point at. Everything in this section exists so
+that never has to be guessed at again — and so anything said about PERF-1 is evidence
+rather than assertion, including the part where the gate is not currently met.
+
+Three artifacts, in the order you would reach for them:
+
+| You want to know | Read |
+|---|---|
+| What happened on one request | the log line carrying its `request_id` |
+| How fast it is across many requests | `scripts/rollup.py` over a log file |
+| How fast the deployed URL is, right now | `scripts/timed_run.py` against that URL |
+
+### The log
+
+One JSON object per line, on stdout. Nothing else. Fly captures stdout directly, so
+`fly logs` is the log — there is no agent, no shipper, and no second place for a line to
+be.
+
+```json
+{"duration_ms": 9612, "event": "stage_complete", "ok": true, "request_id": "req_9f3c1a4b7e2d8055", "stage": "extract", "ts": 1786464776.227}
+```
+
+Keys are sorted, so two runs diff meaningfully. Every line carries `event` and `ts`
+(epoch seconds, 3dp). Every line emitted *during a request* also carries `request_id`.
+
+#### Correlation
+
+`request_id` is assigned by the middleware in `api/main.py` before routing, echoed to the
+caller in the `X-Request-ID` header, and returned in the response body as `request_id`.
+The reference an agent reads off the screen is the string to grep for.
+
+It is **generated, never accepted from a header**. An id the caller chooses is an id that
+can be forged to blend two agents' requests together in the log, and correlation is the
+only reason to have one.
+
+Lines written outside a request — startup, config warnings — carry no `request_id` at all
+rather than an empty one.
+
+Batch work adds `job_id` and `item_id`, which correlate an item back to its job. A worker
+thread inherits no ContextVar and therefore no request id, so those two names are how a
+batch line is attributed at all.
+
+#### Levels
+
+| Level | Means | What to do |
+|---|---|---|
+| `INFO` | Something happened, and it is what should happen. | Nothing. This is the stream you compute p95 from. |
+| `WARNING` | Degraded but handled. The agent still got an honest answer. | Watch the rate. A rising `provider_retry` is the shape of an outage forming. |
+| `ERROR` | A failure nobody chose. | Look at it. `unhandled_exception` should be zero. |
+
+There is no `DEBUG` tier and no `CRITICAL`. Three levels that mean something beat five
+that get used interchangeably.
+
+#### Events
+
+Every event this service can emit. This table is generated from `api.logging.EVENTS`, and
+`tests/test_logging.py` fails if the code emits an event that is not here, or if this
+lists one nothing emits.
+
+<!-- LOG-EVENTS:BEGIN -->
+
+| Event | Level | Meaning |
+|---|---|---|
+| `app_started` | INFO | Process is up and serving. |
+| `batch_exported` | INFO | A batch result CSV was produced. |
+| `batch_item_complete` | INFO | One batch item reached a verdict. |
+| `batch_item_failed` | WARNING | One batch item failed; the rest of the job continues. |
+| `batch_item_retry` | WARNING | One batch item is being retried. |
+| `batch_item_unrecorded` | ERROR | A batch item finished but its result could not be stored. |
+| `batch_purged` | INFO | A batch job's data passed its TTL and was deleted. |
+| `batch_queued` | INFO | A batch job was accepted. |
+| `batch_recovered` | INFO | Unfinished batch items were picked back up after a restart. |
+| `batch_retry` | INFO | Failed items in a batch were requeued. |
+| `circuit_breaker` | WARNING | The provider circuit opened or closed. Opening is the warning; closing rides the same event. |
+| `config_incomplete` | WARNING | A required setting is missing; /ready is red. |
+| `cost_model_unknown` | WARNING | A verification ran on a model with no entry in the price list; cost was estimated at the most expensive known tier. |
+| `image_scored` | INFO | Deterministic image-quality scores for one uploaded image. |
+| `log_containment_reasserted` | WARNING | Something replaced the log record factory and traceback containment was reinstalled (SEC-4). |
+| `provider_bbox_dropped` | WARNING | An evidence box was unusable and was discarded rather than guessed. |
+| `provider_call` | INFO | One model call, with its usage. |
+| `provider_extract` | INFO | The whole extraction across every image. |
+| `provider_price_unknown` | WARNING | The adapter priced a call at the unknown-model tier; the cost line is an over-estimate, not a quote. |
+| `provider_retry` | WARNING | A provider call failed and is being retried. |
+| `provider_typography_unusable` | WARNING | Typography signals could not be judged; the warning field fails closed. |
+| `provider_unavailable` | WARNING | The provider could not be reached; answered 503. |
+| `rate_limit_trusts_client_header` | WARNING | The rate limiter is identifying clients by a header. If no proxy overwrites that header, the limiter can be bypassed. |
+| `rate_limited` | WARNING | A request was refused with 429. Carries the lane and a correlation ID. |
+| `request_complete` | INFO | One HTTP request finished. Carries status and total duration. |
+| `request_failed` | INFO | A request ended in the error taxonomy. Carries kind, code, status. |
+| `retention_compaction_incomplete` | WARNING | The database was not compacted, so deleted content may remain in unused pages. |
+| `retention_purge_failed` | WARNING | A sweep could not delete expired data; it stays on disk until the next sweep. |
+| `retention_purged` | INFO | A sweep deleted expired data. Carries jobs removed and bytes reclaimed. |
+| `retention_started` | INFO | The retention sweeper is running. Carries the TTL and the sweep interval. |
+| `retention_state_unwritable` | WARNING | The retention bookkeeping file could not be written; the next sweep redoes work. |
+| `retention_sweep_failed` | ERROR | A whole retention cycle raised. The loop survives, but data is outliving its TTL. |
+| `security_installed` | INFO | The security middleware stack is installed. Carries the rate-limit ceiling. |
+| `stage_complete` | INFO | One pipeline stage's duration (OPS-1). One line per stage per request. |
+| `unhandled_exception` | ERROR | Something broke that nobody anticipated. The agent got a sentence, not a trace. |
+| `unhandled_thread_exception` | ERROR | A worker thread died uncaught. The batch pool's leak path, and stderr-direct otherwise. |
+| `verification_cost` | INFO | Tokens and dollars for one verification (OPS-4). |
+| `verify_complete` | INFO | A verification produced a recommendation. |
+| `verify_over_budget` | INFO | The request budget expired; partial result returned as Needs review. |
+| `verify_pregated` | INFO | Images too poor to read; returned Unreadable with zero model calls. |
+
+<!-- LOG-EVENTS:END -->
+
+#### Fields
+
+**A log line may carry only these field names, and the logger raises on anything else.**
+
+That is the mechanism, not a convention. SEC-4 says logs carry ids, timings, token counts
+and verdict summaries — never label text, never extracted values, never image bytes. A
+comment saying so is a rule that erodes; an allowlist that raises `ContentInLogError` is a
+rule that holds. Every name below is an identifier, a measurement, or a category. None of
+them can contain something read off a label.
+
+Adding a field is deliberate: put it in `api.logging.ALLOWED_FIELDS` with a reason.
+Working around the check is not a shortcut, it is a compliance failure.
+
+<!-- LOG-FIELDS:BEGIN -->
+
+| Field | What it carries |
+|---|---|
+| `attempt` | Which retry this is, from 1. |
+| `blur` | Image sharpness score, 0–1, higher is better. |
+| `bytes` | Size of something in bytes. Never its contents. |
+| `cache_creation_tokens` | Prompt-cache tokens written on this call. Priced at 1.25x input. |
+| `cache_read_tokens` | Prompt-cache tokens read on this call. Priced at a tenth of input. |
+| `code` | Machine-readable error code from the taxonomy, e.g. `file_too_large`. |
+| `commodity` | `spirits`, `wine` or `malt`. |
+| `confidence` | Extractor confidence for a field, 0–1. |
+| `count` | How many of the thing this line is about. |
+| `duration_ms` | Elapsed milliseconds. |
+| `event` | The event name. Always present. |
+| `exposure` | Image exposure score, 0–1, higher is better. |
+| `field` | Which of the seven label fields, e.g. `government_warning`. Never its value. |
+| `fixture` | Name of a built-in test fixture, in sample mode only. |
+| `glare` | Image glare score, 0–1, higher is better. |
+| `height` | Pixel height. |
+| `image_index` | Which uploaded image, from 0. |
+| `input_tokens` | Prompt tokens billed on this call, excluding cache reads. |
+| `item_id` | One item inside a batch job. |
+| `job_id` | One batch job. |
+| `kind` | Error taxonomy class: `user`, `image`, `provider` or `internal`. |
+| `media_type` | Detected content type, e.g. `image/png`. Sniffed, never taken from a filename. |
+| `model` | Model id the call was made against. |
+| `ok` | Whether the thing this line describes succeeded. |
+| `output_tokens` | Completion tokens billed on this call. |
+| `provider` | Which extraction provider served this, e.g. `anthropic` or `fake:spec`. |
+| `quality` | Image pre-gate outcome: `ok`, `degraded` or `hopeless`. |
+| `reason_code` | Why a decision went the way it did, as a category. |
+| `recommendation` | `ready_to_approve`, `needs_review` or `return_for_correction`. |
+| `request_id` | Correlation id. On every line emitted during a request. |
+| `skew_deg` | Estimated page rotation in degrees. |
+| `stage` | Pipeline stage name, e.g. `extract`. |
+| `status` | HTTP status code. |
+| `tier` | Which comparison tier decided a field: 1, 2 or 3. |
+| `usd` | Estimated list-price cost in US dollars. |
+| `verdict` | Per-field outcome, e.g. `match`, `unreadable`. Never the value compared. |
+| `width` | Pixel width. |
+
+<!-- LOG-FIELDS:END -->
+
+#### Nothing else in the process can print a traceback either
+
+The allowlist governs *our* log calls. It cannot govern uvicorn's, asyncio's, or a
+library's — and the one thing those reliably print is a traceback, which contains the
+exception's message. That is not theoretical here: the pipeline runs in a worker thread,
+and a `pydantic.ValidationError` raised while validating an extraction quotes the label
+text that failed validation.
+
+Containment is a second layer, in `api/security.py`, installed by `harden()`:
+
+| Channel | Covered by |
+|---|---|
+| An unhandled exception on the request path | A containment middleware installed *outside* Starlette's `ServerErrorMiddleware`, so it catches the exception before the server can format it. It logs one scrubbed line naming only the exception class and returns the taxonomy 500 with a request id. |
+| `logger.error(..., exc_info=True)` from any logger | A process-wide `LogRecord` factory that strips `exc_info` and `stack_info` from every record created anywhere. |
+| An uncaught exception on the main thread | A scrubbed `sys.excepthook`. |
+| An uncaught exception on a worker thread | A scrubbed `threading.excepthook` — the batch pool's path, which writes to stderr with no logging involved. |
+| `logger.error("failed: %s", exc)` or `logger.error(exc)` | `api.logging.scrub_exception_arguments`, called from that same factory. No traceback is involved on this path, so stripping `exc_info` does nothing for it. Exceptions nested inside lists, tuples, sets and dicts are replaced too, because that is the shape a batch worker collects them in. |
+
+**There is exactly one record factory in this process, on purpose.** Two independent
+factories look like belt and braces and are a bug: each captures the other as "the
+original", so whichever is uninstalled first silently disables the other while the
+liveness check still reports true.
+
+The retention timer re-asserts the guard on every sweep and logs
+`log_containment_reasserted` when it has to. A library that installs its own
+`logging.setLogRecordFactory` after startup would otherwise switch containment off for the
+life of the process with nothing to notice.
+
+What survives to stdout is the exception's *type*:
+
+```
+Exception in ASGI application | ValidationError suppressed: traceback withheld (SEC-4)
+```
+
+Visible, not silent — a service that is failing must not look like a service that is
+quiet.
+
+**What is still not covered, stated rather than papered over.** The gap is the shape of
+the guard, not an edge case: containment intercepts the logging module, the two exception
+hooks and the ASGI error path, so anything that writes to the file descriptor directly
+goes around it.
+
+- A bare `print()` or `sys.stdout.write()` anywhere in the process.
+- A subprocess inheriting stdout and writing to it.
+- Label text interpolated as a plain format argument with no exception involved —
+  `logger.info("read %s", brand)`. Covering that would mean redacting all foreign output,
+  which would delete the startup and access lines an ops team reads. Content someone
+  chose to log is the allowlist's job, and the allowlist raises on it.
+
+Nothing in this repository does any of these, and nothing on the label path writes to
+stdout by a route other than `logging`. `LABELPROOF_DEBUG_TRACEBACKS=1` turns the
+process-wide layer off for local debugging; there is no switch on the allowlist itself.
+
+Tests: `tests/test_logging.py`, `tests/test_security.py` — including one that demonstrates
+the leak is real with containment removed.
+
+### Timings
+
+Every `/verify` response carries the stage breakdown (LP-063), because PRD §Observability
+requires it *surfaced in the UI* — a number that lives only in stdout cannot be shown to
+the agent deciding whether to trust the tool.
+
+```json
+"timings_ms": { "ingest": 94, "quality": 44, "preprocess": 138,
+                "extract": 9612, "compare": 2, "adjudicate": 0, "total": 9885 }
+```
+
+> One honest caveat about that sample: **the live API returns `"adjudicate": null`, not
+> `0`.** Tier-3 adjudication does not run in this build, and the difference between null
+> and zero is the subject of the second rule below. It is written as a number here only so
+> that `tests/test_timing.py` can check the example's own arithmetic
+> (`preprocess == ingest + quality`, and `total` at least the sum of the measured stages)
+> without tripping over a null.
+
+| Field | What it measures |
+|---|---|
+| `ingest` | Sniff, EXIF-orient, strip all metadata, re-encode, downscale. |
+| `quality` | Blur, exposure, glare and skew scoring. No model call. |
+| `preprocess` | **Roll-up of `ingest + quality`.** See below. |
+| `extract` | Every vision call, wall-clock. Concurrent across images, so this is `max`, not `sum`. |
+| `compare` | The deterministic rules engine. Pure functions; usually 0–2ms. |
+| `adjudicate` | Tier-3 text adjudication. **Not implemented in this build — always `null`.** |
+| `total` | The whole request, measured by the outermost clock. |
+
+`ingest` and `quality` are measured inside `api.verify.prepare_images`, the single
+pre-model path — ingest, quality scoring and the pre-gate — that both Verify Now and Batch
+call (LP-321). It returns the two durations it measured and the request timer records
+them, so the same stage names mean the same thing on both entry points and the pre-gate
+cannot be true of one and quietly false of the other.
+
+Three things about this table are load-bearing.
+
+**`preprocess` is a roll-up, so do not add the column up.** PRD §Observability names the
+stages upload → preprocess → extract → compare → render. This pipeline measures the two
+halves of preprocessing separately, and `preprocess` reports their sum so the PRD's
+vocabulary maps onto real numbers. It is derived once, in `api.timing.seal`, and it is
+never a term in `total` — `total` comes off the outermost clock, so the roll-up cannot
+double-count into it. Summing every field in the JSON above would. (There is no separate
+deskew/perspective pass in this build; if one is added it becomes a third part of the
+roll-up, in `api.timing.PREPROCESS_PARTS`.)
+
+**A stage that did not run reports `null`, not `0`.** This is the same rule as the one
+above, seen from the other side: `0` reads as "instant", and `"adjudicate": 0` would invite
+a reader to conclude Tier-3 adjudication ran and cost nothing. It does not run at all.
+`api.timing.UNIMPLEMENTED_STAGES` lists the stages the API declares but this build never
+executes, and a test fails if one of them starts producing a number without coming off the
+list.
+
+**`total` is measured, not derived.** It comes from a clock started before the request is
+parsed and read after the last verdict is computed — never from adding the stages up.
+Adding them up would silently omit whatever nobody instrumented, and the gap between "what
+we measured" and "how long it took" is exactly the number worth having.
+
+`tests/test_timing.py` puts an independent stopwatch around a real HTTP request and holds
+the server's own claim to it. PRD §232: *if the number on the screen and the number on the
+stopwatch disagree, the stopwatch wins.*
+
+### How fast it actually is, and where that leaves PERF-1
+
+PERF-1 is a p95 of 5 seconds upload-to-verdict, quoted from a stakeholder as a hard
+adoption gate. **This build does not meet it on the configured model, and nothing here
+should be read as claiming it does.**
+
+Median single-call extraction latency, measured against the live API on one 2576px label
+by `scripts/spike_latency.py` and pinned in `api.config.MEASURED_EXTRACTION_MS`:
+
+| Extraction model | Median call | Input / output per MTok | Can pin `inference_geo` |
+|---|---|---|---|
+| `claude-opus-5` *(default)* | ~9,600 ms | $5 / $25 | Yes |
+| `claude-sonnet-5` | ~9,000 ms | $3 / $15 | Yes |
+| `claude-haiku-4-5` | ~5,500 ms | $1 / $5 | **No — 400s the parameter** |
+| Opus 5, extraction split into two concurrent calls | ~4,700 ms | $5 / $25 | Yes |
+
+Our own non-provider work — ingest, quality scoring, rules, serialization — is about
+**130 ms**. The model call is essentially the whole number, which is why
+`api.config._OVERHEAD_MS` reserves 1,500 ms and no more.
+
+The honest reading:
+
+- On the default Opus 5 configuration the median is roughly **9.6 s**, near twice the
+  gate. The p95 is worse than the median by construction.
+- Dropping to Haiku 4.5 buys ~4 s and is still above the gate at the median — and it costs
+  two things a federal deployment cannot spend. Haiku **rejects `inference_geo` with a
+  400**, so US data residency cannot be pinned on it at all
+  (`api.provider.anthropic_adapter.supports_inference_geo` /`describe_residency`). And in
+  the typography spike, over 20 samples per model, Haiku got the header-bold judgement
+  wrong 4 times and the body-bold judgement wrong 6 times where Sonnet 5 and Opus 5 got
+  both wrong zero times; all-caps was clean on all three. Haiku never abstained, and every
+  one of its errors was a **false pass** — the direction that ships a non-compliant label.
+- Splitting the extraction into two concurrent calls measures ~4.7 s and is the only
+  configuration that has come in under 5 s. That is a median on one machine, not a p95 on
+  a deployment.
+- **The gate has never been measured end-to-end on a deployed URL.** The deployment has
+  not been run. `scripts/timed_run.py` is the instrument for it, PRD §221 defines the
+  measurement (20 consecutive timed runs against the deployed URL, recorded in the repo),
+  and until that is done nobody should quote a p95.
+
+The latency target is reported, never enforced. `LABELPROOF_LATENCY_TARGET_MS` (5000) is
+what the product is *held to*; the request budget and the provider timeout default from
+the model's measured latency instead. Enforcing the target as a timeout is what once
+returned `provider_unavailable` on every single verification — a 4,000 ms timeout against
+a model whose calls take 9.4–10.1 s. Startup warns and `/ready` says so when the
+configured model cannot meet the target.
+
+---
+
+## Ops runbook
+
+Four things an operator does with this service. Each is one command.
+
+### Read the log
+
+Locally the log is stdout. On Fly it is `fly logs`, which is the same stream.
+
+```bash
+# Follow it.
+fly logs -a labelproof
+
+# Keep a file to roll up later.
+fly logs -a labelproof --no-tail > /tmp/labelproof.jsonl
+```
+
+Every line is one JSON object, so `jq` works without any parsing:
+
+```bash
+# One request's whole story, in order. This is the id the agent reads off the
+# screen under "Check reference", and the one in the X-Request-ID header.
+jq -c 'select(.request_id == "req_9f3c1a4b7e2d8055")' /tmp/labelproof.jsonl
+
+# Only what went wrong, with the taxonomy code that explains it.
+jq -c 'select(.event | test("failed|unavailable|exception|retry"))' /tmp/labelproof.jsonl
+
+# The slowest verifications first.
+jq -c 'select(.event == "verify_complete")' /tmp/labelproof.jsonl \
+  | jq -s 'sort_by(-.duration_ms) | .[:10]'
+
+# Every stage of every request, as a table.
+jq -r 'select(.event == "stage_complete")
+       | [.request_id, .stage, .duration_ms] | @tsv' /tmp/labelproof.jsonl
+```
+
+**There is no label text in there and there cannot be** — see the field allowlist above.
+That is also why nothing logs a path or a filename: an uploaded filename can carry a brand
+name.
+
+### Read the timings
+
+```bash
+# p50/p95 per stage, plus the error summary and the cost total.
+.venv/bin/python -m scripts.rollup /tmp/labelproof.jsonl
+
+# Straight off the deployment, no intermediate file.
+fly logs -a labelproof --no-tail | .venv/bin/python -m scripts.rollup
+
+# Machine-readable, for a dashboard or a CI check.
+.venv/bin/python -m scripts.rollup /tmp/labelproof.jsonl --json
+```
+
+How to read what comes back:
+
+| Row | Means | If it is high |
+|---|---|---|
+| `preprocess` | Decode, strip, downscale, quality score. Expect tens of ms. | The uploads are arriving full-size. The client is supposed to downscale to 2576px before sending. |
+| `extract` | The vision call(s). The dominant term, by a lot. | This is the model. Concurrency across images is already `max` not `sum`; the levers left are effort, model tier and prompt caching. |
+| `compare` | The rules engine. Expect 0–2ms. | Something in `api/rules/` started doing I/O. It is not supposed to be able to. |
+| `verification (POST /verify)` | Server-side total. **This is the PERF-1 series.** | It is the model. See *How fast it actually is* above and the measured table in `api/config.py`. |
+| `request (all HTTP)` | Every request including `/health`. | Only useful for spotting a slow static asset. Never quote it as the p95. |
+
+The rollup flags any percentile drawn from fewer than 20 samples. That flag is not
+decoration — a p95 over five runs is the maximum with a better name, and PERF-1 is an
+adoption gate.
+
+Server-side time is a **floor** for what a person with a stopwatch sees. It excludes
+upload, network and render. For the whole number:
+
+```bash
+# 20 runs against whatever URL, with the full sample printed.
+.venv/bin/python -m scripts.timed_run https://labelproof.fly.dev \
+  --runs 20 --note "fly iad, min_machines_running=1, warm ~4h" \
+  --out docs/perf-deployed.md
+```
+
+Commit the resulting file. **It does not exist yet — the deployment has not been run**, so
+there is currently no measured end-to-end p95 for this service. When it is produced, that
+file rather than a sentence in a status update is the evidence: it carries the URL, the
+timestamp, the commit, the payload size, every individual run, and whether the server was
+in sample mode.
+
+Exit codes: `0` measured, `1` nothing succeeded, `2` the server's clock and the caller's
+stopwatch disagreed — see *The honesty check* below.
+
+### Read the cost
+
+Every verification writes one `verification_cost` line.
+
+```bash
+# What a run of labels cost.
+jq -s 'map(select(.event == "verification_cost"))
+       | {n: length, usd: (map(.usd) | add), mean: (map(.usd) | add / length)}' \
+  /tmp/labelproof.jsonl
+```
+
+Or let the rollup do it — the **Cost** section of its report carries the total, the mean,
+the p95, mean tokens in and out, mean cached reads and mean cache writes.
+
+Five things to know before quoting a cost figure:
+
+- **It is list price, computed locally.** The price table lives in `api.timing.PRICES`,
+  keyed by model: Opus 5 at $5/$25 per MTok in/out, Sonnet 5 at $3/$15, Haiku 4.5 at $1/$5
+  (Anthropic first-party list, checked 2026-08-11). It is not a bill, and it does not know
+  about discounts. Sonnet 5's introductory $2/$10 rate is deliberately *not* used — a cost
+  analysis built on a rate that expires in three weeks has a short shelf life, and
+  over-stating is the safe direction for a number someone budgets against.
+- **The price follows the configured model.** `LABELPROOF_EXTRACTION_MODEL` is an
+  environment variable, and Opus 5 and Haiku 4.5 are a 5x spread on both counters. A model
+  with no entry in the table is priced at the most expensive known tier and logged as
+  `cost_model_unknown` (or `provider_price_unknown` when the adapter is the one guessing)
+  — guessing low would put an under-stated number into a budget.
+- **Three token counters, three prices.** `input_tokens` excludes both cache counters.
+  Cached reads cost a tenth of an input token; cache writes cost 1.25x one. All three are
+  on the cost line, and the adapter reports all three
+  (`api.provider.anthropic_adapter._usage_from`).
+- **Sample-mode runs cost nothing** and would drag any average down. The line carries
+  `provider`, the rollup names them, and it says so in the report rather than folding them
+  in.
+- **Cost is per verification, not per image.** One `/verify` with a front and a back is one
+  line covering both calls.
+
+The rollup keeps a standing guard on the last of those: cached reads in a window with no
+cache writes anywhere is the signature of a provider that reports
+`cache_read_input_tokens` but not `cache_creation_input_tokens`. Every cached prefix has to
+be written once before it can be read, so that combination is not a warm cache, it is an
+unpriced one. When the rollup sees it, it stamps the cost section as a lower bound rather
+than letting the figure look complete.
+
+### The honesty check
+
+PRD §232: *if the number on the screen and the number on the stopwatch disagree, the
+stopwatch wins.* Two mechanisms hold the service to that.
+
+`tests/test_timing.py` wraps a real `POST /verify` in an independent stopwatch and asserts
+the server's own `timings_ms.total` matches it — and, with a provider that sleeps a known
+duration, that the total actually contains the extraction rather than being computed
+before it. A fabricated total, a total measured too early, or a total that omits a stage
+all fail. There is also a test that makes that check go red on purpose, by making the
+timer report as if the clock had stopped at the top of the request: a guard nobody has
+watched fail is a guard nobody knows works.
+
+The front end carries **tripwires, not tests** — substring assertions on `VerifyNow.tsx`
+read as text. They cannot prove the rendered number is right; they go red the day someone
+deletes the client clock, points the banner at the server's total, or wires the progress
+animation to the result card. A real assertion on the rendered string would be a `vitest`
+test in `web/src`, which does not exist yet.
+
+`scripts/timed_run.py` does the same across a real network boundary and prints the gap per
+run. The gap is always positive: the client's stopwatch contains the server's work plus
+upload and network. If it ever goes negative the report says so in bold, withholds the
+claim, and the command exits `2`.
+
+**The elapsed time on the result card is the client's wall clock**, measured from submit to
+response, not the server's `timings_ms.total`. That is deliberate. The server's number is
+always the smaller of the two, and a product whose entire argument is speed must not report
+less time than actually passed. The server number is in the response body for anyone who
+wants the breakdown; the headline number is the one the stopwatch would agree with.
+
+### When something is wrong
+
+| Symptom | Where to look | Likely cause |
+|---|---|---|
+| `/ready` is red | `config_incomplete` lines | A missing environment variable. `/health` stays green on purpose — the process is fine. |
+| `/ready` says `sample_mode` | `verification_cost` lines with `provider: "fake:*"` | No API key. The service replays fixtures and says so on every verdict; it is not verifying uploads. |
+| `/ready` warns about the latency target | Startup lines | The configured model's measured latency is above `LABELPROOF_LATENCY_TARGET_MS`. This is the default state on Opus 5 — see *How fast it actually is*. |
+| p95 crept up | `extract` in the rollup | Almost always the model. Everything else is tens of milliseconds. |
+| Rising `provider_retry` | Degraded-but-handled table | An outage forming. `circuit_breaker` opening is the next line you will see. |
+| Unverified rate rising, error rate flat | Verification-outcome table | Pre-gate or budget stops. Both answer 200 — the service is up and is not checking labels. |
+| Any `unhandled_exception` | Its `request_id`, then that request's other lines | A bug. The traceback is deliberately not printed (SEC-4); the exception type is on the line and the request id tells you what it was doing. |
+
+---
+
+## Network egress
+
+NET-1: an agency network admin should be able to allowlist this app from one table.
+Marcus: *"our network blocks outbound traffic to a lot of domains."*
+
+| Destination | Who calls it | Why | Blocked means |
+|---|---|---|---|
+| `api.anthropic.com` (HTTPS 443) | The server only, via `api/provider/anthropic_adapter.py` | The vision extraction call. The single external dependency at runtime. | Every verification returns `provider_unavailable` (503) and says so. Sample mode (`LABELPROOF_FAKE_PROVIDER=1`) still works with no network at all. |
+| The hosting platform's own control plane | The platform | Deploys, logs, health checks. Not the app. | Deploys fail; a running container keeps serving. |
+
+That is the whole list. **The browser never contacts the provider** — all AI calls are
+server-brokered (NET-2), so no label artwork leaves a user's machine for anywhere but this
+service. The SPA loads no fonts, scripts, styles or images from any external host; every
+request it makes is a relative path to its own origin, and the CSP (`default-src 'none'`,
+no external host anywhere in the policy) enforces that rather than merely intending it.
+
+---
 
 ## Security, privacy, and data retention
 
@@ -68,8 +599,12 @@ of a VACUUM of a small database on a fifteen-minute timer.
 A compaction is only treated as finished when VACUUM did not raise, `wal_checkpoint(TRUNCATE)`
 reported not-busy (it **returns** `(busy, log, checkpointed)`; it does not raise, and an
 earlier version read success into a measured `(1, 17, 0)`), and the WAL is measurably empty.
-One that loses the database lock to a running batch warns and is retried next sweep. Tests:
-`tests/test_retention.py`.
+One that loses the database lock to a running batch warns
+(`retention_compaction_incomplete`) and is retried next sweep. The sweeper announces itself
+with `retention_started`, reports each cycle with `retention_purged`, and every way it can
+fall short — `retention_purge_failed`, `retention_state_unwritable`,
+`retention_sweep_failed` — is its own event, because "data is outliving its TTL" is not a
+thing to infer from silence. Tests: `tests/test_retention.py`.
 
 **Known gap, another file's to close.** `GET /batch/{id}` and `GET /batch/{id}/export.csv`
 serve a job for as long as its row survives, which is at least TTL + one sweep interval — while
@@ -82,53 +617,34 @@ refusing to serve are different guarantees and only the first is implemented. `i
 Content type is sniffed from magic bytes, never from the filename. Size, count and page caps
 are enforced before decode. **All metadata is stripped, including GPS** — phone photos of
 bottles carry the location they were taken. Every image is re-encoded on ingest, which
-neutralises polyglot files, and PDFs are rendered through a page-capped path. Tests:
-`tests/test_ingest.py`.
+neutralises polyglot files, and PDFs are rendered through a page-capped path. This is the
+first half of `api.verify.prepare_images`, so it is the same boundary on Verify Now and on
+Batch (LP-321). Tests: `tests/test_ingest.py`.
 
-### Nothing from a label reaches the logs
+### Nothing from a label reaches the logs (SEC-4)
 
-`api/logging.py` accepts an **allowlist of field names** and raises `ContentInLogError` on
-anything else. It is not a convention that erodes — there is no channel through which a brand
-name can be logged deliberately.
+Two layers, both documented in full under
+[Observability → Fields](#fields) and
+[Nothing else in the process can print a traceback either](#nothing-else-in-the-process-can-print-a-traceback-either):
 
-The allowlist governs `applog.log` and nothing else, so a second layer covers the way it would
-actually happen: a **traceback**. Starlette's `ServerErrorMiddleware` re-raises after the app's
-error handler runs, uvicorn formats the traceback to stdout, and exception messages in this
-codebase carry label text for real — a pydantic `ValidationError` renders `input_value=...`,
-which on the extraction path is the label the model just read. So:
+1. **An allowlist that raises.** `api/logging.py` accepts only the field names in the table
+   above and raises `ContentInLogError` on anything else. There is no channel through which a
+   brand name can be logged deliberately.
+2. **Process-wide traceback containment.** The allowlist governs `applog.log` and nothing
+   else, so a second layer covers the way a leak would actually happen — a traceback. A
+   `pydantic.ValidationError` on the extraction path renders `input_value=...`, which is the
+   label the model just read. Containment replaces the log record factory, both excepthooks
+   and the ASGI error path, reducing any traceback from any library on any thread to
+   `<ExceptionType> suppressed: traceback withheld (SEC-4)`.
 
-- an exception-containment middleware catches every unhandled exception before it can escape
-  to the server, logs one scrubbed line naming only the exception class, and returns the
-  taxonomy 500 with a request ID;
-- the retention timer re-asserts the guard every sweep, because a library installing its own
-  `logging.setLogRecordFactory` after startup would otherwise switch it off for the life of
-  the process with nothing to notice;
-- process-wide containment replaces the log record factory, `sys.excepthook` and
-  `threading.excepthook`, so a traceback logged by *any* library, on *any* thread, is reduced
-  to `<ExceptionType> suppressed: traceback withheld (SEC-4)`. Exception objects passed as
-  ordinary log arguments (`logger.error("failed: %s", exc)` — no `exc_info`, and the most
-  common way anyone writes that line) are replaced with their class name, including
-  exceptions nested inside lists, tuples, sets and dicts, which is the shape a batch worker
-  collects them in. Everything else keeps its message, so uvicorn's startup and bind lines
-  still read normally.
+The section above also states, plainly, what the guard does *not* cover: bare `print()`,
+direct writes to `sys.stdout`/`sys.stderr`, subprocess output on inherited descriptors, and
+label text interpolated as a plain string argument with no exception involved. Nothing in this
+repository does any of them.
 
-Set `LABELPROOF_DEBUG_TRACEBACKS=1` to turn the second layer off while debugging locally. It is
-off by default in every other configuration. Tests: `tests/test_security.py`, including one
-that demonstrates the leak is real with containment removed.
-
-**What still gets through, stated plainly.** The guard covers the `logging` module, both
-excepthooks, and the ASGI error path. It does not cover:
-
-- a bare `print()` or a direct write to `sys.stdout`/`sys.stderr`;
-- label text interpolated into a log message as a plain string rather than an exception
-  object — `logger.info("checked %s", brand_name)` renders the brand name;
-- anything a subprocess writes to the inherited file descriptors.
-
-This is the shape of the guard, not a list of edge cases: it scrubs exception objects and
-tracebacks, because those are the channels that carry label content without anyone intending
-it. Content someone chose to log is the allowlist's job, and the allowlist raises on it. The
-application's own code cannot leak either way; a dependency writing label text to stdout by a
-route other than `logging` would, and nothing on the label path does.
+`LABELPROOF_DEBUG_TRACEBACKS=1` turns the second layer off while debugging locally. It is off
+by default in every other configuration. Tests: `tests/test_security.py`, including one that
+demonstrates the leak is real with containment removed.
 
 ### Transport and headers
 
@@ -200,11 +716,12 @@ the machine out of rotation under the load it exists to survive.
 
 The bucket starts full, so the first minute's worth of requests never wait; a grader cannot
 throttle the demo by clicking. A refusal is a 429 with `Retry-After`, a request ID, and a
-plain-language body in the same error taxonomy as everything else.
+plain-language body in the same error taxonomy as everything else, and it logs `rate_limited`
+with the lane that refused it.
 
 **Client identity is the socket peer by default.** `LABELPROOF_CLIENT_IP_HEADER` is **empty**
 unless an operator sets it, and setting it is a security decision the app logs a warning about
-at startup.
+at startup (`rate_limit_trusts_client_header`).
 
 Whatever header it names is read straight off the request. Unless something between the client
 and this process *overwrites* that header every time, the client controls it and can rotate it
@@ -247,6 +764,29 @@ writing before launch. The provider is reached through one interface (`api/provi
 so moving to a gov-cloud or Azure-hosted endpoint is a config and adapter change rather than a
 rewrite (NET-4).
 
+**Data residency is asserted, not assumed — where the model allows it.** The adapter sends
+`inference_geo="us"` on every extraction call to a model that accepts it. The value is
+`Config.inference_geo` (`api/config.py`, default `"us"`); there is deliberately no environment
+override, because a data-residency guarantee that an operator can quietly relax with an env var
+is not a guarantee. Without the parameter, requests follow the workspace default inference
+geography — `global` unless someone configured otherwise — and the claim that label images
+never leave the United States is one the code does not make.
+
+This is a property of the model, not of our configuration, and it is not universal:
+
+| Model | `inference_geo` |
+|---|---|
+| `claude-opus-5` | Accepted. Inference pinned to `us`. |
+| `claude-sonnet-5` | Accepted. Inference pinned to `us`. |
+| `claude-haiku-4-5` | **Rejected with a 400.** Sending it fails the request; it is not a no-op. |
+
+So a Haiku 4.5 deployment cannot pin US data residency at all. `describe_residency()` in
+`api/provider/anthropic_adapter.py` renders that as one sentence an operator or a grader can
+act on, rather than letting the parameter be silently dropped by the request builder. For a
+federal customer this is a procurement question, not a preference — and it is one of the two
+reasons the faster, cheaper model is not simply the default (the other is the typography
+false-pass rate; see *How fast it actually is*).
+
 ### The production path — documented, not built (SEC-8)
 
 Scope-fenced per the brief. This is what changes between this prototype and something a federal
@@ -255,11 +795,12 @@ agency could actually run:
 | Area | Prototype today | Production |
 |---|---|---|
 | Model endpoint | Anthropic API | FedRAMP-authorized endpoint; the customer is already on Azure, so Azure-hosted models with a signed zero-retention term |
+| Data residency | `inference_geo="us"` where the model accepts it | Contractual, not a request parameter — and verified for every model in the deployment |
 | Identity | None. No accounts by design. | Agency IdP via SAML/OIDC, PIV/CAC where required, role separation between agent and supervisor |
 | Retention | 24h TTL on local disk | Aligned to the applicable NARA records schedule, not to a convenient number. Verification artefacts likely become part of the COLA case record, which changes the answer from "delete in 24h" to "retain per schedule, then dispose on schedule" |
 | Audit logging | Structured logs, no content | Tamper-evident audit trail of who verified what and when, retained per schedule, with the same no-content rule |
 | Rate limiting | In-process buckets | Shared store or an API gateway policy, per-identity rather than per-IP |
-| Network | One public URL | Behind the agency perimeter; egress allowlisted from the table in this README |
+| Network | One public URL | Behind the agency perimeter; egress allowlisted from the [Network egress](#network-egress) table above |
 | Data classification | Synthetic only | A review before any real applicant data touches it — this prototype has never held any and its retention story assumes it never will |
 
 ### Environment variables this section refers to
@@ -273,3 +814,7 @@ agency could actually run:
 | `LABELPROOF_ALLOWED_ORIGINS` | *(empty)* | Comma-separated cross-origin allowlist; empty means same-origin only |
 | `LABELPROOF_HSTS` | `1` | Emit HSTS on HTTPS requests |
 | `LABELPROOF_DEBUG_TRACEBACKS` | `0` | Set to `1` to allow tracebacks on stdout while debugging locally |
+
+Inference geography is **not** on this list on purpose — see above. `.env.example` lists every
+variable the app does read, including the extraction model, the latency budgets and the upload
+caps that this section does not cover.
