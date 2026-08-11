@@ -1465,6 +1465,89 @@ def test_an_over_cap_batch_inside_an_archive_is_still_a_size_refusal(
     assert response.json()["error"]["code"] == "batch_too_large"
 
 
+def test_two_files_with_one_name_are_refused_rather_than_silently_resolved(
+    tmp_path: Path,
+) -> None:
+    """A DAM export laid out `front/x.png` + `back/x.png` used to store whichever was last.
+
+    Names are reduced to their last segment, so the two collide. The manifest addresses
+    images by name, which makes it genuinely ambiguous which one a row means — and the old
+    `files[clean] = path` picked silently, reported nothing in `unmatched_files`, and
+    showed the agent a verdict about a picture they did not send. Verified before the fix:
+    front=GOOD, back=POISON, POISON stored, no warning anywhere.
+    """
+    client = make_client(tmp_path, provider=spec_provider())
+    archive = zip_of(
+        {
+            "front/" + GOOD_IMAGE: GOOD_BYTES,
+            "back/" + GOOD_IMAGE: POISON_BYTES,
+            "manifest.csv": manifest_csv([row()]).encode("utf-8"),
+        }
+    )
+    response = client.post(
+        "/batch", files=[("files", ("labels.zip", archive, "application/zip"))]
+    )
+
+    assert response.status_code == 400
+    error = response.json()["error"]
+    assert error["code"] == "duplicate_file_name"
+    assert GOOD_IMAGE in error["message"]
+    assert "nothing has been checked" in error["message"].lower()
+
+
+def test_one_image_named_by_two_rows_is_still_fine(tmp_path: Path) -> None:
+    """The complement: sharing an image across rows is normal and must keep working."""
+    client = make_client(tmp_path, provider=spec_provider())
+    response = post_batch(client, [row(), row()])
+    assert response.status_code == 200
+    assert response.json()["accepted"] == 2
+    drain(client)
+
+
+def test_an_oversized_archive_entry_is_refused_before_it_is_decompressed(
+    tmp_path: Path,
+) -> None:
+    """The load-bearing zip-bomb check: the declared size, read before any decompression.
+
+    `unpack`'s read bound was described as the check that stops a bomb. It is not —
+    CPython's `ZipExtFile` never returns more than the declared `file_size`, so this
+    comparison is what actually refuses one. Untested until now, which is how the wrong
+    story survived in the docstring.
+    """
+    client = make_client(tmp_path, max_image_bytes=64 * 1024)
+    archive = zip_of({GOOD_IMAGE: b"\x00" * (256 * 1024)})
+    response = post_batch(client, [row()], images={}, archive=archive)
+
+    assert response.status_code == 400
+    error = response.json()["error"]
+    assert error["code"] == "file_too_large"
+    assert error["next_step"] == "resize"
+    assert GOOD_IMAGE in error["message"]
+
+
+def test_too_many_selected_files_says_so_and_points_at_the_zip(tmp_path: Path) -> None:
+    """Starlette caps a multipart body at 1000 parts, below our own MAX_FILES of 4000.
+
+    So for multi-select that limit always binds first, and FastAPI wraps it into a bare
+    400. An agent who ctrl-A'd 1200 label images was told "That address is not part of
+    this tool. Go back to the verification page and try again" — no number, no limit, and
+    the wrong category of problem entirely.
+    """
+    client = make_client(tmp_path)
+    files: list[tuple[str, tuple[str, bytes, str]]] = [
+        ("manifest", ("manifest.csv", manifest_csv([row()]).encode(), "text/csv"))
+    ]
+    files.extend(("files", (f"f{n}.png", b"x", "image/png")) for n in range(1500))
+
+    response = client.post("/batch", files=files)
+    assert response.status_code == 400
+    error = response.json()["error"]
+    assert error["code"] == "too_many_files"
+    assert "1000" in error["message"]
+    assert "zip" in error["message"]
+    assert "Go back to the verification page" not in error["message"]
+
+
 def test_a_corrupt_archive_is_answered_in_plain_language(tmp_path: Path) -> None:
     client = make_client(tmp_path)
     response = post_batch(client, [row()], images={}, archive=b"not a zip file")

@@ -31,6 +31,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException
 from starlette.exceptions import HTTPException as StarletteHTTPException
+from starlette.formparsers import MultiPartException
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from api import errors
@@ -332,6 +333,8 @@ def _install_error_handlers(app: FastAPI) -> None:
     @app.exception_handler(StarletteHTTPException)
     async def http_error(request: Request, exc: Exception) -> JSONResponse:
         assert isinstance(exc, StarletteHTTPException)
+        if exc.status_code == 400 and (unusable := _unusable_upload(request, exc)):
+            return _payload(unusable)
         return _payload(_from_status(exc.status_code))
 
     @app.exception_handler(Exception)
@@ -341,6 +344,51 @@ def _install_error_handlers(app: FastAPI) -> None:
         return JSONResponse(
             status_code=500, content=errors.InternalError().to_payload()
         )
+
+
+def _unusable_upload(
+    request: Request, exc: StarletteHTTPException
+) -> errors.LabelProofError | None:
+    """Turn a multipart parse failure into advice, when we can tell that is what it was.
+
+    Starlette caps a multipart body at 1000 parts. That is *below* the batch route's own
+    `MAX_FILES`, so it always binds first for multi-select — and FastAPI wraps it, like
+    every other body-parsing failure, into a bare `HTTPException(400)`. An agent who
+    ctrl-A'd 1200 label images was told "That address is not part of this tool. Go back to
+    the verification page and try again": no limit, no number, and not even the right
+    category of problem.
+
+    The original exception is still on `__cause__`, so the specific message can be
+    recovered when it is there. When it is not, a 400 on `/batch` with no route-level
+    explanation is still an unreadable upload, and saying so with the real limit beats the
+    navigation advice.
+    """
+    if request.url.path.strip("/").split("/", 1)[0] != "batch":
+        return None
+
+    cause = exc.__cause__
+    too_many = isinstance(cause, MultiPartException) and "Too many" in str(cause)
+    if cause is not None and not isinstance(cause, MultiPartException):
+        return None
+
+    detail = (
+        f"That upload holds more separate files than one form submission can carry "
+        f"({_MAX_MULTIPART_PARTS} is the limit)."
+        if too_many or cause is None
+        else "That upload could not be read as a batch submission."
+    )
+    return errors.UserError(
+        f"{detail} Put the label images in a zip file and upload that with the manifest — "
+        f"an archive can hold the whole batch. Nothing has been checked.",
+        next_step="reduce",
+        code="too_many_files",
+    )
+
+
+#: Starlette's own multipart part limit. Named here because it binds before
+#: `routes.batch.MAX_FILES` (4000) for multi-select and the agent has to be told a number
+#: that is actually true. It is not configurable through FastAPI's `File()` dependency.
+_MAX_MULTIPART_PARTS = 1000
 
 
 def _as_user_error(exc: RequestValidationError) -> errors.UserError:

@@ -287,6 +287,9 @@ def _expand(
     Multi-select and a zip land in the same place on purpose: an agent who cannot make a
     zip on a locked-down desktop should not be blocked from batch mode, and one who can
     should not have to select 600 files (UX-7).
+
+    Names are reduced to their last segment, so two files in different folders can collide
+    on one name. That is refused rather than resolved — see `add`.
     """
     files: dict[str, Path] = {}
 
@@ -302,6 +305,22 @@ def _expand(
                 f"a smaller size and upload the batch again.",
                 next_step="resize",
                 code="file_too_large",
+            )
+        if clean in files:
+            # `files[clean] = path` used to just overwrite. A zip laid out `front/x.png`
+            # and `back/x.png` — an ordinary DAM export — silently kept whichever came last
+            # in the central directory, `unmatched_files` stayed empty, and the agent was
+            # shown a verdict about a picture they did not send. There is no correct choice
+            # to make here: the manifest addresses images by name, so two files under one
+            # name means the manifest is genuinely ambiguous, and guessing is the one
+            # outcome this product must never produce.
+            raise errors.UserError(
+                f"Two different files in that upload are both named “{clean}”. The "
+                f"manifest refers to label images by file name, so there is no way to tell "
+                f"which one a row means. Rename them so every image has its own name and "
+                f"upload the batch again. Nothing has been checked.",
+                next_step="fix_request",
+                code="duplicate_file_name",
             )
         if len(files) >= MAX_FILES:
             raise _too_much()
