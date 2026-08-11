@@ -29,6 +29,7 @@ from api import logging as applog
 from api import security
 from api.config import Config
 from api.main import create_app
+from api.middleware.ratelimit import RateLimitMiddleware
 from api.provider.base import ExtractionRequest, ExtractionResponse
 from api.security import CONTENT_SECURITY_POLICY, SecurityPolicy, harden
 
@@ -255,12 +256,26 @@ def test_hardening_twice_does_not_halve_the_rate_limit() -> None:
     def verify() -> JSONResponse:
         return JSONResponse({"ok": True})
 
+    # The two calls carry DIFFERENT limits, deliberately. With the same limit twice, two
+    # stacked buckets deplete in lockstep and behave identically to one — the previous
+    # version measured the same result at one, two and three copies, so it proved nothing.
+    # A looser first call and a tighter second one separates them: if the second stacks, the
+    # tighter bucket is now outermost and refuses at request three.
     first = harden(app, make_config(rate_limit_per_minute=4))
-    second = harden(app, make_config(rate_limit_per_minute=4))
+    second = harden(app, make_config(rate_limit_per_minute=2))
     assert second is first
+    assert first.rate_limit_per_minute == 4, "the second call must not replace the policy"
 
     client = TestClient(app)
-    assert [client.post("/verify").status_code for _ in range(4)] == [200] * 4
+    statuses = [client.post("/verify").status_code for _ in range(4)]
+    assert statuses == [200] * 4, f"a second limiter is stacked in the middleware: {statuses}"
+
+    installed = [
+        middleware
+        for middleware in app.user_middleware
+        if middleware.cls is RateLimitMiddleware
+    ]
+    assert len(installed) == 1
 
 
 def test_the_real_app_is_hardened_end_to_end() -> None:

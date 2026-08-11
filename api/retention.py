@@ -478,6 +478,26 @@ def _remove(path: Path, report: SweepReport) -> None:
     report.removed.append(path.name)
 
 
+def _watch_traceback_containment() -> None:
+    """Re-assert the SEC-4 log guard if something has replaced it since startup.
+
+    `api/security.py` can re-wrap itself, but nothing was ever calling it, so "self-healing"
+    described a capability with no trigger: any library installing its own
+    `logging.setLogRecordFactory` after startup switched traceback containment off for the
+    life of the process and nothing noticed. `wave/observability` shipped exactly such a
+    factory, so this is not hypothetical.
+
+    The sweeper is the only thing in this app that runs on a timer, which makes it the only
+    place a periodic check can live. It costs one identity comparison every fifteen minutes,
+    and the alternative is a security control that can be silently disabled by an import.
+    """
+    from api import security
+
+    if security.containment_installed() and not security.containment_active():
+        applog.warn("log_containment_reasserted", code="internal_error", stage="containment")
+        security.install_log_containment()
+
+
 # --- the timer -------------------------------------------------------------------------------
 
 
@@ -510,6 +530,7 @@ class RetentionSweeper:
         return resolved  # type: ignore[return-value]
 
     def sweep_once(self, *, now: float | None = None) -> SweepReport:
+        _watch_traceback_containment()
         report = sweep(self.policy, now=now, store=self._store())
         self.sweeps += 1
         if report.anything:

@@ -142,12 +142,25 @@ def test_a_saturated_verify_budget_leaves_batch_submission_alone() -> None:
     assert all(wait == 0.0 for wait in allowed)
 
 
-def test_the_retry_hint_is_a_whole_number_of_seconds_and_never_zero() -> None:
+def test_the_retry_hint_is_long_enough_to_be_worth_waiting() -> None:
+    """A hint that is too short sends a client straight back into another 429.
+
+    The previous version asserted `>= 1.0`, which restates `max(1.0, ...)` in the
+    implementation and passes for a hardcoded constant. This asserts the property that
+    matters: waiting the advertised time actually gets you served.
+    """
     limiter = RateLimiter(LANES)
     lane = lane_for("POST", "/verify", LANES)
     for _ in range(30):
         limiter.check(lane, "1.2.3.4", now=100.0)
-    assert limiter.check(lane, "1.2.3.4", now=100.0) >= 1.0
+
+    wait = limiter.check(lane, "1.2.3.4", now=100.0)
+    assert wait > 0.0
+
+    # A hair before the advertised moment: still refused.
+    assert limiter.check(lane, "1.2.3.4", now=100.0 + wait - 0.01) > 0.0
+    # At it: served. A hardcoded `Retry-After` fails both halves.
+    assert limiter.check(lane, "1.2.3.4", now=100.0 + wait) == 0.0
 
 
 def test_bucket_table_does_not_grow_without_bound() -> None:
@@ -237,7 +250,9 @@ def test_a_429_carries_retry_after_and_a_request_id() -> None:
     client.post("/verify")
     refused = client.post("/verify")
     assert refused.status_code == 429
-    assert int(refused.headers["retry-after"]) >= 1
+    # Not `>= 1` — that restates `max(1.0, ...)` and passes for a hardcoded 9999. At one
+    # request per minute the bucket refills in exactly 60s, so the hint has to be near it.
+    assert 30 <= int(refused.headers["retry-after"]) <= 60
     assert refused.headers["x-request-id"].startswith("req_")
     assert refused.headers["cache-control"] == "no-store"
 

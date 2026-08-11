@@ -396,12 +396,22 @@ def remove_log_containment() -> None:
         _original_thread_excepthook = None
 
 
+def containment_installed() -> bool:
+    """Was containment ever installed in this process? (As distinct from still being on.)"""
+    return _installed_factory is not None
+
+
 def containment_active() -> bool:
     """Is containment actually in force *right now*?
 
     Reads the live record factory rather than a module flag. The flag version returned True
     after any library installed its own factory over the top, which is the worst possible
     answer from a function whose entire job is to tell you whether a security control is on.
+
+    Called every sweep by `api.retention._watch_traceback_containment`. That caller is the
+    point: without one, "self-healing" named a capability with no trigger, and a factory
+    installed by any import after startup would have switched containment off for the life
+    of the process with nothing to notice.
     """
     return _installed_factory is not None and logging.getLogRecordFactory() is _installed_factory
 

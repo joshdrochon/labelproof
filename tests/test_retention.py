@@ -13,8 +13,8 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import logging
 import sqlite3
-import tempfile
 import time
 from collections.abc import Iterator
 from pathlib import Path
@@ -643,6 +643,48 @@ def test_the_sweeper_survives_an_app_that_supplies_its_own_lifespan(tmp_path: Pa
     assert order == ["app_start", "app_stop"]
 
 
+def test_a_sweep_reasserts_traceback_containment_if_something_took_it(
+    tmp_path: Path, capfd: Any
+) -> None:
+    """The SEC-4 guard can be switched off by any import, so something has to check.
+
+    `install_log_containment` could always re-wrap itself, but nothing called it, so
+    "self-healing" described a capability with no trigger. The sweeper is the only thing in
+    this app that runs on a timer, which makes it the only place a periodic check can live.
+    """
+    from api import logging as applog
+    from api import security
+
+    applog.configure()
+    security.install_log_containment()
+    assert security.containment_active()
+
+    # Exactly what another library installing its own factory does to us.
+    logging.setLogRecordFactory(logging.LogRecord)
+    assert not security.containment_active()
+
+    RetentionSweeper(policy_for(tmp_path)).sweep_once()
+
+    assert security.containment_active(), "the sweep should have put the guard back"
+    lines = [
+        json.loads(line) for line in capfd.readouterr().out.splitlines() if line.startswith("{")
+    ]
+    assert [line for line in lines if line.get("event") == "log_containment_reasserted"]
+
+
+def test_a_sweep_does_not_install_containment_that_was_never_wanted(
+    tmp_path: Path,
+) -> None:
+    """`LABELPROOF_DEBUG_TRACEBACKS=1` must not be undone by the retention timer."""
+    from api import security
+
+    security.remove_log_containment()
+    assert not security.containment_installed()
+
+    RetentionSweeper(policy_for(tmp_path)).sweep_once()
+    assert not security.containment_active()
+
+
 def test_expiry_has_one_definition_that_the_read_paths_can_import() -> None:
     """`GET /batch/{id}` still serves an expired job's brand names (finding 4, another
     agent's file). The predicate lives here so the API and the sweeper cannot drift.
@@ -704,15 +746,17 @@ def test_an_artefact_survives_past_its_ttl_until_the_next_sweep(tmp_path: Path) 
     store = BatchStore(tmp_path)
     created = time.time()
     policy = RetentionPolicy(storage_dir=tmp_path, ttl_hours=1, sweep_seconds=900)
-    _, image = seed_job(store, created=created, ttl_hours=1)
+    job_id, image = seed_job(store, created=created, ttl_hours=1)
 
     just_before = created + policy.ttl_seconds - 1
     sweep(policy, now=just_before, store=store)
     assert image.is_file(), "not expired yet"
 
-    # Expired, but the timer has not come round again. This is the window the README owns.
+    # Expired, but the timer has not come round again. This is the window the README owns,
+    # and the assertion that matters is that a sweep AT this moment would take the artefact
+    # while no sweep happens — `t + 1 > t` said nothing about either.
     inside_the_window = created + policy.ttl_seconds + 1
-    assert inside_the_window - created > policy.ttl_seconds
+    assert retention.is_expired(store.get_job(job_id).expires_at, now=inside_the_window)
     assert image.is_file(), "still on disk — nothing has swept since it expired"
 
     # The next tick, which is at most `sweep_seconds` later, takes it.
@@ -769,14 +813,28 @@ def test_a_single_verification_writes_nothing_to_the_storage_directory(
 def test_an_oversized_upload_leaves_no_spooled_temporary_file(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Starlette spools multipart parts over ~1 MB to a real file on disk.
+    """Starlette spools multipart parts over ~1 MB to a real file, and must release it.
 
-    Those are unlinked when the request ends, but "should be" is not the standard this
-    ticket sets, so the temp directory is redirected and then read back.
+    The previous version redirected `tempfile.tempdir` and asserted the directory was empty
+    afterwards. That could not fail: `SpooledTemporaryFile` rolls over to an **anonymous**
+    file on POSIX — unlinked the instant it is created — so it never appears in any
+    directory, and stashing every upload in a module-level list forever would have passed.
+
+    So the spool objects themselves are counted and their `closed` flag is read. That is the
+    property that matters: an upload the process is still holding is an upload that has not
+    been released, whether or not it has a name on disk.
     """
-    spool = tmp_path / "spool"
-    spool.mkdir()
-    monkeypatch.setattr(tempfile, "tempdir", str(spool))
+    import starlette.formparsers as formparsers
+
+    spooled: list[Any] = []
+    real_spool = formparsers.SpooledTemporaryFile
+
+    def recording_spool(*args: Any, **kwargs: Any) -> Any:
+        handle = real_spool(*args, **kwargs)
+        spooled.append(handle)
+        return handle
+
+    monkeypatch.setattr(formparsers, "SpooledTemporaryFile", recording_spool)
 
     payload = _noisy_png()
     assert len(payload) > 1_000_000, "the fixture must exceed the spool threshold"
@@ -792,5 +850,9 @@ def test_an_oversized_upload_leaves_no_spooled_temporary_file(
         files=[("images", ("noise.png", payload, "image/png"))],
     )
 
-    leftovers = [path for path in spool.rglob("*") if path.is_file()]
-    assert leftovers == [], f"upload bytes survived the request: {[p.name for p in leftovers]}"
+    assert spooled, "the upload should have been spooled — check the threshold"
+    still_open = [handle for handle in spooled if not handle.closed]
+    assert still_open == [], (
+        f"{len(still_open)} upload buffer(s) still open after the request; the process is "
+        f"holding label artwork it has no reason to keep"
+    )
