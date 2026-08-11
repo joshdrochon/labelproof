@@ -228,15 +228,30 @@ enable_error_code = [
 #                        left visible in this comment rather than enabled-and-ignored.
 #   exhaustive-match   — three hits in match statements over open string types.
 pretty = true
-# Scope. `api/` is the shipped code and is strict-clean. scripts/ entries are listed
-# individually because they are checked in too.
+# Scope. `api/` is the shipped code. Every script is listed individually and every one of
+# them is strict-clean, so "clean over api/ and scripts/" is a claim that can be checked.
 #
-# KNOWN GAP, stated rather than hidden: tests/, eval/, and fixtures/ are NOT yet
-# strict-clean (27 errors as of this commit, mostly missing annotations on test helpers
-# and `Any` leaking out of fixture loaders). They are excluded from the gate, not from
-# the intent — closing that is follow-up work, and leaving them silently passing under a
-# narrower flag set would be worse than naming the gap here.
-files = ["api", "scripts/sync_board.py", "scripts/scan_secrets.py"]
+# KNOWN GAP, measured rather than estimated: `mypy --strict api tests eval fixtures`
+# reports **22 errors in 9 files** as of this commit —
+#
+#     6  tests/test_batch.py          6  fixtures/generator/degrade.py
+#     2  tests/test_verify.py         2  tests/test_resilience.py
+#     2  tests/test_logging.py        1  tests/test_sample_mode_fails_closed.py
+#     1  tests/test_fixtures.py       1  tests/test_errors.py
+#     1  eval/run.py
+#
+# mostly missing annotations on test helpers and `Any` leaking out of fixture loaders.
+# They are excluded from the gate, not from the intent. (An earlier version of this
+# comment said 27, which was a stale count from before the scripts were cleaned — a
+# number nobody can reproduce is worse than no number, so it is now the output of
+# `mypy --strict api tests eval fixtures` and nothing else.)
+files = [
+    "api",
+    "scripts/scan_secrets.py",
+    "scripts/spike_latency.py",
+    "scripts/spike_typography.py",
+    "scripts/sync_board.py",
+]
 
 [[tool.mypy.overrides]]
 module = ["cv2.*", "pillow_heif.*", "pypdfium2.*"]

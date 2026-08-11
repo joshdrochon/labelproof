@@ -113,11 +113,16 @@ def main(argv: list[str] | None = None) -> int:
     if args.two_image:
         plans.append(("tc16_front_back", "two-image"))
 
+    # `runs` is bound separately rather than written inline, so it keeps a real type.
+    # Inline, `report["runs"]` is `object`, `.append` is an error, and the two call sites
+    # carried `# type: ignore[union-attr]` for an error that is actually `attr-defined` —
+    # a suppression that silenced nothing and hid the next problem behind it.
+    runs: list[dict[str, object]] = []
     report: dict[str, object] = {
         "model": base.extraction_model,
         "target_long_edge_px": base.target_long_edge_px,
         "budget_ms": Config().request_budget_ms,
-        "runs": [],
+        "runs": runs,
     }
 
     for fixture, shape in plans:
@@ -147,7 +152,7 @@ def main(argv: list[str] | None = None) -> int:
                 )
 
             if not samples:
-                report["runs"].append(  # type: ignore[union-attr]
+                runs.append(
                     {
                         "fixture": fixture,
                         "shape": shape,
@@ -163,7 +168,7 @@ def main(argv: list[str] | None = None) -> int:
                 f"  effort={effort} -> median {stats['median_ms']} ms  ({verdict})",
                 file=sys.stderr,
             )
-            report["runs"].append(  # type: ignore[union-attr]
+            runs.append(
                 {
                     "fixture": fixture,
                     "shape": shape,

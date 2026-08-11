@@ -2,6 +2,7 @@
 
 import io
 import json
+import logging
 
 import pytest
 
@@ -96,3 +97,42 @@ def test_stage_exposes_its_duration_to_the_caller() -> None:
     with lp_logging.stage("compare") as s:
         pass
     assert s.duration_ms >= 0
+
+
+# --- `level` cannot be captured by a field ------------------------------------------
+
+
+def test_a_field_named_level_is_rejected_rather_than_rerouted() -> None:
+    """`stage("extract", level="debug")` used to type-check and then explode.
+
+    `log()`'s `level` parameter was an ordinary one, so it competed with `**fields` for
+    the name, and the only way to make the kwargs unpack assignable was a `# type:
+    ignore` sitting directly on top of that hazard. `level` is positional-only now, so a
+    stray `level=` lands in `fields` and meets the allowlist — which is the loud, correct
+    outcome rather than a silenced one.
+    """
+    with pytest.raises(ContentInLogError, match="level"), lp_logging.stage(
+        "extract", level="debug"
+    ):
+        pass
+
+
+def test_the_severity_of_warn_and_error_still_gets_through(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Making `level` positional-only must not quietly demote every warning to info.
+
+    `warn()` and `error()` were the only two callers passing `level=` by keyword. They
+    now pass it positionally, and this asserts the severity that reaches the stdlib
+    logger, which the JSON payload does not carry.
+    """
+    seen: list[int] = []
+    monkeypatch.setattr(
+        lp_logging._logger, "log", lambda level, message: seen.append(level)
+    )
+
+    lp_logging.log("app_started")
+    lp_logging.warn("provider_unavailable", kind="provider")
+    lp_logging.error("unhandled_exception", kind="internal")
+
+    assert seen == [logging.INFO, logging.WARNING, logging.ERROR]

@@ -77,12 +77,20 @@ def set_request_id(rid: str) -> None:
     _request_id.set(rid)
 
 
-def log(event: str, level: int = logging.INFO, **fields: object) -> None:
+def log(event: str, level: int = logging.INFO, /, **fields: object) -> None:
     """Emit one structured line.
 
     Raises ContentInLogError if any field is outside the allowlist — see the module
     docstring. Add genuinely safe fields to ALLOWED_FIELDS deliberately; do not work
     around this.
+
+    `level` is positional-only (the `/`) on purpose. As a normal parameter it competed
+    with `**fields` for the name "level": a caller writing `stage("extract",
+    level="debug")` type-checked and then failed at runtime, and the only way to make
+    `**dict[str, object]` assignable at all was a `# type: ignore` that silenced exactly
+    that hazard. Positional-only, `level` cannot be bound by keyword, `**fields` needs no
+    suppression, and a stray `level=` lands in `fields` where the allowlist rejects it
+    loudly.
     """
     rejected = sorted(set(fields) - ALLOWED_FIELDS)
     if rejected:
@@ -100,11 +108,11 @@ def log(event: str, level: int = logging.INFO, **fields: object) -> None:
 
 
 def warn(event: str, **fields: object) -> None:
-    log(event, level=logging.WARNING, **fields)
+    log(event, logging.WARNING, **fields)
 
 
 def error(event: str, **fields: object) -> None:
-    log(event, level=logging.ERROR, **fields)
+    log(event, logging.ERROR, **fields)
 
 
 class stage:
@@ -131,5 +139,5 @@ class stage:
             stage=self.name,
             duration_ms=self.duration_ms,
             ok=exc_type is None,
-            **self.fields,  # type: ignore[arg-type]  # **object could bind log()'s level: int
+            **self.fields,
         )

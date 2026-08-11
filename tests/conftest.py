@@ -159,14 +159,22 @@ def _install_guard() -> None:
         _check_hostname(host, "reverse-resolve")
         return real_gethostbyaddr(host)
 
-    socket.socket.connect = connect  # type: ignore[method-assign]
-    socket.socket.connect_ex = connect_ex  # type: ignore[method-assign]
-    socket.socket.sendto = sendto  # type: ignore[method-assign]
-    socket.socket.sendmsg = sendmsg  # type: ignore[method-assign]
-    socket.getaddrinfo = getaddrinfo  # type: ignore[assignment]
-    socket.gethostbyname = gethostbyname  # type: ignore[assignment]
-    socket.gethostbyname_ex = gethostbyname_ex  # type: ignore[assignment]
-    socket.gethostbyaddr = gethostbyaddr  # type: ignore[assignment]
+    # Assigned through setattr: patching stdlib methods is exactly what a type checker
+    # should object to, and the alternative — eight suppressions, each of which has to
+    # name the right error code or it silences nothing and hides the next error behind
+    # it — is a maintenance trap. This file's first version got four of those codes
+    # wrong.
+    for owner, name, replacement in (
+        (socket.socket, "connect", connect),
+        (socket.socket, "connect_ex", connect_ex),
+        (socket.socket, "sendto", sendto),
+        (socket.socket, "sendmsg", sendmsg),
+        (socket, "getaddrinfo", getaddrinfo),
+        (socket, "gethostbyname", gethostbyname),
+        (socket, "gethostbyname_ex", gethostbyname_ex),
+        (socket, "gethostbyaddr", gethostbyaddr),
+    ):
+        setattr(owner, name, replacement)
 
 
 _install_guard()
