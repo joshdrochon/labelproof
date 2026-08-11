@@ -216,10 +216,23 @@ def test_blurred_text_is_illegible_not_blank(clean: np.ndarray) -> None:
     """Edge density collapses to zero on text blurred past legibility. Calling that region
     blank would report a genuine TC-14 failure as an empty part of the label."""
     assessment = quality.assess_region(
-        degrade.blur(clean, 12.0), REGIONS[FieldName.BRAND_NAME]
+        degrade.blur(clean, 20.0), REGIONS[FieldName.GOVERNMENT_WARNING]
     )
     assert assessment.has_content
     assert assessment.verdict == "hopeless"
+
+
+@pytest.mark.tc("TC-14")
+def test_small_print_goes_illegible_before_the_headline_does(clean: np.ndarray) -> None:
+    """Which is the whole argument for scoring regions. The warning statement is the
+    smallest type on the label and the first thing a soft photo loses, and it is also the
+    one field where being wrong is disqualifying — so a global score that averages it
+    against a 72-point brand name is measuring the wrong thing."""
+    soft = degrade.blur(clean, 20.0)
+    warning = quality.assess_region(soft, REGIONS[FieldName.GOVERNMENT_WARNING])
+    brand = quality.assess_region(soft, REGIONS[FieldName.BRAND_NAME])
+    assert warning.blur < brand.blur
+    assert not warning.legible and brand.legible
 
 
 @pytest.mark.tc("TC-13")

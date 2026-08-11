@@ -50,15 +50,23 @@ HOPELESS: Final[float] = 0.20
 #: suspect and confidence should be discounted.
 DEGRADED: Final[float] = 0.45
 
-#: Laplacian variance treated as fully sharp. Scoring is LOGARITHMIC between the two
-#: bounds below, because the measure spans four orders of magnitude on real content:
-#: a sharp rendered label sits near 1400, the same label at Gaussian radius 2 near 37,
-#: and at radius 12 below 1. Calibrated against rendered fixtures, not photographs —
-#: LP-200 retunes against Tier B.
-SHARP_LAPLACIAN_VARIANCE: Final[float] = 800.0
+#: Edge-gradient variance in the worse of the two axes, treated as fully sharp. Scoring is
+#: LOGARITHMIC between the two bounds below, because the measure spans four orders of
+#: magnitude on real content. Measured on the robustness set: a sharp rendered label sits
+#: near 10800, a defocus of radius 2 near 2300, radius 6 near 430, radius 12 near 114, and
+#: a 25-pixel motion smear near 180.
+#:
+#: The worse *axis* rather than an isotropic Laplacian, because camera shake destroys one
+#: direction and leaves the other intact — the isotropic measure scored a smear nobody
+#: could read the same as a photograph that was merely soft.
+#:
+#: Calibrated against rendered fixtures, not photographs. `scripts/calibrate_quality.py`
+#: retunes them against Tier B and reports what each change does to false passes.
+SHARP_GRADIENT_VARIANCE: Final[float] = 6000.0
 
-#: At or below this, treated as fully blurred.
-BLUR_HOPELESS_VARIANCE: Final[float] = 3.0
+#: At or below this, treated as fully blurred. Set between the radius-12 defocus (114) and
+#: the 25-pixel motion smear (178), both of which are past reading.
+BLUR_HOPELESS_VARIANCE: Final[float] = 120.0
 
 #: Fraction of pixels at or near saturation before glare is considered total.
 GLARE_SATURATION_FRACTION: Final[float] = 0.25

@@ -126,6 +126,23 @@ def blur(image: np.ndarray, radius: float) -> np.ndarray:
     return cv2.GaussianBlur(image, (kernel, kernel), radius)
 
 
+def motion_blur(image: np.ndarray, length: int = 25, angle: float = 12.0) -> np.ndarray:
+    """Camera shake — smeared along one direction (TC-14).
+
+    Directional rather than radial, which is what a hand-held shot at a slow shutter
+    actually produces. A set containing only defocus would leave the blur measure
+    untested against the blur people are most likely to send.
+    """
+    size = max(3, int(length) | 1)
+    kernel = np.zeros((size, size), np.float32)
+    kernel[size // 2, :] = 1.0
+    matrix = cv2.getRotationMatrix2D((size / 2 - 0.5, size / 2 - 0.5), angle, 1.0)
+    kernel = cv2.warpAffine(kernel, matrix, (size, size))
+    total = kernel.sum()
+    kernel = kernel / total if total else kernel
+    return cv2.filter2D(image, -1, kernel, borderType=cv2.BORDER_REPLICATE)
+
+
 def dim(image: np.ndarray, factor: float = 0.35) -> np.ndarray:
     """Underexposed but recoverable (TC-13). Scales luminance without crushing to black."""
     return np.clip(image.astype(np.float32) * factor, 0, 255).astype(np.uint8)
@@ -326,6 +343,39 @@ CONDITIONS: list[Condition] = [
             "into invention."
         ),
     ),
+    Condition(
+        name="tc14_blur_mild",
+        tc="TC-14",
+        description="slightly soft, still legible",
+        expectation="readable",
+        why=(
+            "The lower edge of the blur scale. A soft photograph is still worth reading, "
+            "and rejecting it would be the tool making the agent slower — which is the "
+            "complaint, not the fix."
+        ),
+    ),
+    Condition(
+        name="tc14_blur_hopeless",
+        tc="TC-14",
+        description="out of focus past legibility",
+        expectation="pregated",
+        why=(
+            "TC-14 proper. Nothing here can be read, so the obligation is a retake reason "
+            "and zero model calls. The dangerous failure is not rejecting it — it is an "
+            "extractor confidently returning plausible field values from mush."
+        ),
+    ),
+    Condition(
+        name="tc14_blur_motion",
+        tc="TC-14",
+        description="camera shake — smeared in one direction",
+        expectation="pregated",
+        why=(
+            "Directional, unlike a Gaussian, and the commoner defect in a hand-held shot. "
+            "A defocus-only set would leave the blur measure untested against the blur "
+            "people actually produce."
+        ),
+    ),
 ]
 
 #: Fixture name -> one-line description. Kept as a flat mapping because it is the shape
@@ -360,8 +410,12 @@ def apply_preset(image: np.ndarray, preset: str) -> np.ndarray:
             return side_lit(image)
         case "tc13_near_black":
             return dim(image, 0.04)
+        case "tc14_blur_mild":
+            return blur(image, 2.0)
         case "tc14_blur_hopeless":
             return blur(image, 12.0)
+        case "tc14_blur_motion":
+            return motion_blur(image)
         case "lp201_cylinder":
             return cylinder(image)
         case _:

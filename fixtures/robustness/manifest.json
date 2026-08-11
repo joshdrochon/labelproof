@@ -81,6 +81,30 @@
       "expectation": "pregated",
       "why": "The other side of the line. Lifting this would amplify noise into something that looks like text, which is the failure mode where enhancement turns into invention.",
       "sha256": "c388a6c32804a53b"
+    },
+    {
+      "name": "tc14_blur_mild",
+      "tc": "TC-14",
+      "description": "slightly soft, still legible",
+      "expectation": "readable",
+      "why": "The lower edge of the blur scale. A soft photograph is still worth reading, and rejecting it would be the tool making the agent slower \u2014 which is the complaint, not the fix.",
+      "sha256": "9af217f0e604cd1d"
+    },
+    {
+      "name": "tc14_blur_hopeless",
+      "tc": "TC-14",
+      "description": "out of focus past legibility",
+      "expectation": "pregated",
+      "why": "TC-14 proper. Nothing here can be read, so the obligation is a retake reason and zero model calls. The dangerous failure is not rejecting it \u2014 it is an extractor confidently returning plausible field values from mush.",
+      "sha256": "16a4b290587d5153"
+    },
+    {
+      "name": "tc14_blur_motion",
+      "tc": "TC-14",
+      "description": "camera shake \u2014 smeared in one direction",
+      "expectation": "pregated",
+      "why": "Directional, unlike a Gaussian, and the commoner defect in a hand-held shot. A defocus-only set would leave the blur measure untested against the blur people actually produce.",
+      "sha256": "5d3d4e733dcf6017"
     }
   ]
 }

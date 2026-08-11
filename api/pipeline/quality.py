@@ -39,32 +39,39 @@ def _to_gray(image: np.ndarray) -> np.ndarray:
 
 
 def blur_score(image: np.ndarray, mask: np.ndarray | None = None) -> float:
-    """Laplacian variance on a log scale.
+    """Edge energy in the worst direction, on a log scale.
 
-    Log rather than linear because the measure spans four orders of magnitude on real
-    content — a sharp label renders around 1400, the same label at Gaussian radius 2
-    around 37, and at radius 12 under 1. A linear normalization puts everything below
-    "perfectly sharp" into the same bucket near zero.
+    **Log rather than linear**, because the measure spans four orders of magnitude on real
+    content. A linear normalization puts everything below "perfectly sharp" into the same
+    bucket near zero, which is how the first version of this scored every degraded image
+    identically.
 
-    Contrast is normalized away first. Laplacian values scale linearly with contrast, so
-    variance scales with its square — meaning a merely *dark* image measures as blurry.
-    Stretching to full range before measuring decouples the two, so "too dark" and "too
-    blurry" are reported as the separate problems they are, and each retake reason names
-    what the agent actually needs to fix.
+    **Contrast is normalized away first.** Gradient magnitudes scale linearly with
+    contrast and variance with its square, so a merely *dark* image measures as blurry —
+    and the retake reason then tells the agent to hold the camera steady when the real
+    problem was the lighting. Stretching to full range first keeps "too dark" and "too
+    blurry" as the separate problems they are.
+
+    **The worse of the two axes, not an isotropic operator.** A Laplacian sums both
+    directions, and camera shake only destroys one: a horizontal smear wipes out vertical
+    edges and leaves horizontal ones untouched, so roughly half the energy survives.
+    Measured on the fixtures, that put a 25-pixel motion smear — text nobody could read —
+    at the same Laplacian variance as a defocus of radius 2, which is merely soft. Taking
+    the worse axis reports the direction that was actually destroyed, and camera shake is
+    the likelier defect in a hand-held photograph than a defocus is.
 
     `mask` restricts the measurement to part of the frame, and exists because variance is
     diluted by flat area. A rotation that expands the canvas adds a wide band of uniform
     fill, which drops the score even though not one pixel of text got softer — measured
-    on our fixtures as a 0.09 loss for a rotation that a masked measurement scores at
-    0.02. Without the mask the correction pass would keep reverting rotations that were
-    fine. It is also what makes per-region readability (LP-192) possible at all: the
-    warning statement's own legibility, not the whole picture's.
+    as a 0.09 loss for a rotation a masked measurement scores at 0.02. Without it the
+    correction pass kept reverting rotations that were fine. It is also what makes
+    per-region readability (LP-192) work: the warning's own legibility, not the picture's.
     """
     gray = _to_gray(image).astype(np.float32)
 
     selection: np.ndarray | None = None
     if mask is not None:
-        # Erode first: the Laplacian straddles the mask edge and would read the step
+        # Erode first: the gradient straddles the mask edge and would read the step
         # between real content and fill as detail.
         eroded = cv2.erode((mask > 0).astype(np.uint8), np.ones((5, 5), np.uint8))
         selection = eroded > 0
@@ -77,11 +84,15 @@ def blur_score(image: np.ndarray, mask: np.ndarray | None = None) -> float:
     if high - low > 1.0:
         gray = np.clip((gray - low) * (255.0 / (high - low)), 0.0, 255.0)
 
-    laplacian = cv2.Laplacian(gray.astype(np.uint8), cv2.CV_64F)
-    variance = float(laplacian[selection].var() if selection is not None else laplacian.var())
+    horizontal = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=3)
+    vertical = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3)
+    if selection is not None:
+        horizontal, vertical = horizontal[selection], vertical[selection]
+    variance = min(float(horizontal.var()), float(vertical.var()))
+
     if variance <= T.BLUR_HOPELESS_VARIANCE:
         return 0.0
-    span = np.log10(T.SHARP_LAPLACIAN_VARIANCE / T.BLUR_HOPELESS_VARIANCE)
+    span = np.log10(T.SHARP_GRADIENT_VARIANCE / T.BLUR_HOPELESS_VARIANCE)
     return float(
         np.clip(np.log10(variance / T.BLUR_HOPELESS_VARIANCE) / span, 0.0, 1.0)
     )
