@@ -56,6 +56,14 @@ def test_line_breaks_do_not_break_the_match() -> None:
 
 
 # --- TC-03: Jenny's catch -------------------------------------------------------------
+#
+# LP-208, the named regression. A compliance agent rejected a real label because its
+# warning heading read `Government Warning:` in title case instead of capitals. She
+# caught it by eye, off a printed checklist, and it is the headline claim of this
+# product that the machine catches it too. Everything below is one test case seen from a
+# different angle; if any of them ever goes green-to-red, the product has lost the thing
+# it was built to do.
+
 
 @pytest.mark.tc("TC-03")
 def test_title_case_header_is_a_violation() -> None:
@@ -63,6 +71,47 @@ def test_title_case_header_is_a_violation() -> None:
     result = warning.evaluate(_retitled("Government Warning:"), GOOD)
     assert result.verdict is not Verdict.MATCH
     assert any(f.code == "warning_header_not_all_caps" for f in result.findings)
+
+
+@pytest.mark.tc("TC-03")
+def test_jennys_catch_end_to_end() -> None:
+    """The whole chain, from the string on the label to the sentence on the screen."""
+    result = warning.evaluate(_retitled("Government Warning:"), GOOD)
+
+    assert result.verdict is Verdict.MISMATCH           # not a pass, not a maybe
+    assert "warning_header_not_all_caps" in _asserted(result)
+    assert result.kind == warning.CASING                # named, so the agent knows why
+    assert any(seg.is_difference for seg in result.diff)  # provable to the applicant
+    assert "Government Warning" in result.rationale     # quotes what the label said
+
+
+@pytest.mark.tc("TC-03")
+def test_jennys_catch_survives_perfect_typography() -> None:
+    """Bold, contrasting, correctly sized — and still rejected, because of the capitals.
+
+    This is the test that would fail if anyone ever decided the heading check was
+    "covered by" the typography signals.
+    """
+    perfect = WarningTypography(
+        header_is_all_caps=True,   # the extractor is wrong, and the text proves it
+        header_is_bold=True,
+        body_is_bold=False,
+        contrast_ok=True,
+        relative_size=1.2,
+    )
+    assert warning.evaluate(_retitled("Government Warning:"), perfect).verdict is (
+        Verdict.MISMATCH
+    )
+
+
+@pytest.mark.tc("TC-03")
+def test_jennys_catch_is_not_a_casefolding_accident() -> None:
+    """If this module ever starts calling normalize(), this is the test that dies."""
+    from api.rules import normalize
+
+    title_case = _retitled("Government Warning:")
+    assert normalize.normalize(title_case) == normalize.normalize(canon.CANONICAL_WARNING)
+    assert not warning.is_verbatim(title_case)
 
 
 @pytest.mark.tc("TC-03")
