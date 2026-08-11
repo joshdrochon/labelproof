@@ -19,17 +19,15 @@ from api.models import (
     Aggregate,
     Application,
     Cost,
-    Extraction,
-    ExtractedField,
+    Evidence,
     FieldName,
     FieldResult,
-    ImageReport,
     Recommendation,
     Timings,
-    VerificationResult,
     Verdict,
-    WarningTypography,
+    VerificationResult,
 )
+from api.pipeline import merge as merge_images
 from api.provider.base import (
     ExtractionProvider,
     ExtractionRequest,
@@ -42,51 +40,14 @@ from api.rules import warning as warn
 from api.rules.commodity import LabelContext
 
 
-def merge_extractions(
-    extractions: list[Extraction],
-) -> tuple[dict[FieldName, ExtractedField], int | None, WarningTypography, dict[FieldName, int]]:
-    """Combine per-image extractions into one view of the label.
-
-    Highest confidence wins per field, and the image it came from is recorded so the UI
-    can point at the right picture (IMG-8 provenance). A legible reading always beats an
-    illegible one — one image having glare over the warning does not make the warning
-    unreadable when the other image shows it clearly.
-    """
-    merged: dict[FieldName, ExtractedField] = {}
-    provenance: dict[FieldName, int] = {}
-    warning_text: str | None = None
-    warning_image: int | None = None
-    typography = WarningTypography()
-
-    for extraction in extractions:
-        for name, field in extraction.fields.items():
-            current = merged.get(name)
-            better = (
-                current is None
-                or (field.legible and not current.legible)
-                or (field.legible == current.legible and field.confidence > current.confidence)
-            )
-            if better:
-                merged[name] = field
-                provenance[name] = extraction.image_index
-
-        if extraction.warning_text and warning_text is None:
-            warning_text = extraction.warning_text
-            warning_image = extraction.image_index
-            typography = extraction.warning_typography
-
-    return merged, warning_image, typography, provenance
-
-
 def _warning_result(
-    merged: dict[FieldName, ExtractedField],
-    typography: WarningTypography,
+    label: merge_images.MergedLabel,
     net_contents_ml: float | None,
 ) -> FieldResult:
-    field = merged.get(FieldName.GOVERNMENT_WARNING)
+    field = label.fields.get(FieldName.GOVERNMENT_WARNING)
     result = warn.evaluate(
         field.value if field else None,
-        typography,
+        label.warning_typography,
         legible=field.legible if field else True,
     )
 
@@ -102,9 +63,44 @@ def _warning_result(
         expected="the statement required by 27 CFR 16.21",
         confidence=field.confidence if field else 0.0,
         rationale=rationale,
-        evidence=None,
+        # On a front/back application the statement is on the back, and this is the one
+        # row where an agent most needs to be sent to the right picture (TC-16, IMG-8).
+        evidence=(
+            Evidence(image_index=field.image_index, bbox=field.bbox)
+            if field and field.bbox
+            else None
+        ),
         findings=findings,
     )
+
+
+def _apply_merge(results: list[FieldResult], label: merge_images.MergedLabel) -> None:
+    """Stamp each row with the picture its value came from, and surface any conflict.
+
+    Two jobs, both of which only the merge knows the answer to. The comparators see one
+    value and cannot know which of four photographs it was read off (IMG-8), and they
+    cannot know that a second picture read the same field differently.
+
+    A conflicted field already arrives from the merge as not-legible, so the comparator
+    has independently produced Unreadable — the right verdict for "we have not established
+    what the label says", and one that routes to Needs review rather than to either
+    Ready to approve or Return for correction. What it cannot produce is the reason, so
+    the rationale is replaced with one that names both readings.
+    """
+    for result in results:
+        merged = label.fields.get(result.field)
+        if merged is None:
+            continue
+
+        if merged.bbox is not None and result.evidence is not None:
+            result.evidence = Evidence(image_index=merged.image_index, bbox=merged.bbox)
+
+        if merged.conflict is not None:
+            result.rationale = merge_images.conflict_rationale(merged.conflict)
+            result.findings = [
+                merge_images.conflict_finding(merged.conflict),
+                *result.findings,
+            ]
 
 
 def verify(
@@ -145,7 +141,8 @@ def verify(
         )
 
     compare_started = time.perf_counter()
-    merged, _warning_image, typography, _provenance = merge_extractions(response.extractions)
+    label = merge_images.merge(response.extractions)
+    merged = label.extracted()
 
     context = LabelContext(
         is_import=application.is_import,
@@ -181,8 +178,9 @@ def verify(
             application.country_of_origin,
             is_import=application.is_import,
         ),
-        _warning_result(merged, typography, net.ml),
+        _warning_result(label, net.ml),
     ]
+    _apply_merge(results, label)
 
     aggregate = agg.recommend(results)
     timings.compare = int((time.perf_counter() - compare_started) * 1000)
