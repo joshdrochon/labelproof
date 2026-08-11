@@ -36,9 +36,19 @@ Coverage is measured on **every** invocation — a number you have to remember t
 is a number nobody has. The floors are enforced only on a full-suite run, so
 `pytest tests/properties` does not fail with "coverage 5%".
 
-The suite runs **offline**. Every socket operation is blocked for the whole session and a
-test that opens one fails loudly (ENG-3). That is asserted, not assumed — see
-`contract/test_offline.py`.
+The suite runs **offline** (ENG-3). Every verb that can put a packet on the wire is
+refused — `connect`, `connect_ex`, `sendto`, `sendmsg`, `getaddrinfo`, `gethostbyname`,
+`gethostbyname_ex`, `gethostbyaddr` — and the guard is installed at import, so it covers
+collection and module-level code too, not only the call phase. Loopback and AF_UNIX are
+permitted deliberately: an in-process server on 127.0.0.1 is not egress.
+
+That list is the coverage claim, and `contract/test_offline.py` aims a real packet's worth
+of intent at each verb against a real, routable destination. It is written that way
+because the first two guards in this repo — one on this branch, one on `wave/ci` —
+patched three verbs each, claimed in their docstrings to block everything, and leaked
+four ways: a UDP `sendto` sent five bytes to 8.8.8.8, `gethostbyname` resolved
+`example.com` live, and a module-level call escaped a session-scoped fixture entirely.
+**If a verb is not tested in that file, the guard is not proven to cover it.**
 
 ## Layout
 
@@ -81,6 +91,14 @@ docstring reads "fixes bug" is deleted by the next person to touch it.
 Pin the *shape*, not a remembered number. `exposure_score(x) == 0.83` passes on a rewrite
 that reintroduces the ceiling with different constants; *monotonicity in brightness*
 cannot.
+
+**Then break the thing and count.** Every regression here has been verified by
+reintroducing the defect and checking the test goes red — the linear blur scale (8
+failures), the deleted SPA containment check (2), a required `types.ts` field the server
+never sends (1). Three of these tests previously killed *zero* mutants: one restated a
+mathematical identity without calling the scorer, one was defeated by httpx normalising
+the traversal out of the URL before it was sent, and one had a file-wide escape hatch. A
+regression test you have not seen fail is a regression test you have not written.
 
 Where a limit check is involved, also assert that the **pre-fix input violates it**. A
 check with no teeth is how the schema shipped.
@@ -140,6 +158,14 @@ end-to-end proves the product. Enforced.
 **Docstrings say why, not what.** The assertion already says what. The docstring says what
 breaks in the real world if it fails — which regulation, which person's workflow, which
 false pass. If you cannot write that sentence, the test may not be worth keeping.
+
+**Never skip where you can fail.** `pytest.skip` on a missing input evaporates the check
+and reports green: deleting `web/src/types.ts` once turned 67 contract tests into SKIPPED
+and the run passed, so a slim checkout ran with no HTTP-UI contract at all. A missing
+input is the loudest signal available that something is wrong with the checkout, not a
+reason to check less. The same goes for `assert x in text` where `x` is a common word,
+for greps whose empty match set is the pass condition, and for `except SomeError: return`
+inside a property — each of them passes when the code under test is absent entirely.
 
 ## Known gaps and pinned defects
 
