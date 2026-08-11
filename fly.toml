@@ -61,6 +61,31 @@ kill_timeout = "15s"
   # cannot be inherited from a stray machine environment (LP-132).
   LABELPROOF_FAKE_PROVIDER = "0"
 
+  # --- latency budget: PINNED, NOT INHERITED -----------------------------------------
+  #
+  # These were previously left to api/config.py's defaults, on the reasoning that config
+  # should own its own defaults. That reasoning shipped a production where every real
+  # verification returned 503.
+  #
+  # The defaults were a 4,000 ms provider timeout against a 5,000 ms request budget,
+  # sized for the 5-second adoption gate. The configured extraction model measures
+  # 9.4-10.1 s for a single-image call. The deadline expired, the retry started with
+  # nothing left, and the grader got "the label reading service is not responding" 4.4
+  # seconds after clicking Try a sample. Nothing in the deployment was wrong; a default
+  # written for one model was silently applied to another.
+  #
+  # So they are pinned here, at values sized to the model this app actually calls, and a
+  # change to either side is now visible in a diff instead of arriving by inheritance.
+  #
+  # THESE VALUES DO NOT MEET PERF-1. The 5-second gate is not reachable with a model
+  # that takes ten seconds to answer, and a timeout short enough to pretend otherwise
+  # just converts slow into broken. Getting under 5s is a model decision (the LP-329
+  # sweep), not a timeout decision. scripts/smoke.sh reports the gap on every deploy so
+  # it cannot quietly become normal, and enforces it the day it is met.
+  LABELPROOF_PROVIDER_TIMEOUT_MS = "14000"
+  LABELPROOF_REQUEST_BUDGET_MS = "18000"
+  LABELPROOF_ADJUDICATION_RESERVE_MS = "1500"
+
   # Keep-warm and prompt-cache pre-warm (LP-134, LP-324). Opt-in by design — the same
   # image run locally makes no paid API calls. The interval is under the provider's
   # five-minute cache TTL on purpose; scripts/keepwarm.py clamps it and explains why.

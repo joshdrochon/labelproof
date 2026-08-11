@@ -19,6 +19,9 @@
 #   - HTTPS or HSTS is not actually in force at the edge (SEC-6, LP-083).
 #   - The image built, booted, passed its checks — and returns four fields instead of
 #     seven, because a fixture the demo needs was excluded from it.
+#   - The latency budget is sized for a different model than the one configured, so every
+#     real verification times out and returns 503 while `/health` and `/ready` stay green.
+#     This one shipped. It is now asserted directly rather than inferred from a failure.
 #
 # Every assertion is one that, if it failed in front of a reviewer, would end the
 # evaluation. Nothing here is a style check.
@@ -38,12 +41,36 @@ set -Eeuo pipefail
 
 BASE_URL="${1:-${SMOKE_BASE_URL:-}}"
 
-# A single sample is a weak latency measurement, so the budget is reported and the hard
-# ceiling is generous. PERF-6's ≤5s first hit is verified properly by the 20-run p95
-# table, not here — rolling a release back because one request took 5.2s would cost more
-# availability than the 200 ms it was defending.
-BUDGET_MS="${SMOKE_BUDGET_MS:-5000}"
-CEILING_MS="${SMOKE_CEILING_MS:-20000}"
+# Latency has two thresholds, and only one of them is a fixed number.
+#
+# PERF-1 (5s) is the product goal. It is reported on every run, and `SMOKE_ENFORCE_PERF1`
+# turns it into a rollback trigger — off today because the configured model cannot meet
+# it, on the day the model sweep lands.
+PERF1_MS="${SMOKE_PERF1_MS:-5000}"
+ENFORCE_PERF1="${SMOKE_ENFORCE_PERF1:-0}"
+
+# The hard failure is not a magic constant. The server advertises its own request budget
+# on /ready, and a release that cannot answer inside the budget it advertises is broken
+# by its own definition — that is a real invariant, where "20 seconds" was just a number
+# large enough that nothing ever hit it. Grace covers TLS setup and the network leg the
+# server does not measure.
+BUDGET_GRACE_MS="${SMOKE_BUDGET_GRACE_MS:-2000}"
+
+# A sanity ceiling on the advertised budget itself, so a release cannot be made green by
+# widening the budget until nothing can fail.
+MAX_ADVERTISED_BUDGET_MS="${SMOKE_MAX_BUDGET_MS:-20000}"
+
+# Measured single-call latency per extraction model, for the assertion that the request
+# budget is actually large enough for the model in front of it. Sourced from the LP-329 /
+# LP-331 spikes; update alongside them.
+model_p50_ms() {
+  case "$1" in
+    claude-opus-5)   echo 10100 ;;
+    claude-sonnet-5) echo 7000  ;;
+    claude-haiku-4-5) echo 5500 ;;
+    *)               echo 0     ;;   # unknown model: cannot assert, say so
+  esac
+}
 
 WORK_DIR="$(mktemp -d)"
 trap 'rm -rf "$WORK_DIR"' EXIT
@@ -173,9 +200,12 @@ fi
 # Fails closed on an absent field. Silence is not the same answer as "false" — if the
 # server did not say whether it is simulated, that is not permission to assume it is not.
 simulated="$(json "$ready" "d['simulated']")"
+MODEL="$(json "$ready" "d['model']")"
+ADVERTISED_BUDGET_MS="$(json "$ready" "d['request_budget_ms']")"
+
 case "$simulated" in
   false)
-    pass "provider is live — $(json "$ready" "d['provider']") / $(json "$ready" "d['model']")"
+    pass "provider is live — $(json "$ready" "d['provider']") / ${MODEL}"
     ;;
   true)
     fail "SAMPLE MODE IN PRODUCTION — verdicts here are demonstrations, not checks"
@@ -184,6 +214,44 @@ case "$simulated" in
     fail "/ready did not report a 'simulated' field; cannot confirm the provider is real"
     ;;
 esac
+
+# ======================================================================================
+step "2b. The latency budget is sized for the model behind it"
+# ======================================================================================
+#
+# The failure this exists for: config defaults sized for a 5s gate, applied to a model
+# that takes ten seconds, produce a 503 on every real verification while every health
+# check stays green. It is not visible anywhere except in a request that fails, so it is
+# asserted here rather than inferred from one.
+
+if [[ -z "$ADVERTISED_BUDGET_MS" || "$ADVERTISED_BUDGET_MS" -le 0 ]]; then
+  fail "/ready did not advertise request_budget_ms; the latency budget cannot be checked"
+  ADVERTISED_BUDGET_MS=0
+else
+  pass "server advertises a ${ADVERTISED_BUDGET_MS} ms request budget"
+
+  if [[ "$ADVERTISED_BUDGET_MS" -gt "$MAX_ADVERTISED_BUDGET_MS" ]]; then
+    fail "advertised budget ${ADVERTISED_BUDGET_MS} ms is past the ${MAX_ADVERTISED_BUDGET_MS} ms sanity ceiling — a budget cannot be widened until nothing fails"
+  fi
+
+  measured="$(model_p50_ms "$MODEL")"
+  if [[ "$measured" -eq 0 ]]; then
+    warn "no measured latency on record for '${MODEL}' — cannot confirm the budget fits it. Add it to model_p50_ms() after the next spike."
+  elif [[ "$ADVERTISED_BUDGET_MS" -lt "$measured" ]]; then
+    fail "request budget ${ADVERTISED_BUDGET_MS} ms is BELOW the measured ${measured} ms latency of ${MODEL} — every real verification will time out and return 503"
+  else
+    pass "budget ${ADVERTISED_BUDGET_MS} ms clears the measured ${measured} ms for ${MODEL}"
+  fi
+
+  # PERF-1 is a product goal, reported every run so the gap cannot become invisible.
+  if [[ "$ADVERTISED_BUDGET_MS" -gt "$PERF1_MS" ]]; then
+    if [[ "$ENFORCE_PERF1" == "1" ]]; then
+      fail "advertised budget ${ADVERTISED_BUDGET_MS} ms exceeds the PERF-1 gate of ${PERF1_MS} ms"
+    else
+      warn "PERF-1 GAP: the service advertises ${ADVERTISED_BUDGET_MS} ms against a ${PERF1_MS} ms adoption gate. Closing it is a model decision, not a timeout decision. Set SMOKE_ENFORCE_PERF1=1 once it is met."
+    fi
+  fi
+fi
 
 # ======================================================================================
 step "3. The single-page app is actually served"
@@ -275,6 +343,16 @@ else
 
   if [[ "$verify_code" != "200" ]]; then
     fail "/verify returned ${verify_code} — $(json "$verify" "d['error']['message']")"
+
+    # Turn the generic provider outage into the actual diagnosis. A 503 that arrives in
+    # roughly the provider timeout, from a model whose measured latency is longer than
+    # that, is not an outage — it is a deadline that was set too short, and saying
+    # "provider unavailable" sends whoever is on call to check the wrong system.
+    error_code="$(json "$verify" "d['error']['code']")"
+    measured="$(model_p50_ms "$MODEL")"
+    if [[ "$error_code" == "provider_unavailable" && "$measured" -gt 0 && "$elapsed_ms" -lt "$measured" ]]; then
+      fail "DIAGNOSIS: the request failed after ${elapsed_ms} ms while ${MODEL} measures ~${measured} ms. The provider deadline expired before the model answered. Raise LABELPROOF_PROVIDER_TIMEOUT_MS and LABELPROOF_REQUEST_BUDGET_MS (pinned in fly.toml), or move to a faster model. The provider is not down."
+    fi
   else
     pass "/verify 200"
 
@@ -312,13 +390,20 @@ else
       fail "no server-side timing in the response (OPS-1)"
     fi
 
-    if [[ "$elapsed_ms" -gt 0 ]]; then
-      if [[ "$elapsed_ms" -le "$BUDGET_MS" ]]; then
-        pass "wall clock ${elapsed_ms} ms (budget ${BUDGET_MS} ms)"
-      elif [[ "$elapsed_ms" -le "$CEILING_MS" ]]; then
-        warn "wall clock ${elapsed_ms} ms exceeds the ${BUDGET_MS} ms budget — not a rollback trigger on one sample, but the p95 run will show it"
+    # The hard threshold is the budget the server itself advertises, plus grace for the
+    # network leg it does not measure. A release that cannot answer inside its own
+    # advertised budget is broken by its own definition — and unlike a fixed ceiling,
+    # this one tightens automatically when the budget does.
+    if [[ "$elapsed_ms" -gt 0 && "$ADVERTISED_BUDGET_MS" -gt 0 ]]; then
+      hard_ms=$((ADVERTISED_BUDGET_MS + BUDGET_GRACE_MS))
+      if [[ "$elapsed_ms" -gt "$hard_ms" ]]; then
+        fail "wall clock ${elapsed_ms} ms is past the service's own ${ADVERTISED_BUDGET_MS} ms budget (+${BUDGET_GRACE_MS} ms grace) — this release does not meet its own contract"
+      elif [[ "$elapsed_ms" -le "$PERF1_MS" ]]; then
+        pass "wall clock ${elapsed_ms} ms — inside the PERF-1 gate"
+      elif [[ "$ENFORCE_PERF1" == "1" ]]; then
+        fail "wall clock ${elapsed_ms} ms exceeds the PERF-1 gate of ${PERF1_MS} ms"
       else
-        fail "wall clock ${elapsed_ms} ms is past the ${CEILING_MS} ms ceiling — the service is not usable"
+        warn "wall clock ${elapsed_ms} ms — within the advertised budget, over the ${PERF1_MS} ms PERF-1 gate. One sample is not the measurement; the 20-run p95 table is."
       fi
     fi
   fi

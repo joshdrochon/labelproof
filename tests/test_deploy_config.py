@@ -162,6 +162,56 @@ def test_keepwarm_is_enabled_and_pings_inside_the_cache_ttl(fly: dict[str, Any])
     assert int(env["LABELPROOF_KEEPWARM_INTERVAL_S"]) < 300
 
 
+def test_the_latency_budget_fits_the_model_production_will_actually_call() -> None:
+    """The regression that shipped a production where every real /verify returned 503.
+
+    Cross-checks three independent sources rather than reading one of them back:
+    `api/config.py` for the model production will run, `scripts/smoke.sh` for that
+    model's measured latency, and `fly.toml` for the deadline it is given. A default
+    sized for one model and silently applied to another is invisible in any single file,
+    which is exactly why it survived to production.
+    """
+    from api.config import Config
+
+    with FLY_TOML.open("rb") as handle:
+        env = tomllib.load(handle)["env"]
+
+    timeout_ms = int(env["LABELPROOF_PROVIDER_TIMEOUT_MS"])
+    budget_ms = int(env["LABELPROOF_REQUEST_BUDGET_MS"])
+
+    # The invariant api/config.py enforces at startup — asserted here so a bad pin fails
+    # in CI rather than as a ConfigError on a machine that then never boots.
+    assert timeout_ms < budget_ms, (
+        f"provider timeout {timeout_ms} ms must be below the request budget "
+        f"{budget_ms} ms; the app refuses to start otherwise"
+    )
+
+    # Whichever model production ends up on, its measured latency has to fit.
+    model = Config().extraction_model
+    measured = _measured_latency_ms(model)
+    assert measured is not None, (
+        f"scripts/smoke.sh has no measured latency for '{model}', the model "
+        f"api/config.py defaults to. Add it to model_p50_ms() so the budget can be "
+        f"checked against something."
+    )
+    assert timeout_ms > measured, (
+        f"the provider deadline is {timeout_ms} ms and {model} measures {measured} ms. "
+        f"Every real verification will hit the deadline and return 503 while /health "
+        f"and /ready stay green."
+    )
+
+
+def _measured_latency_ms(model: str) -> int | None:
+    """Read the measured-latency table out of scripts/smoke.sh.
+
+    Parsed rather than duplicated: a second copy of these numbers would drift, and the
+    drift would only show up as a production timeout.
+    """
+    smoke = (ROOT / "scripts" / "smoke.sh").read_text()
+    match = re.search(rf"^\s*{re.escape(model)}\)\s*echo\s+(\d+)", smoke, re.MULTILINE)
+    return int(match.group(1)) if match else None
+
+
 def test_production_cannot_be_put_into_sample_mode_by_omission(fly: dict[str, Any]) -> None:
     """Pinned, not defaulted. A production instance replaying built-in fixtures answers
     200 to every check and hands a reviewer demonstration verdicts (LP-132)."""
