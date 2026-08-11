@@ -160,7 +160,7 @@ def _pre_fix_schema() -> dict[str, Any]:
         "required": ["x0", "y0", "x1", "y1"],
         "additionalProperties": False,
     }
-    schema = json.loads(json.dumps(adapter.EXTRACTION_SCHEMA))
+    schema: dict[str, Any] = json.loads(json.dumps(adapter.EXTRACTION_SCHEMA))
     for name in FieldName:
         schema["properties"]["fields"]["properties"][name.value]["properties"]["bbox"] = (
             json.loads(json.dumps(nested_bbox))

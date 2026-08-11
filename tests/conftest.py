@@ -93,8 +93,8 @@ def _no_network() -> Iterator[None]:
 
     socket.socket.connect = guard_connect  # type: ignore[method-assign]
     socket.socket.connect_ex = guard_connect_ex  # type: ignore[method-assign]
-    socket.create_connection = guard_create_connection  # type: ignore[assignment]
-    socket.getaddrinfo = guard_getaddrinfo  # type: ignore[assignment]
+    socket.create_connection = guard_create_connection
+    socket.getaddrinfo = guard_getaddrinfo
 
     try:
         yield
@@ -102,8 +102,8 @@ def _no_network() -> Iterator[None]:
         socket.socket = real_socket  # type: ignore[misc]
         socket.socket.connect = real_connect  # type: ignore[method-assign]
         socket.socket.connect_ex = real_connect_ex  # type: ignore[method-assign]
-        socket.create_connection = real_create_connection  # type: ignore[assignment]
-        socket.getaddrinfo = real_getaddrinfo  # type: ignore[assignment]
+        socket.create_connection = real_create_connection
+        socket.getaddrinfo = real_getaddrinfo
 
 
 # --------------------------------------------------------------------------------------
@@ -209,11 +209,11 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
     project_statements = project_covered = 0
 
     def _measure(path: str) -> tuple[int, int, list[int]]:
-        analysis = current._analyze(path)  # noqa: SLF001
+        analysis = current._analyze(path)
         total = len(analysis.statements)
         return total, total - len(analysis.missing), sorted(analysis.missing)
 
-    for absolute, reported in measured.items():
+    for reported in measured.values():
         try:
             total, covered, _ = _measure(reported)
         except Exception:  # pragma: no cover - unreadable file, already reported by cov
@@ -283,7 +283,9 @@ def spirits_application() -> Application:
     )
 
 
-def make_field(value: str | None, *, confidence: float = 0.95, legible: bool = True) -> ExtractedField:
+def make_field(
+    value: str | None, *, confidence: float = 0.95, legible: bool = True
+) -> ExtractedField:
     """One extracted field, with the defaults a clean reading would have."""
     return ExtractedField(value=value, confidence=confidence, legible=legible)
 
@@ -348,6 +350,34 @@ def fixture_upload(*names: str) -> list[tuple[str, tuple[str, bytes, str]]]:
     """Real generated label images, by fixture filename."""
     labels = ROOT / "fixtures" / "labels"
     return [("images", (n, (labels / n).read_bytes(), "image/png")) for n in names]
+
+
+def underexposed_label_png() -> bytes:
+    """A real label, sharp, and too dark to read.
+
+    Built from the rendered fixture and dimmed, rather than from a flat dark rectangle.
+    A flat rectangle has zero Laplacian variance, so the quality gate reports it as
+    *blurred* and the retake reason tells the agent to hold the camera steadier — the
+    wrong advice, and a test asserting on it would be asserting the wrong thing.
+    """
+    import io
+
+    import numpy as np
+    from PIL import Image
+
+    from fixtures.generator.catalog import by_name
+    from fixtures.generator.render import render
+
+    label = np.asarray(render(by_name("tc01_old_tom_clean")).convert("RGB"))
+    dark = (label.astype(np.float32) * 0.06).clip(0, 255).astype(np.uint8)
+    buffer = io.BytesIO()
+    Image.fromarray(dark).save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+@pytest.fixture
+def underexposed_label() -> bytes:
+    return underexposed_label_png()
 
 
 @pytest.fixture

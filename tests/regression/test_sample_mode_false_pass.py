@@ -143,7 +143,7 @@ def test_the_resolver_itself_raises_rather_than_substituting_a_fixture() -> None
     route while leaving this function happy to hand back Old Tom. Testing the resolver
     directly keeps the honesty where the resolution happens.
     """
-    from api.routes import _fixture_provider  # noqa: PLC0415 - private on purpose
+    from api.routes import _fixture_provider
 
     with pytest.raises(errors.ProviderUnavailable):
         _fixture_provider(["IMG_4471.jpg", "another_unknown.png"])
@@ -151,7 +151,7 @@ def test_the_resolver_itself_raises_rather_than_substituting_a_fixture() -> None
 
 def test_no_upload_at_all_still_fails_closed() -> None:
     """The empty-filename path, which is what an upload with no name reaches."""
-    from api.routes import _fixture_provider  # noqa: PLC0415
+    from api.routes import _fixture_provider
 
     with pytest.raises(errors.ProviderUnavailable):
         _fixture_provider([])
@@ -187,7 +187,7 @@ def test_a_recognised_fixture_still_resolves(sample_mode_client: TestClient) -> 
     goes red, sample mode has been hardened into uselessness — which is its own kind of
     broken.
     """
-    from api.routes import _fixture_provider  # noqa: PLC0415
+    from api.routes import _fixture_provider
 
     provider = _fixture_provider(["tc01_old_tom_clean.png"])
     assert provider.name == "fake:spec"

@@ -362,7 +362,10 @@ def test_rows_needing_attention_are_ordered_by_seriousness(
     severity = {v: i for i, v in enumerate([*_ORDER, Verdict.NOT_APPLICABLE])}
     tail = agg.triage_order(results)[1:]
     scores = [severity[r.verdict] for r in tail]
-    normalised = [0 if r.verdict is Verdict.NOT_APPLICABLE else s for r, s in zip(tail, scores, strict=True)]
+    normalised = [
+        0 if r.verdict is Verdict.NOT_APPLICABLE else s
+        for r, s in zip(tail, scores, strict=True)
+    ]
     assert normalised == sorted(normalised, reverse=True)
 
 

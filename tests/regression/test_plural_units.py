@@ -23,8 +23,7 @@ from __future__ import annotations
 import pytest
 
 from api.models import Commodity, ExtractedField, Verdict
-from api.rules import compare as C
-from api.rules import fills as F
+from api.rules import compare, fills
 
 pytestmark = pytest.mark.regression
 
@@ -48,8 +47,8 @@ def test_the_plural_of_every_unit_parses_to_the_same_volume(
     singular: str, plural: str
 ) -> None:
     """The regression itself, across every unit rather than the one that was reported."""
-    one = F.parse(f"1.75 {singular}")
-    many = F.parse(f"1.75 {plural}")
+    one = fills.parse(f"1.75 {singular}")
+    many = fills.parse(f"1.75 {plural}")
     assert one.ml is not None, f"{singular} did not parse"
     assert many.ml is not None, f"{plural} did not parse"
     assert one.ml == many.ml
@@ -65,7 +64,7 @@ def test_a_plural_unit_is_never_reported_as_a_missing_net_contents(
     only the parser would let a future rewrite move the failure one layer up and stay
     green.
     """
-    result = C.compare_net_contents(
+    result = compare.compare_net_contents(
         ExtractedField(value=f"1.75 {plural}", confidence=0.95),
         f"1.75 {singular}",
         Commodity.SPIRITS,
@@ -75,7 +74,7 @@ def test_a_plural_unit_is_never_reported_as_a_missing_net_contents(
 
 def test_the_reported_case_parses() -> None:
     """`1.75 liters` — the exact string from the report."""
-    assert F.parse("1.75 liters").ml == pytest.approx(1750.0)
+    assert fills.parse("1.75 liters").ml == pytest.approx(1750.0)
 
 
 @pytest.mark.parametrize(
@@ -88,7 +87,7 @@ def test_the_abbreviated_spellings_still_parse(text: str) -> None:
     The fix strips a trailing `s` on a miss. `oz` and `ml` end in no `s`, but a
     careless implementation could strip one from something that needed it.
     """
-    assert F.parse(text).ml is not None
+    assert fills.parse(text).ml is not None
 
 
 def test_stripping_a_trailing_s_does_not_invent_units() -> None:
@@ -98,6 +97,6 @@ def test_stripping_a_trailing_s_does_not_invent_units() -> None:
     started resolving, the parser would be guessing at units it does not model — and a
     guessed volume is worse than an unreadable one.
     """
-    assert F.parse("5 gallons").ml is None
-    assert F.parse("5 gallon").ml is None
-    assert F.parse("500 grams").ml is None
+    assert fills.parse("5 gallons").ml is None
+    assert fills.parse("5 gallon").ml is None
+    assert fills.parse("500 grams").ml is None

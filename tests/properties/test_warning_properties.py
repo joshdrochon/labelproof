@@ -23,7 +23,7 @@ from hypothesis import strategies as st
 
 from api import canon
 from api.models import Verdict, WarningTypography
-from api.rules import warning as W
+from api.rules import warning as warn
 
 pytestmark = pytest.mark.property
 
@@ -61,9 +61,9 @@ def test_match_implies_the_text_is_the_statement_verbatim(text: str) -> None:
     printer wrapped the paragraph and is not part of the regulation. Case and
     punctuation are the regulation.
     """
-    result = W.evaluate(text, COMPLIANT)
+    result = warn.evaluate(text, COMPLIANT)
     if result.verdict is Verdict.MATCH:
-        assert W.collapse_layout_whitespace(text) == CANONICAL
+        assert warn.collapse_layout_whitespace(text) == CANONICAL
 
 
 @settings(max_examples=600, deadline=None)
@@ -84,7 +84,7 @@ def test_match_implies_the_typography_was_confirmed_compliant(
         relative_size=1.0,
         contrast_ok=contrast,
     )
-    if W.evaluate(text, signals).verdict is Verdict.MATCH:
+    if warn.evaluate(text, signals).verdict is Verdict.MATCH:
         assert header_bold is True
         assert body_bold is False
 
@@ -104,7 +104,7 @@ def test_omitting_any_word_breaks_the_match(index: int) -> None:
     optional, including the ones that look like filler.
     """
     mutated = " ".join(WORDS[:index] + WORDS[index + 1 :])
-    assert W.evaluate(mutated, COMPLIANT).verdict is not Verdict.MATCH
+    assert warn.evaluate(mutated, COMPLIANT).verdict is not Verdict.MATCH
 
 
 @pytest.mark.tc("TC-05")
@@ -116,9 +116,9 @@ def test_omitting_any_word_breaks_the_match(index: int) -> None:
 def test_substituting_any_word_breaks_the_match(index: int, replacement: str) -> None:
     """TC-05 generalised: `pregnant women` for `women ... during pregnancy` is one of
     infinitely many rewordings, and none of them is the statement."""
-    mutated = " ".join(WORDS[:index] + [replacement] + WORDS[index + 1 :])
-    assume(W.collapse_layout_whitespace(mutated) != CANONICAL)
-    assert W.evaluate(mutated, COMPLIANT).verdict is not Verdict.MATCH
+    mutated = " ".join([*WORDS[:index], replacement, *WORDS[index + 1 :]])
+    assume(warn.collapse_layout_whitespace(mutated) != CANONICAL)
+    assert warn.evaluate(mutated, COMPLIANT).verdict is not Verdict.MATCH
 
 
 @SETTINGS
@@ -132,8 +132,8 @@ def test_inserting_any_word_breaks_the_match(index: int, addition: str) -> None:
     A producer who appends their own safety advice to the required paragraph has not
     printed the required statement.
     """
-    mutated = " ".join(WORDS[:index] + [addition] + WORDS[index:])
-    assert W.evaluate(mutated, COMPLIANT).verdict is not Verdict.MATCH
+    mutated = " ".join([*WORDS[:index], addition, *WORDS[index:]])
+    assert warn.evaluate(mutated, COMPLIANT).verdict is not Verdict.MATCH
 
 
 @pytest.mark.tc("TC-03")
@@ -150,7 +150,7 @@ def test_flipping_the_case_of_any_letter_breaks_the_match(index: int) -> None:
     assume(character.lower() != character.upper())
     flipped = character.lower() if character.isupper() else character.upper()
     mutated = f"{CANONICAL[:index]}{flipped}{CANONICAL[index + 1 :]}"
-    assert W.evaluate(mutated, COMPLIANT).verdict is not Verdict.MATCH
+    assert warn.evaluate(mutated, COMPLIANT).verdict is not Verdict.MATCH
 
 
 @SETTINGS
@@ -158,8 +158,8 @@ def test_flipping_the_case_of_any_letter_breaks_the_match(index: int) -> None:
 def test_altering_punctuation_anywhere_breaks_the_match(mark: str, index: int) -> None:
     """Punctuation is the regulation too. `16.21` prints a colon after the heading."""
     mutated = f"{CANONICAL[:index]}{mark}{CANONICAL[index:]}"
-    assume(W.collapse_layout_whitespace(mutated) != CANONICAL)
-    assert W.evaluate(mutated, COMPLIANT).verdict is not Verdict.MATCH
+    assume(warn.collapse_layout_whitespace(mutated) != CANONICAL)
+    assert warn.evaluate(mutated, COMPLIANT).verdict is not Verdict.MATCH
 
 
 # --------------------------------------------------------------------------------------
@@ -181,13 +181,13 @@ def test_reflowing_the_paragraph_never_breaks_the_match(separators: list[str]) -
     reflowed = parts[0]
     for i, part in enumerate(parts[1:]):
         reflowed += separators[i % len(separators)] + part
-    assert W.evaluate(reflowed, COMPLIANT).verdict is Verdict.MATCH
+    assert warn.evaluate(reflowed, COMPLIANT).verdict is Verdict.MATCH
 
 
 @SETTINGS
 @given(st.text(alphabet=" \t\n", max_size=6), st.text(alphabet=" \t\n", max_size=6))
 def test_surrounding_whitespace_never_breaks_the_match(before: str, after: str) -> None:
-    assert W.evaluate(f"{before}{CANONICAL}{after}", COMPLIANT).verdict is Verdict.MATCH
+    assert warn.evaluate(f"{before}{CANONICAL}{after}", COMPLIANT).verdict is Verdict.MATCH
 
 
 # --------------------------------------------------------------------------------------
@@ -199,7 +199,7 @@ def test_surrounding_whitespace_never_breaks_the_match(before: str, after: str) 
 @pytest.mark.parametrize("text", [None, "", "   ", "\n\t"])
 def test_an_absent_warning_is_missing_with_a_critical_finding(text: str | None) -> None:
     """No statement on any image is the disqualifying case (TC-07)."""
-    result = W.evaluate(text, COMPLIANT)
+    result = warn.evaluate(text, COMPLIANT)
     assert result.verdict is Verdict.MISSING
     assert [f.code for f in result.findings] == ["warning_missing"]
     assert result.findings[0].severity == "critical"
@@ -215,14 +215,14 @@ def test_an_illegible_image_is_unreadable_whatever_the_text_says(text: str) -> N
     the second when the first is true is a false finding on a compliant label. Glare
     across the back of a bottle produces exactly this.
     """
-    assert W.evaluate(text, COMPLIANT, legible=False).verdict is Verdict.UNREADABLE
+    assert warn.evaluate(text, COMPLIANT, legible=False).verdict is Verdict.UNREADABLE
 
 
 @settings(max_examples=200, deadline=None)
 @given(st.text(max_size=120))
 def test_an_illegible_reading_never_reaches_a_pass(text: str) -> None:
     """The strongest form: no text at all can pass while the image is illegible."""
-    assert W.evaluate(text, COMPLIANT, legible=False).verdict is not Verdict.MATCH
+    assert warn.evaluate(text, COMPLIANT, legible=False).verdict is not Verdict.MATCH
 
 
 # --------------------------------------------------------------------------------------
@@ -252,7 +252,7 @@ def test_an_unknown_typography_signal_never_produces_silence(
         relative_size=None,
         contrast_ok=contrast,
     )
-    codes = {f.code for f in W.check_typography(signals)}
+    codes = {f.code for f in warn.check_typography(signals)}
     if header_bold is None:
         assert "warning_header_bold_unverified" in codes
     if body_bold is None:
@@ -266,7 +266,7 @@ def test_a_bold_body_is_a_hard_finding_not_an_unverified_one() -> None:
         header_is_all_caps=True, header_is_bold=True, body_is_bold=True,
         relative_size=1.0, contrast_ok=True,
     )
-    result = W.evaluate(CANONICAL, signals)
+    result = warn.evaluate(CANONICAL, signals)
     assert result.verdict is Verdict.MISMATCH
     assert [f.code for f in result.findings] == ["warning_body_is_bold"]
 
@@ -277,7 +277,7 @@ def test_verbatim_text_with_unconfirmed_typography_fails_closed() -> None:
     This is the fail-closed direction stated as a case. The wording being perfect is
     not enough — an agent still has to look at the type.
     """
-    result = W.evaluate(CANONICAL, WarningTypography())
+    result = warn.evaluate(CANONICAL, WarningTypography())
     assert result.verdict is Verdict.ACCEPTABLE_VARIATION
     assert "could not be confirmed" in result.rationale
 
@@ -293,13 +293,13 @@ def test_a_non_capitalised_heading_is_found_and_then_judged(heading: str) -> Non
     wrong too.
     """
     text = heading + CANONICAL[len(canon.WARNING_HEADER) :]
-    findings = W.check_header_caps(text)
+    findings = warn.check_header_caps(text)
     assert [f.code for f in findings] == ["warning_header_not_all_caps"]
     assert heading.rstrip(": ") in findings[0].message
 
 
 def test_a_statement_with_no_heading_at_all_is_reported_as_such() -> None:
-    findings = W.check_header_caps("According to the Surgeon General, women should not")
+    findings = warn.check_header_caps("According to the Surgeon General, women should not")
     assert [f.code for f in findings] == ["warning_header_missing"]
 
 
@@ -316,24 +316,24 @@ def test_the_diff_always_reconstructs_the_required_statement(text: str) -> None:
     The diff is the evidence panel. If it dropped or reordered words, the agent would
     be checking the tool's paraphrase of 16.21 rather than 16.21.
     """
-    segments = W.tokenized_diff(text)
+    segments = warn.tokenized_diff(text)
     rebuilt = [word for segment in segments for word in segment.expected]
-    assert rebuilt == W.tokenize(CANONICAL)
+    assert rebuilt == warn.tokenize(CANONICAL)
 
 
 @SETTINGS
 @given(st.text(max_size=200))
 def test_the_diff_always_reconstructs_what_the_label_said(text: str) -> None:
-    segments = W.tokenized_diff(text)
+    segments = warn.tokenized_diff(text)
     rebuilt = [word for segment in segments for word in segment.found]
-    assert rebuilt == W.tokenize(text)
+    assert rebuilt == warn.tokenize(text)
 
 
 @SETTINGS
 @given(st.text(max_size=200))
 def test_a_non_matching_statement_always_gets_a_plain_language_summary(text: str) -> None:
     """UX-6: the agent is told what differs, in words, not shown a raw diff structure."""
-    result = W.evaluate(text, COMPLIANT)
+    result = warn.evaluate(text, COMPLIANT)
     assume(result.verdict is Verdict.MISMATCH)
     assert result.rationale.strip()
     assert not result.rationale.startswith("[")
@@ -341,18 +341,18 @@ def test_a_non_matching_statement_always_gets_a_plain_language_summary(text: str
 
 def test_a_verbatim_statement_summarises_as_a_match() -> None:
     """The no-difference branch of the summary, which mutation tests never reach."""
-    assert W.diff_summary(W.tokenized_diff(CANONICAL)) == (
+    assert warn.diff_summary(warn.tokenized_diff(CANONICAL)) == (
         "The warning statement matches the required text word for word."
     )
 
 
 def test_added_words_are_described_as_added() -> None:
-    summary = W.diff_summary(W.tokenized_diff(f"{CANONICAL} Drink responsibly."))
+    summary = warn.diff_summary(warn.tokenized_diff(f"{CANONICAL} Drink responsibly."))
     assert "adds the words" in summary
 
 
 def test_omitted_words_are_described_as_missing() -> None:
-    summary = W.diff_summary(W.tokenized_diff(" ".join(WORDS[:-3])))
+    summary = warn.diff_summary(warn.tokenized_diff(" ".join(WORDS[:-3])))
     assert "missing the words" in summary
 
 
@@ -370,13 +370,13 @@ def test_type_size_context_never_claims_the_tool_verified_it(volume: float) -> N
     tool did not check it. Claiming otherwise would be the tool asserting a
     determination it cannot make.
     """
-    text = W.type_size_context(volume)
+    text = warn.type_size_context(volume)
     assert "not verifiable" in text
     assert "not a check the tool performed" in text
 
 
 def test_type_size_context_admits_when_the_container_size_is_unknown() -> None:
-    text = W.type_size_context(None)
+    text = warn.type_size_context(None)
     assert "could not be determined" in text
 
 

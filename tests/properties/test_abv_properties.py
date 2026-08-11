@@ -14,7 +14,7 @@ from hypothesis import strategies as st
 
 from api import canon
 from api.models import Commodity
-from api.rules import abv as A
+from api.rules import abv
 
 pytestmark = pytest.mark.property
 
@@ -43,7 +43,7 @@ def _render(value: float) -> str:
 @given(ABV_VALUES)
 def test_percent_statements_round_trip(value: float) -> None:
     """`45% Alc./Vol.` parses back to 45.0, for every value a label can state."""
-    assert A.parse(f"{_render(value)}% Alc./Vol.").abv == pytest.approx(value)
+    assert abv.parse(f"{_render(value)}% Alc./Vol.").abv == pytest.approx(value)
 
 
 @SETTINGS
@@ -68,7 +68,7 @@ def test_every_accepted_phrasing_yields_the_same_number(value: float, template: 
     thing. If they parsed differently, one of them would reach the agent as a Mismatch
     against an application that says 45.
     """
-    parsed = A.parse(template.format(v=_render(value)))
+    parsed = abv.parse(template.format(v=_render(value)))
     assert parsed.abv == pytest.approx(value)
 
 
@@ -81,9 +81,9 @@ def test_parsing_is_idempotent_through_its_own_rendering(value: float) -> None:
     not round-trip, the number in the explanation would not be the number in the
     verdict.
     """
-    parsed = A.parse(f"{_render(value)}% Alc./Vol.")
+    parsed = abv.parse(f"{_render(value)}% Alc./Vol.")
     assert parsed.abv is not None
-    assert A.parse(f"{parsed.abv:g}%").abv == pytest.approx(value)
+    assert abv.parse(f"{parsed.abv:g}%").abv == pytest.approx(value)
 
 
 @SETTINGS
@@ -95,13 +95,13 @@ def test_text_with_no_digits_is_never_readable(text: str) -> None:
     impossible is a fabricated value, because there is no channel downstream that
     distinguishes a guess from a reading (LP-067).
     """
-    assert not A.parse(text).is_readable
+    assert not abv.parse(text).is_readable
 
 
 @pytest.mark.parametrize("text", [None, "", "   ", "\n\t "])
 def test_absent_statements_are_unreadable_rather_than_zero(text: str | None) -> None:
     """Absence is not 0%. A label stating 0% and a label stating nothing are different."""
-    parsed = A.parse(text)
+    parsed = abv.parse(text)
     assert parsed.abv is None
     assert not parsed.is_readable
 
@@ -127,7 +127,7 @@ def test_an_alcohol_statement_with_no_percent_sign_still_parses(
     statement is set in small caps. Reporting the field as Missing would be a false
     finding on a label that states its alcohol content in words.
     """
-    assert A.parse(template.format(v=value)).abv == pytest.approx(value)
+    assert abv.parse(template.format(v=value)).abv == pytest.approx(value)
 
 
 @SETTINGS
@@ -138,7 +138,7 @@ def test_a_percent_sign_wins_over_a_bare_number(value: int) -> None:
     `Alcohol 45% by volume` must parse as 45, not as whichever number the looser
     pattern happened to find first.
     """
-    assert A.parse(f"Alcohol {value}% by volume").abv == pytest.approx(value)
+    assert abv.parse(f"Alcohol {value}% by volume").abv == pytest.approx(value)
 
 
 @SETTINGS
@@ -149,7 +149,7 @@ def test_a_proof_only_label_still_states_its_alcohol_content(proof: int) -> None
     Reporting `90 Proof` as a missing alcohol statement would be a false finding on a
     label that states its alcohol content perfectly clearly.
     """
-    parsed = A.parse(f"{proof} Proof")
+    parsed = abv.parse(f"{proof} Proof")
     assert parsed.abv == pytest.approx(proof / canon.PROOF_PER_ABV_POINT)
     assert parsed.proof == pytest.approx(proof)
 
@@ -168,8 +168,8 @@ def test_a_consistent_label_raises_no_finding(value: int) -> None:
     A consistency check that fires on correct labels is worse than none: the agent
     learns to click past it, and the one real inconsistency goes with it.
     """
-    parsed = A.parse(f"{value}% Alc./Vol. ({value * 2} Proof)")
-    assert A.check_internal_consistency(parsed) == []
+    parsed = abv.parse(f"{value}% Alc./Vol. ({value * 2} Proof)")
+    assert abv.check_internal_consistency(parsed) == []
 
 
 @pytest.mark.tc("TC-09")
@@ -183,8 +183,8 @@ def test_any_disagreement_between_proof_and_abv_is_reported(
     Independent of the application: this is the label contradicting itself. `40%
     Alc./Vol. (90 Proof)` is wrong whether the application says 40, 45, or nothing.
     """
-    parsed = A.parse(f"{value}% Alc./Vol. ({value * 2 + offset} Proof)")
-    findings = A.check_internal_consistency(parsed)
+    parsed = abv.parse(f"{value}% Alc./Vol. ({value * 2 + offset} Proof)")
+    findings = abv.check_internal_consistency(parsed)
     assert [f.code for f in findings] == ["proof_abv_inconsistent"]
     assert findings[0].citation == canon.CITATIONS["spirits_abv"]
 
@@ -199,8 +199,8 @@ def test_consistency_is_never_checked_against_a_proof_that_was_not_stated(
     Most labels state only a percentage. Reporting every one of them as inconsistent
     would bury the real TC-09 case in noise.
     """
-    parsed = A.parse(f"{_render(value)}% Alc./Vol.")
-    assert A.check_internal_consistency(parsed) == []
+    parsed = abv.parse(f"{_render(value)}% Alc./Vol.")
+    assert abv.check_internal_consistency(parsed) == []
 
 
 # --------------------------------------------------------------------------------------
@@ -219,10 +219,10 @@ def test_abv_abbreviation_is_a_finding_on_spirits_only(value: float) -> None:
     tool.
     """
     text = f"{_render(value)}% ABV"
-    spirits = A.check_format(text, Commodity.SPIRITS)
+    spirits = abv.check_format(text, Commodity.SPIRITS)
     assert [f.code for f in spirits] == ["spirits_abv_abbreviation"]
     for other in (Commodity.WINE, Commodity.MALT):
-        assert A.check_format(text, other) == []
+        assert abv.check_format(text, other) == []
 
 
 @SETTINGS
@@ -230,15 +230,15 @@ def test_abv_abbreviation_is_a_finding_on_spirits_only(value: float) -> None:
 def test_the_permitted_abbreviations_never_raise_a_format_finding(
     value: float, commodity: Commodity
 ) -> None:
-    assert A.check_format(f"{_render(value)}% Alc./Vol.", commodity) == []
+    assert abv.check_format(f"{_render(value)}% Alc./Vol.", commodity) == []
 
 
 @SETTINGS
 @given(COMMODITIES)
 def test_absent_text_raises_no_format_finding(commodity: Commodity) -> None:
     """A missing statement is a Missing verdict, not a formatting complaint."""
-    assert A.check_format(None, commodity) == []
-    assert A.check_format("", commodity) == []
+    assert abv.check_format(None, commodity) == []
+    assert abv.check_format("", commodity) == []
 
 
 # --------------------------------------------------------------------------------------
@@ -258,7 +258,7 @@ def test_tolerance_context_always_says_it_does_not_excuse_the_difference(
     a mismatch. Every rendering of the sentence has to say so, in the agent's words —
     the number alone would read as a threshold that had been applied.
     """
-    text = A.tolerance_context(commodity, value)
+    text = abv.tolerance_context(commodity, value)
     assert "does not excuse" in text
     assert "cannot measure" in text
     assert commodity.value in text
@@ -315,14 +315,14 @@ def test_an_inconsistent_label_still_parses_its_stated_percentage(value: int) ->
     proof implies 45. Letting the check rewrite the parsed value would silently change
     the comparison verdict on the strength of a defect.
     """
-    parsed = A.parse(f"{value}% Alc./Vol. ({value * 2 + 10} Proof)")
+    parsed = abv.parse(f"{value}% Alc./Vol. ({value * 2 + 10} Proof)")
     assert parsed.abv == pytest.approx(value)
-    assert A.check_internal_consistency(parsed)
+    assert abv.check_internal_consistency(parsed)
 
 
 @SETTINGS
 @given(ABV_VALUES)
 def test_the_format_finding_does_not_depend_on_the_parsed_value(value: float) -> None:
     """TC-22 is about the words, not the number. Both `45% ABV` and `5% ABV` offend."""
-    assume(A.parse(f"{_render(value)}% ABV").abv is not None)
-    assert A.check_format(f"{_render(value)}% ABV", Commodity.SPIRITS)
+    assume(abv.parse(f"{_render(value)}% ABV").abv is not None)
+    assert abv.check_format(f"{_render(value)}% ABV", Commodity.SPIRITS)

@@ -25,8 +25,8 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from api.pipeline import quality as Q
-from api.rules import thresholds as T
+from api.pipeline import quality
+from api.rules import thresholds
 from fixtures.generator import degrade
 from fixtures.generator.catalog import by_name
 from fixtures.generator.render import render
@@ -70,7 +70,7 @@ def test_dimming_an_image_never_improves_its_exposure_score(factor: float) -> No
     """
     bright = _label(250)
     dimmed = _dim(bright, factor)
-    assert Q.exposure_score(dimmed) <= Q.exposure_score(bright)
+    assert quality.exposure_score(dimmed) <= quality.exposure_score(bright)
 
 
 def test_a_bright_label_scores_perfectly_rather_than_being_penalised() -> None:
@@ -80,14 +80,14 @@ def test_a_bright_label_scores_perfectly_rather_than_being_penalised() -> None:
     like to a camera. Scoring it as a problem sends an agent chasing a better
     photograph of a fine one.
     """
-    assert Q.exposure_score(_label()) == 1.0
-    assert Q.exposure_score(np.full((400, 400, 3), 255, dtype=np.uint8)) == 1.0
+    assert quality.exposure_score(_label()) == 1.0
+    assert quality.exposure_score(np.full((400, 400, 3), 255, dtype=np.uint8)) == 1.0
 
 
 def test_exposure_is_monotonic_across_the_whole_brightness_range() -> None:
     """Brighter is never worse, at every step from black to white."""
     scores = [
-        Q.exposure_score(np.full((400, 400, 3), level, dtype=np.uint8))
+        quality.exposure_score(np.full((400, 400, 3), level, dtype=np.uint8))
         for level in range(0, 256, 15)
     ]
     assert scores == sorted(scores)
@@ -99,7 +99,7 @@ def test_a_genuinely_dark_photograph_is_still_penalised() -> None:
     An underexposed photograph is a real problem with a real retake reason. If this
     fails, the fix has gone too far and the tool has stopped noticing dark images.
     """
-    assert Q.exposure_score(_dim(_label(), 0.06)) < T.HOPELESS
+    assert quality.exposure_score(_dim(_label(), 0.06)) < thresholds.HOPELESS
 
 
 def test_the_thresholds_module_declares_no_exposure_ceiling() -> None:
@@ -110,7 +110,7 @@ def test_the_thresholds_module_declares_no_exposure_ceiling() -> None:
     """
     ceiling_names = [
         name
-        for name in dir(T)
+        for name in dir(thresholds)
         if "EXPOSURE" in name and ("CEIL" in name or "MAX" in name or "OVER" in name)
     ]
     assert ceiling_names == []
@@ -140,25 +140,25 @@ def test_a_slightly_soft_image_scores_above_an_illegible_one() -> None:
     different messages leading to different actions. On a linear scale the tool could
     not tell them apart, so every soft image got the harshest advice.
     """
-    soft = Q.blur_score(_blurred(2))
-    illegible = Q.blur_score(_blurred(12))
+    soft = quality.blur_score(_blurred(2))
+    illegible = quality.blur_score(_blurred(12))
     assert soft > illegible
     assert soft - illegible > 0.2, (soft, illegible)
 
 
 def test_blur_score_decreases_monotonically_with_radius() -> None:
     """More blur is never scored as sharper, at any radius."""
-    scores = [Q.blur_score(_blurred(r)) for r in (0, 1, 2, 4, 8, 16)]
+    scores = [quality.blur_score(_blurred(r)) for r in (0, 1, 2, 4, 8, 16)]
     assert scores == sorted(scores, reverse=True), scores
 
 
 def test_a_sharp_label_scores_at_the_top_of_the_range() -> None:
-    assert Q.blur_score(_label()) == 1.0
+    assert quality.blur_score(_label()) == 1.0
 
 
 def test_a_hopelessly_blurred_label_falls_below_the_pre_gate() -> None:
     """LP-321: hopeless means zero model calls, so the score has to actually get there."""
-    assert Q.blur_score(_blurred(16)) < T.HOPELESS
+    assert quality.blur_score(_blurred(16)) < thresholds.HOPELESS
 
 
 def test_the_blur_scale_is_logarithmic_rather_than_linear() -> None:
@@ -168,9 +168,11 @@ def test_the_blur_scale_is_logarithmic_rather_than_linear() -> None:
     fraction of the sharp value. Testing the shape means a future rewrite that keeps
     the endpoints but straightens the curve is caught.
     """
-    span = np.log10(T.SHARP_LAPLACIAN_VARIANCE / T.BLUR_HOPELESS_VARIANCE)
-    midpoint_variance = np.sqrt(T.SHARP_LAPLACIAN_VARIANCE * T.BLUR_HOPELESS_VARIANCE)
-    expected = np.log10(midpoint_variance / T.BLUR_HOPELESS_VARIANCE) / span
+    span = np.log10(thresholds.SHARP_LAPLACIAN_VARIANCE / thresholds.BLUR_HOPELESS_VARIANCE)
+    midpoint_variance = np.sqrt(
+        thresholds.SHARP_LAPLACIAN_VARIANCE * thresholds.BLUR_HOPELESS_VARIANCE
+    )
+    expected = np.log10(midpoint_variance / thresholds.BLUR_HOPELESS_VARIANCE) / span
     assert expected == pytest.approx(0.5, abs=0.01)
 
 
@@ -189,15 +191,15 @@ def test_a_dark_image_is_reported_as_dark_rather_than_as_blurry() -> None:
     light, and the retaken photograph would be just as unusable.
     """
     dark_but_sharp = _dim(_label(), 0.06)
-    assert Q.blur_score(dark_but_sharp) > T.DEGRADED
-    assert Q.exposure_score(dark_but_sharp) < T.HOPELESS
-    reason = Q.assess(dark_but_sharp).reason
+    assert quality.blur_score(dark_but_sharp) > thresholds.DEGRADED
+    assert quality.exposure_score(dark_but_sharp) < thresholds.HOPELESS
+    reason = quality.assess(dark_but_sharp).reason
     assert reason is not None and "dark" in reason
 
 
 def test_the_retake_reason_names_the_single_worst_problem() -> None:
     """An agent needs to know what to ask for, not a diagnostic report."""
-    reason = Q.assess(_dim(_label(), 0.05)).reason
+    reason = quality.assess(_dim(_label(), 0.05)).reason
     assert reason is not None
     assert reason.count(".") <= 3
 
@@ -218,7 +220,7 @@ def test_each_kind_of_unusable_image_gets_its_own_advice(
     Radius 12 is the `tc14_blur_hopeless` preset — the calibration point the thresholds
     were set against.
     """
-    report = Q.assess(image_factory())  # type: ignore[operator]
+    report = quality.assess(image_factory())  # type: ignore[operator]
     assert report.verdict == "hopeless"
     assert report.reason is not None
     assert expected_word in report.reason
@@ -232,5 +234,5 @@ def test_glare_is_counted_by_the_glare_score_and_not_by_exposure() -> None:
     flashed label was penalised once for the glare and again for being bright.
     """
     flashed = degrade.glare(_label(), intensity=1.0, radius=0.4)
-    assert Q.glare_score(flashed) < 1.0
-    assert Q.exposure_score(flashed) == 1.0
+    assert quality.glare_score(flashed) < 1.0
+    assert quality.exposure_score(flashed) == 1.0

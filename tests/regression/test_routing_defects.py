@@ -79,8 +79,8 @@ def test_main_claims_the_batch_prefix_for_the_api() -> None:
     """
     from api import main as main_module
 
-    assert "batch" in main_module._API_PREFIXES  # noqa: SLF001
-    assert "/batch" in main_module._POST_ONLY_ROUTES  # noqa: SLF001
+    assert "batch" in main_module._API_PREFIXES
+    assert "/batch" in main_module._POST_ONLY_ROUTES
 
 
 @pytest.mark.xfail(
@@ -160,7 +160,7 @@ def test_the_error_envelope_itself_is_correct(client: TestClient) -> None:
 )
 def test_the_distinction_survives_in_the_code_field(status: int, code: str) -> None:
     """The information is not lost — it is just not where HTTP clients look."""
-    assert main_module._from_status(status).code == code  # noqa: SLF001
+    assert main_module._from_status(status).code == code
 
 
 @pytest.mark.xfail(
@@ -179,7 +179,7 @@ def test_the_distinction_survives_in_the_code_field(status: int, code: str) -> N
 )
 @pytest.mark.parametrize("status", [404, 405, 413, 429])
 def test_the_http_status_matches_the_status_it_was_built_from(status: int) -> None:
-    assert main_module._from_status(status).status_code == status  # noqa: SLF001
+    assert main_module._from_status(status).status_code == status
 
 
 @pytest.mark.xfail(

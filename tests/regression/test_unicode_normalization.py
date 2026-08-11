@@ -28,6 +28,12 @@ the moment they are fixed, which is the signal to widen the property generators 
 tests/properties/test_normalize_properties.py.
 """
 
+# ruff: noqa: RUF001, RUF002
+# This file is *about* visually ambiguous characters — an acute accent used as an
+# apostrophe, fullwidth forms, ligatures. Ruff's confusable check would flag every
+# one of them, which is the point of the test rather than a defect in it.
+
+
 from __future__ import annotations
 
 import unicodedata
@@ -35,8 +41,8 @@ import unicodedata
 import pytest
 
 from api.models import ExtractedField, FieldName, Verdict
-from api.rules import compare as C
-from api.rules import normalize as N
+from api.rules import compare
+from api.rules import normalize as norm
 
 pytestmark = pytest.mark.regression
 
@@ -57,14 +63,14 @@ def test_normalizing_hangul_produces_nfkc_stable_text(text: str) -> None:
     and was not, so any later NFKC anywhere downstream moved it again and two readings
     of the same label could compare unequal depending on which path they took.
     """
-    once = N.normalize(text)
+    once = norm.normalize(text)
     assert unicodedata.normalize("NFKC", once) == once
 
 
 @pytest.mark.parametrize("text", HANGUL)
 def test_normalizing_hangul_is_idempotent(text: str) -> None:
-    once = N.normalize(text)
-    assert N.normalize(once) == once
+    once = norm.normalize(text)
+    assert norm.normalize(once) == once
 
 
 @pytest.mark.parametrize("text", HANGUL)
@@ -74,12 +80,12 @@ def test_hangul_survives_normalization_rather_than_being_stripped(text: str) -> 
     An over-eager fix — stripping anything NFD produces — would empty the brand name
     and turn every Korean import into a Missing brand.
     """
-    assert N.normalize(text) != ""
+    assert norm.normalize(text) != ""
 
 
 def test_a_korean_brand_name_matches_itself() -> None:
     """The consequence at the layer an agent sees."""
-    result = C.compare_brand_name(
+    result = compare.compare_brand_name(
         ExtractedField(value="한국소주", confidence=0.95), "한국소주"
     )
     assert result.verdict is Verdict.MATCH
@@ -93,7 +99,10 @@ def test_a_korean_brand_name_matches_itself() -> None:
 @pytest.mark.parametrize(
     "character",
     ["´", "″", "‑", " ", " ", " "],
-    ids=["acute-accent", "double-prime", "non-breaking-hyphen", "nbsp", "figure-space", "narrow-nbsp"],
+    ids=[
+        "acute-accent", "double-prime", "non-breaking-hyphen",
+        "nbsp", "figure-space", "narrow-nbsp",
+    ],
 )
 def test_the_punctuation_map_contains_keys_nfkc_has_already_removed(
     character: str,
@@ -105,7 +114,7 @@ def test_the_punctuation_map_contains_keys_nfkc_has_already_removed(
     accent is not, and the next test is why.
     """
     # `str.maketrans` keys the table by codepoint, not by character.
-    assert ord(character) in N._QUOTE_MAP  # noqa: SLF001
+    assert ord(character) in norm._QUOTE_MAP
     assert unicodedata.normalize("NFKC", character) != character
 
 
@@ -122,7 +131,7 @@ def test_the_punctuation_map_contains_keys_nfkc_has_already_removed(
 )
 def test_an_acute_accent_used_as_an_apostrophe_folds_to_an_apostrophe() -> None:
     """`STONE´S THROW` is Dave's case typed on a keyboard without a real apostrophe."""
-    assert N.normalize("STONE´S THROW") == N.normalize("Stone's Throw")
+    assert norm.normalize("STONE´S THROW") == norm.normalize("Stone's Throw")
 
 
 @pytest.mark.xfail(
@@ -133,7 +142,7 @@ def test_an_acute_accent_used_as_an_apostrophe_folds_to_an_apostrophe() -> None:
     ),
 )
 def test_an_acute_accent_brand_name_is_not_reported_as_a_mismatch() -> None:
-    result = C.compare_brand_name(
+    result = compare.compare_brand_name(
         ExtractedField(value="STONE´S THROW", confidence=0.95), "Stone's Throw"
     )
     assert result.verdict is not Verdict.MISMATCH
@@ -156,7 +165,7 @@ COMPATIBILITY_PAIRS = [
 @pytest.mark.parametrize(("compatibility", "plain"), COMPATIBILITY_PAIRS, ids=lambda p: p)
 def test_compatibility_forms_do_compare_equal(compatibility: str, plain: str) -> None:
     """Established first: the equality itself is correct and should stay."""
-    assert N.equal_after_normalization(compatibility, plain)
+    assert norm.equal_after_normalization(compatibility, plain)
 
 
 @pytest.mark.xfail(
@@ -176,7 +185,7 @@ def test_a_compatibility_fold_is_reported_as_a_variation(
     compatibility: str, plain: str
 ) -> None:
     """MATCH-9: nothing that differed is allowed to pass without a note."""
-    assert N.classify_variation(compatibility, plain) != []
+    assert norm.classify_variation(compatibility, plain) != []
 
 
 @pytest.mark.xfail(
@@ -188,7 +197,7 @@ def test_a_compatibility_fold_is_reported_as_a_variation(
     ),
 )
 def test_a_compatibility_fold_reaches_the_agent_as_an_acceptable_variation() -> None:
-    result = C.compare_text(
+    result = compare.compare_text(
         FieldName.CLASS_TYPE,
         ExtractedField(value="ＯＬＤ ＴＯＭ", confidence=0.95),
         "OLD TOM",

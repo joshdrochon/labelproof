@@ -23,7 +23,7 @@ from hypothesis import strategies as st
 
 from api.models import Commodity, ExtractedField, FieldName, Verdict
 from api.rules import commodity as com
-from api.rules import compare as C
+from api.rules import compare
 
 pytestmark = pytest.mark.property
 
@@ -55,7 +55,7 @@ def _read(value: str | None, *, legible: bool = True) -> ExtractedField | None:
 
 
 def _compare(field: FieldName, found: str | None, expected: str | None) -> object:
-    return C.compare_text(field, _read(found), expected, required=True, label="value")
+    return compare.compare_text(field, _read(found), expected, required=True, label="value")
 
 
 # --------------------------------------------------------------------------------------
@@ -123,7 +123,7 @@ def test_an_unreadable_field_outranks_absence(field: FieldName, value: str) -> N
     compliant label, and it sends the agent to the applicant instead of to a better
     photograph.
     """
-    illegible = C.compare_text(
+    illegible = compare.compare_text(
         field, _read(value, legible=False), value, required=True, label="value"
     )
     assert illegible.verdict is Verdict.UNREADABLE
@@ -141,7 +141,7 @@ def test_a_field_that_is_not_required_is_not_applicable_rather_than_missing(
     Reporting a domestic label as missing its country of origin is a false finding
     against a rule that does not apply to it.
     """
-    result = C.compare_text(
+    result = compare.compare_text(
         field, None, value, required=False, not_applicable_reason="Not required."
     )
     assert result.verdict is Verdict.NOT_APPLICABLE
@@ -199,7 +199,9 @@ _FOLDABLE = st.sampled_from(
     [
         lambda s: s.upper(),
         lambda s: s.lower(),
-        lambda s: s.replace("'", "’"),
+        # U+2019 is the STONE'S THROW character specifically; the confusable
+        # warning is what this transform exists to exercise.
+        lambda s: s.replace("'", "’"),  # noqa: RUF001
         lambda s: f"{s}.",
         lambda s: s.replace(" ", "  "),
     ]
@@ -239,7 +241,7 @@ _CONTEXT = com.LabelContext(is_import=False, class_type="Bourbon", application_a
 @SETTINGS
 @given(_ABV)
 def test_alcohol_content_matches_itself_at_every_strength(value: float) -> None:
-    result = C.compare_alcohol_content(
+    result = compare.compare_alcohol_content(
         _read(f"{value:g}% Alc./Vol."), value, Commodity.SPIRITS, _CONTEXT
     )
     assert result.verdict is Verdict.MATCH
@@ -259,7 +261,7 @@ def test_any_alcohol_difference_above_the_reading_tolerance_is_a_mismatch(
     """
     label = value + delta
     assume(label <= 99.0)
-    result = C.compare_alcohol_content(
+    result = compare.compare_alcohol_content(
         _read(f"{label:g}% Alc./Vol."), value, Commodity.SPIRITS, _CONTEXT
     )
     assert result.verdict is Verdict.MISMATCH
@@ -270,7 +272,7 @@ def test_any_alcohol_difference_above_the_reading_tolerance_is_a_mismatch(
 @given(_ABV)
 def test_a_label_stating_alcohol_the_application_omits_is_surfaced(value: float) -> None:
     """Surfaced, never passed. The applicant filed one thing and printed another."""
-    result = C.compare_alcohol_content(
+    result = compare.compare_alcohol_content(
         _read(f"{value:g}% Alc./Vol."), None, Commodity.SPIRITS, _CONTEXT
     )
     assert result.verdict is Verdict.MISMATCH
@@ -281,7 +283,7 @@ def test_a_label_stating_alcohol_the_application_omits_is_surfaced(value: float)
 @given(_ABV)
 def test_malt_without_an_alcohol_statement_is_not_applicable(value: float) -> None:
     """No federal rule requires it, so absence is not a defect (TC-18)."""
-    result = C.compare_alcohol_content(
+    result = compare.compare_alcohol_content(
         None, None, Commodity.MALT, com.LabelContext(class_type="India Pale Ale")
     )
     assert result.verdict is Verdict.NOT_APPLICABLE
@@ -290,7 +292,7 @@ def test_malt_without_an_alcohol_statement_is_not_applicable(value: float) -> No
 @pytest.mark.tc("TC-17")
 def test_low_alcohol_table_wine_without_an_alcohol_statement_is_not_applicable() -> None:
     """27 CFR 4.36 lets table wine at or below 14% omit it (TC-17)."""
-    result = C.compare_alcohol_content(
+    result = compare.compare_alcohol_content(
         None,
         None,
         Commodity.WINE,
@@ -302,7 +304,7 @@ def test_low_alcohol_table_wine_without_an_alcohol_statement_is_not_applicable()
 @SETTINGS
 @given(_ABV)
 def test_an_illegible_alcohol_statement_is_unreadable_not_missing(value: float) -> None:
-    result = C.compare_alcohol_content(
+    result = compare.compare_alcohol_content(
         _read(f"{value:g}%", legible=False), value, Commodity.SPIRITS, _CONTEXT
     )
     assert result.verdict is Verdict.UNREADABLE
@@ -319,7 +321,7 @@ _SIZES = st.sampled_from([187, 200, 375, 500, 700, 750, 1000, 1750])
 @given(_SIZES)
 def test_net_contents_matches_across_a_unit_change(millilitres: int) -> None:
     """The application in millilitres, the label in centilitres: one volume."""
-    result = C.compare_net_contents(
+    result = compare.compare_net_contents(
         _read(f"{millilitres / 10:g} cl"), f"{millilitres} mL", Commodity.SPIRITS
     )
     assert result.verdict is Verdict.MATCH
@@ -328,8 +330,8 @@ def test_net_contents_matches_across_a_unit_change(millilitres: int) -> None:
 @SETTINGS
 @given(_SIZES, _SIZES)
 def test_net_contents_comparison_is_symmetric(left: int, right: int) -> None:
-    forward = C.compare_net_contents(_read(f"{left} mL"), f"{right} mL", Commodity.SPIRITS)
-    reverse = C.compare_net_contents(_read(f"{right} mL"), f"{left} mL", Commodity.SPIRITS)
+    forward = compare.compare_net_contents(_read(f"{left} mL"), f"{right} mL", Commodity.SPIRITS)
+    reverse = compare.compare_net_contents(_read(f"{right} mL"), f"{left} mL", Commodity.SPIRITS)
     assert forward.verdict is reverse.verdict
 
 
@@ -341,7 +343,7 @@ def test_an_unparseable_net_contents_reading_is_never_a_match(millilitres: int) 
     Falling through to Match here would pass a label on the strength of text nobody
     understood.
     """
-    result = C.compare_net_contents(
+    result = compare.compare_net_contents(
         _read("contents as shown"), f"{millilitres} mL", Commodity.SPIRITS
     )
     assert result.verdict is not Verdict.MATCH
@@ -350,7 +352,7 @@ def test_an_unparseable_net_contents_reading_is_never_a_match(millilitres: int) 
 @SETTINGS
 @given(_SIZES)
 def test_an_illegible_net_contents_reading_is_unreadable(millilitres: int) -> None:
-    result = C.compare_net_contents(
+    result = compare.compare_net_contents(
         _read(f"{millilitres} mL", legible=False), f"{millilitres} mL", Commodity.SPIRITS
     )
     assert result.verdict is Verdict.UNREADABLE
@@ -366,7 +368,7 @@ def test_a_legible_but_empty_net_contents_reading_is_missing(millilitres: int) -
     every commodity, so absence is a defect on the label rather than on the photograph.
     """
     for reading in (_read(""), None):
-        result = C.compare_net_contents(
+        result = compare.compare_net_contents(
             reading, f"{millilitres} mL", Commodity.SPIRITS
         )
         assert result.verdict is Verdict.MISSING
@@ -382,7 +384,10 @@ _STATES = st.sampled_from(
 
 
 @SETTINGS
-@given(_STATES, st.text(alphabet="abcdefghijklmnopqrstuvwxyz ", min_size=3, max_size=15).filter(str.strip))
+@given(
+    _STATES,
+    st.text(alphabet="abcdefghijklmnopqrstuvwxyz ", min_size=3, max_size=15).filter(str.strip),
+)
 def test_a_state_abbreviation_and_its_full_name_are_the_same_address(
     state: tuple[str, str], town: str
 ) -> None:
@@ -392,7 +397,7 @@ def test_a_state_abbreviation_and_its_full_name_are_the_same_address(
     whose application was typed by a different person than the artwork.
     """
     abbreviation, full = state
-    result = C.compare_producer(
+    result = compare.compare_producer(
         _read(f"Old Tom Distillery, {town}, {abbreviation}"),
         "Old Tom Distillery",
         f"{town}, {full}",

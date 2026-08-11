@@ -10,6 +10,12 @@ These properties are the standard that bug set. Each one is a statement about *e
 string, and each is here because violating it would change a verdict.
 """
 
+# ruff: noqa: RUF001, RUF002, RUF003
+# This file is *about* visually ambiguous characters — an acute accent used as an
+# apostrophe, fullwidth forms, ligatures. Ruff's confusable check would flag every
+# one of them, which is the point of the test rather than a defect in it.
+
+
 from __future__ import annotations
 
 import unicodedata
@@ -18,7 +24,7 @@ import pytest
 from hypothesis import HealthCheck, assume, given, settings
 from hypothesis import strategies as st
 
-from api.rules import normalize as N
+from api.rules import normalize as norm
 from api.rules.normalize import Variation
 
 pytestmark = pytest.mark.property
@@ -187,8 +193,8 @@ def test_normalize_is_idempotent(value: str) -> None:
     then whether two labels matched would depend on how many times the pipeline had
     happened to normalize each side — a verdict that changes with call order.
     """
-    once = N.normalize(value)
-    assert N.normalize(once) == once
+    once = norm.normalize(value)
+    assert norm.normalize(once) == once
 
 
 @SETTINGS
@@ -199,7 +205,7 @@ def test_normalize_output_is_nfkc_stable(value: str) -> None:
     This is the property the Hangul defect broke: the output looked normalized and was
     not, so a later NFKC anywhere downstream would move it again.
     """
-    once = N.normalize(value)
+    once = norm.normalize(value)
     assert unicodedata.normalize("NFKC", once) == once
 
 
@@ -207,30 +213,30 @@ def test_normalize_output_is_nfkc_stable(value: str) -> None:
 @given(TEXT)
 def test_normalize_output_is_casefold_stable(value: str) -> None:
     """Casefolding normalized text is a no-op. Tier 1 has already folded case."""
-    once = N.normalize(value)
+    once = norm.normalize(value)
     assert once.casefold() == once
 
 
 @SETTINGS
 @given(TEXT)
 def test_normalize_output_has_no_leading_or_trailing_whitespace(value: str) -> None:
-    once = N.normalize(value)
+    once = norm.normalize(value)
     assert once == once.strip()
 
 
 @SETTINGS
 @given(TEXT)
 def test_normalize_output_has_no_double_spaces(value: str) -> None:
-    assert "  " not in N.normalize(value)
+    assert "  " not in norm.normalize(value)
 
 
 @pytest.mark.parametrize(
     "transform",
     [
-        N.collapse_whitespace,
-        N.unify_punctuation,
-        N.rejoin_hyphenation,
-        N.strip_terminal_punctuation,
+        norm.collapse_whitespace,
+        norm.unify_punctuation,
+        norm.rejoin_hyphenation,
+        norm.strip_terminal_punctuation,
     ],
     ids=lambda f: f.__name__,
 )
@@ -252,8 +258,8 @@ def test_each_transform_is_idempotent(transform: object, value: str) -> None:
 def test_fold_diacritics_is_idempotent_on_nfkc_input(value: str) -> None:
     """The contract `normalize` actually relies on, and the one that holds."""
     prepared = unicodedata.normalize("NFKC", value)
-    once = N.fold_diacritics(prepared)
-    assert N.fold_diacritics(once) == once
+    once = norm.fold_diacritics(prepared)
+    assert norm.fold_diacritics(once) == once
 
 
 # --------------------------------------------------------------------------------------
@@ -264,7 +270,7 @@ def test_fold_diacritics_is_idempotent_on_nfkc_input(value: str) -> None:
 @SETTINGS
 @given(TEXT)
 def test_equality_is_reflexive(value: str) -> None:
-    assert N.equal_after_normalization(value, value)
+    assert norm.equal_after_normalization(value, value)
 
 
 @SETTINGS
@@ -276,7 +282,7 @@ def test_equality_is_symmetric(left: str, right: str) -> None:
     asymmetric, swapping the arguments would swap the verdict — and the caller has no
     reason to think the order matters.
     """
-    assert N.equal_after_normalization(left, right) == N.equal_after_normalization(
+    assert norm.equal_after_normalization(left, right) == norm.equal_after_normalization(
         right, left
     )
 
@@ -297,9 +303,9 @@ def test_equality_is_transitive_across_meaning_preserving_edits(
     depends on nothing the agent can see.
     """
     a, b, c = (_apply(base, t) for t in (first, second, third))
-    assert N.equal_after_normalization(a, b)
-    assert N.equal_after_normalization(b, c)
-    assert N.equal_after_normalization(a, c)
+    assert norm.equal_after_normalization(a, b)
+    assert norm.equal_after_normalization(b, c)
+    assert norm.equal_after_normalization(a, c)
 
 
 @settings(max_examples=400, deadline=None)
@@ -314,7 +320,7 @@ def test_meaning_preserving_edits_never_change_the_normalized_form(
     normalized form untouched — otherwise `STONE'S THROW` versus `Stone's Throw.`
     reaches an agent as a Mismatch on a compliant label.
     """
-    assert N.normalize(_apply(base, transforms)) == N.normalize(base)
+    assert norm.normalize(_apply(base, transforms)) == norm.normalize(base)
 
 
 # --------------------------------------------------------------------------------------
@@ -331,7 +337,7 @@ def test_variation_classification_is_symmetric(left: str, right: str) -> None:
     whichever way round the two strings were handed in, or the note the agent sees
     depends on an implementation detail of the caller.
     """
-    assert N.classify_variation(left, right) == N.classify_variation(right, left)
+    assert norm.classify_variation(left, right) == norm.classify_variation(right, left)
 
 
 @settings(max_examples=400, deadline=None)
@@ -348,8 +354,8 @@ def test_no_variations_reported_exactly_when_strings_are_identical(
     tool.
     """
     mutated = _apply(base, transforms)
-    assume(N.equal_after_normalization(base, mutated))
-    assert (N.classify_variation(base, mutated) == []) == (base == mutated)
+    assume(norm.equal_after_normalization(base, mutated))
+    assert (norm.classify_variation(base, mutated) == []) == (base == mutated)
 
 
 @settings(max_examples=400, deadline=None)
@@ -365,9 +371,9 @@ def test_a_folded_difference_is_always_explained(
     normalizer grows: add a fold without a variation class and this fails.
     """
     mutated = _apply(base, transforms)
-    assume(N.equal_after_normalization(base, mutated))
+    assume(norm.equal_after_normalization(base, mutated))
     assume(base != mutated)
-    variations = N.classify_variation(base, mutated)
+    variations = norm.classify_variation(base, mutated)
     assert variations, f"{base!r} vs {mutated!r} folded with no explanation"
 
 
@@ -379,7 +385,7 @@ def test_reported_variations_are_a_stable_ordered_subset(left: str, right: str) 
     The note is rendered by joining these in order. A set would render differently run
     to run, and the same label would produce two different reports.
     """
-    found = N.classify_variation(left, right)
+    found = norm.classify_variation(left, right)
     canonical = list(Variation)
     assert found == [v for v in canonical if v in found]
     assert len(found) == len(set(found))
@@ -395,10 +401,10 @@ def test_every_reported_variation_has_an_agent_facing_note(
     A `KeyError` here would surface as a 500 on a label that merely used an unusual
     apostrophe.
     """
-    found = N.classify_variation(left, right)
-    note = N.variation_note(found)
+    found = norm.classify_variation(left, right)
+    note = norm.variation_note(found)
     assert note.strip()
-    assert all(v in N.VARIATION_NOTES for v in found)
+    assert all(v in norm.VARIATION_NOTES for v in found)
 
 
 # --------------------------------------------------------------------------------------
@@ -413,14 +419,14 @@ _LETTERS = st.text(
 @settings(max_examples=200, deadline=None)
 @given(_LETTERS)
 def test_case_difference_is_classified_as_case(word: str) -> None:
-    assert N.classify_variation(word.upper(), word.lower()) == [Variation.CASE]
+    assert norm.classify_variation(word.upper(), word.lower()) == [Variation.CASE]
 
 
 @settings(max_examples=200, deadline=None)
 @given(_LETTERS, _LETTERS)
 def test_extra_spacing_is_classified_as_whitespace(left: str, right: str) -> None:
     """Covers the whitespace probe, which a case-only example set never reaches."""
-    assert Variation.WHITESPACE in N.classify_variation(
+    assert Variation.WHITESPACE in norm.classify_variation(
         f"{left} {right}", f"{left}   {right}"
     )
 
@@ -429,7 +435,7 @@ def test_extra_spacing_is_classified_as_whitespace(left: str, right: str) -> Non
 @given(_LETTERS)
 def test_accent_difference_is_classified_as_diacritics(word: str) -> None:
     accented = f"{word}́"  # combining acute
-    assert Variation.DIACRITICS in N.classify_variation(accented, word)
+    assert Variation.DIACRITICS in norm.classify_variation(accented, word)
 
 
 @settings(max_examples=200, deadline=None)
@@ -437,20 +443,20 @@ def test_accent_difference_is_classified_as_diacritics(word: str) -> None:
 def test_line_break_hyphenation_is_classified_as_hyphenation(
     left: str, right: str
 ) -> None:
-    assert Variation.HYPHENATION in N.classify_variation(
+    assert Variation.HYPHENATION in norm.classify_variation(
         f"{left}-\n{right}", f"{left}{right}"
     )
 
 
 def test_multiple_variations_produce_a_combined_note() -> None:
     """The multi-class rendering path, which single-difference examples never reach."""
-    note = N.variation_note([Variation.CASE, Variation.PUNCTUATION])
+    note = norm.variation_note([Variation.CASE, Variation.PUNCTUATION])
     assert "case" in note and "punctuation" in note
     assert note.endswith("same text.")
 
 
 def test_identical_values_are_described_as_identical() -> None:
-    assert N.variation_note([]) == "Values are identical."
+    assert norm.variation_note([]) == "Values are identical."
 
 
 # --------------------------------------------------------------------------------------
@@ -471,5 +477,5 @@ def test_every_apostrophe_in_the_zoo_folds_to_the_same_brand(mark: str) -> None:
     tests/regression/test_unicode_normalization.py.
     """
     label = f"STONE{mark}S THROW"
-    assert N.equal_after_normalization(label, "Stone's Throw")
-    assert N.classify_variation(label, "Stone's Throw") != []
+    assert norm.equal_after_normalization(label, "Stone's Throw")
+    assert norm.classify_variation(label, "Stone's Throw") != []
