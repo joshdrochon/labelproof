@@ -132,12 +132,25 @@ class ImageReport(BaseModel):
 
 
 class Timings(BaseModel):
+    """Per-stage wall time in milliseconds (OPS-1).
+
+    A stage that did not run reports **null**, not `0`. Those are different facts and the
+    difference is the whole reason this model exists: `0` reads as "instant", and a
+    reader who takes `"adjudicate": 0` at face value concludes Tier-3 adjudication ran and
+    cost nothing. It does not run in this build at all.
+
+    `preprocess` is a roll-up of `ingest + quality`, so summing every field double-counts.
+    See `api/timing.py`.
+    """
+
     ingest: int = 0
     quality: int = 0
     preprocess: int = 0
     extract: int = 0
     compare: int = 0
-    adjudicate: int = 0
+    #: Tier-3 text adjudication. Not implemented in this build — always null. See
+    #: `api/timing.UNIMPLEMENTED_STAGES`.
+    adjudicate: int | None = None
     total: int = 0
 
 

@@ -228,6 +228,49 @@ def test_preprocess_is_ingest_plus_quality() -> None:
     assert timings.preprocess == 59
 
 
+# --- a stage that did not run is null, not zero ---------------------------------------
+
+
+def test_an_unimplemented_stage_reports_null_in_the_response() -> None:
+    """The same rule that made `preprocess` a roll-up. `"adjudicate": 0` invites a reader
+    to conclude Tier-3 adjudication ran and cost nothing; it does not run at all."""
+    stages = post_verify(make_client()).json()["timings_ms"]
+    for name in timing.UNIMPLEMENTED_STAGES:
+        assert stages[name] is None, f"{name} reports a number but never runs"
+
+
+def test_the_unimplemented_list_matches_what_the_pipeline_actually_runs() -> None:
+    """If someone wires a stage up, this fails until they take it off the list — the null
+    is a statement about this build, not a permanent hole."""
+    stages = post_verify(make_client(provider=SlowProvider(0.05))).json()["timings_ms"]
+    ran = {
+        name
+        for name in timing.MEASURED_STAGES
+        if stages[name] is not None and stages[name] > 0
+    }
+    assert not (ran & set(timing.UNIMPLEMENTED_STAGES)), (
+        f"{sorted(ran & set(timing.UNIMPLEMENTED_STAGES))} is timed but still listed in "
+        f"api.timing.UNIMPLEMENTED_STAGES"
+    )
+
+
+def test_an_unimplemented_stage_writes_no_log_line(logs: io.StringIO) -> None:
+    """A missing series in the rollup reads as "no data collected" — which is the true
+    statement about a stage this build does not have."""
+    post_verify(make_client(logs=logs))
+    for name in timing.UNIMPLEMENTED_STAGES:
+        assert name not in stage_lines(logs)
+
+
+def test_timing_an_unimplemented_stage_makes_it_a_number() -> None:
+    """The design is not a dead end: wiring one up is deleting a name from the tuple."""
+    clock = FakeClock()
+    timer = timing.RequestTimer(clock=clock)
+    with timer.stage("adjudicate"):
+        clock.advance(0.9)
+    assert timer.timings.adjudicate == 900
+
+
 def test_preprocess_is_not_a_separately_measured_stage() -> None:
     """The roll-up has exactly one definition. Two would eventually disagree."""
     assert "preprocess" not in timing.MEASURED_STAGES
@@ -597,9 +640,10 @@ def test_the_total_is_never_less_than_any_stage_it_contains() -> None:
 
 
 def test_the_measured_stages_never_exceed_the_total() -> None:
-    """`preprocess` is excluded — it is a roll-up of two stages already in the sum."""
+    """`preprocess` is excluded — it is a roll-up of two stages already in the sum, and
+    a stage that did not run contributes nothing rather than a zero."""
     stages = post_verify(make_client(provider=SlowProvider(0.2))).json()["timings_ms"]
-    measured = sum(stages[name] for name in timing.MEASURED_STAGES)
+    measured = sum(stages[name] or 0 for name in timing.MEASURED_STAGES)
     assert measured <= stages["total"] + 5
 
 

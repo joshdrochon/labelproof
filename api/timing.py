@@ -49,6 +49,18 @@ MEASURED_STAGES: tuple[str, ...] = ("ingest", "quality", "extract", "compare", "
 #: What `preprocess` rolls up.
 PREPROCESS_PARTS: tuple[str, ...] = ("ingest", "quality")
 
+#: Stages the API declares but this build never runs.
+#:
+#: They report **null**, never `0`. This is the same rule that made `preprocess` a
+#: roll-up rather than a permanent zero: a number that means "absent" must not be
+#: rendered as a number that means "instant". `"adjudicate": 0` invites a reader to
+#: conclude that Tier-3 adjudication ran and took no time; it does not run at all.
+#:
+#: Wiring one up is deleting its name from this tuple and timing it like any other
+#: stage — `RequestTimer.stage()` accepts it either way, so the null is a statement about
+#: this build rather than a hole in the design. A test asserts the two agree.
+UNIMPLEMENTED_STAGES: tuple[str, ...] = ("adjudicate",)
+
 #: Logged on every request even when the measurement is zero (LP-119, LP-124).
 #:
 #: A missing series in the rollup reads as "we collected no data"; a zero reads as "we
@@ -73,9 +85,15 @@ def _ms(seconds: float) -> int:
     return round(seconds * 1000)
 
 
+def stage_ms(timings: Timings, name: str) -> int | None:
+    """One stage's duration, or None when the stage did not run."""
+    value = getattr(timings, name)
+    return None if value is None else int(value)
+
+
 def preprocess_ms(timings: Timings) -> int:
     """The preprocessing roll-up. See the module docstring."""
-    return sum(int(getattr(timings, part)) for part in PREPROCESS_PARTS)
+    return sum(stage_ms(timings, part) or 0 for part in PREPROCESS_PARTS)
 
 
 def seal(timings: Timings) -> Timings:
@@ -125,7 +143,9 @@ class RequestTimer:
             yield
         finally:
             elapsed = _ms(self._clock() - started)
-            setattr(self.timings, name, int(getattr(self.timings, name)) + elapsed)
+            # `or 0` rather than a cast: an unimplemented stage starts at None, and
+            # timing it is exactly how it stops being unimplemented.
+            setattr(self.timings, name, (stage_ms(self.timings, name) or 0) + elapsed)
 
     def elapsed_ms(self) -> int:
         """Wall time since the timer was constructed."""
@@ -148,7 +168,7 @@ class RequestTimer:
         zeros over the pipeline's real numbers would erase the two that matter most.
         """
         for name in MEASURED_STAGES:
-            mine = int(getattr(self.timings, name))
+            mine = stage_ms(self.timings, name)
             if mine:
                 setattr(timings, name, mine)
         timings.total = self.elapsed_ms()
@@ -163,7 +183,12 @@ def emit(timings: Timings, *, ok: bool = True, **fields: object) -> None:
     measurement and the one PERF-1 is stated against.
     """
     for name in STAGE_NAMES:
-        duration = int(getattr(timings, name))
+        duration = stage_ms(timings, name)
+        # A stage that did not run emits no line at all. In the rollup a missing series
+        # reads as "no data collected", which is the true statement about a stage this
+        # build does not have — where a zero would read as "measured, took no time".
+        if duration is None:
+            continue
         if duration or name in ALWAYS_LOGGED:
             applog.log(
                 "stage_complete", stage=name, duration_ms=duration, ok=ok, **fields

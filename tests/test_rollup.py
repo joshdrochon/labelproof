@@ -488,6 +488,25 @@ def test_the_stage_table_follows_pipeline_order_not_alphabetical() -> None:
     assert order.index("preprocess") < order.index("extract") < order.index("compare")
 
 
+def test_the_roll_up_caveat_is_in_the_committed_table_not_only_the_readme() -> None:
+    """The README is not what gets handed over — `rollup.md` is. Someone reading only the
+    artifact will try to add the stage column up."""
+    reading = read(
+        line("stage_complete", stage="preprocess", duration_ms=59, ok=True),
+        line("stage_complete", stage="ingest", duration_ms=41, ok=True),
+        line("stage_complete", stage="quality", duration_ms=18, ok=True),
+    )
+    report = rollup.render(reading, [])
+    assert "Do not add the stage column up" in report
+    assert "`ingest`, `quality`" in report
+
+
+def test_a_report_without_the_roll_up_rows_carries_no_such_caveat() -> None:
+    """Noise in a report is how readers learn to skip the prose."""
+    reading = read(line("stage_complete", stage="extract", duration_ms=2610, ok=True))
+    assert "Do not add the stage column up" not in rollup.render(reading, [])
+
+
 def test_an_unrecognised_series_still_gets_reported() -> None:
     """A stage added later must appear without editing this script."""
     reading = read(line("stage_complete", stage="rerank", duration_ms=40, ok=True))

@@ -36,7 +36,7 @@ from pathlib import Path
 from typing import Any
 
 from api.config import Config
-from api.timing import STAGE_NAMES
+from api.timing import PREPROCESS_PARTS, STAGE_NAMES
 
 #: Percentiles reported, in order.
 PERCENTILES: tuple[int, ...] = (50, 90, 95, 99)
@@ -326,6 +326,19 @@ def render_latency(reading: Reading) -> list[str]:
         )
 
     out.append("")
+
+    # The caveat belongs in the artifact a skeptic reads, not only in the README. This
+    # table is what gets committed and handed over; someone will try to add the stage
+    # column up, and `preprocess` is a roll-up of `ingest + quality`, not their sibling.
+    if "preprocess" in names and any(part in names for part in PREPROCESS_PARTS):
+        rolled = ", ".join(f"`{part}`" for part in PREPROCESS_PARTS if part in names)
+        out.append(
+            f"**Do not add the stage column up.** `preprocess` is a roll-up of "
+            f"{rolled} — it is those rows summed, not a stage alongside them, and "
+            f"counting all three double-counts the preprocessing time."
+        )
+        out.append("")
+
     if flagged:
         out.append(
             f"\\* Fewer than {MIN_SAMPLES_FOR_P95} samples. These percentiles are printed "

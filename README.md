@@ -205,7 +205,7 @@ deciding whether to trust the tool.
 | `preprocess` | **Roll-up of `ingest + quality`.** See below. |
 | `extract` | Every vision call, wall-clock. Concurrent across images, so this is `max`, not `sum`. |
 | `compare` | The deterministic rules engine. Pure functions; usually 0–2ms. |
-| `adjudicate` | Tier-3 text adjudication, when it fires. |
+| `adjudicate` | Tier-3 text adjudication. **Not implemented in this build — always `null`.** |
 | `total` | The whole request, measured by the outermost clock. |
 
 Two things about this table are load-bearing.
@@ -216,6 +216,13 @@ halves of preprocessing separately, and `preprocess` reports their sum so the PR
 vocabulary maps onto real numbers. Summing every field double-counts. (There is no
 separate deskew/perspective pass in this build; if one is added it becomes a third part of
 the roll-up, in `api/timing.PREPROCESS_PARTS`.)
+
+**A stage that did not run reports `null`, not `0`.** This is the same rule as the one
+above, seen from the other side: `0` reads as "instant", and `"adjudicate": 0` would invite
+a reader to conclude Tier-3 adjudication ran and cost nothing. It does not run at all.
+`api/timing.UNIMPLEMENTED_STAGES` lists the stages the API declares but this build never
+executes, and a test fails if one of them starts producing a number without coming off the
+list.
 
 **`total` is measured, not derived.** It comes from a clock started before the request is
 parsed and read after the last verdict is computed — never from adding the stages up.
