@@ -1,4 +1,4 @@
-"""Photometric preprocessing (LP-190, IMG-2).
+"""Photometric preprocessing (LP-190, LP-191, IMG-2, IMG-3).
 
 The load-bearing tests here are the ones asserting what preprocessing does *not* do. A
 pass that quietly improved every image would erase the evidence the warning-prominence
@@ -18,6 +18,12 @@ from fixtures.generator.render import render
 @pytest.fixture(scope="module")
 def clean() -> np.ndarray:
     return np.array(render(by_name("tc01_old_tom_clean")))
+
+
+def gray_of(image: np.ndarray) -> np.ndarray:
+    import cv2
+
+    return cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
 
 
 # --- TC-13: dim but recoverable ----------------------------------------------------------
@@ -83,6 +89,76 @@ def test_the_normalization_bar_is_the_exposure_floor(clean: np.ndarray) -> None:
         assessment = quality.assess(image)
         expected = float(image.mean()) < T.EXPOSURE_FLOOR
         assert preprocess.needs_exposure_normalization(assessment) is expected
+
+
+# --- TC-12: glare, enhanced but never invented --------------------------------------------
+
+@pytest.mark.tc("TC-12")
+def test_a_blown_pixel_is_never_filled_in(clean: np.ndarray) -> None:
+    """The load-bearing test of LP-191. A pixel at 255 carries no information about what
+    was under it, so anything written there is fabrication — and *confident* fabrication,
+    which the extractor would read as clean text and the verdict would carry as a pass."""
+    glared = degrade.glare(clean)
+    blown_before = gray_of(glared) >= preprocess.BLOWN_LEVEL
+
+    out = preprocess.enhance_glare(glared)
+
+    assert np.array_equal(out[blown_before], glared[blown_before])
+
+
+@pytest.mark.tc("TC-12")
+def test_enhancement_never_reduces_the_blown_area(clean: np.ndarray) -> None:
+    """Recovering blown pixels is the signature of inpainting. If this count ever drops,
+    something started painting label content into a region nobody photographed."""
+    glared = degrade.glare(clean)
+    out = preprocess.enhance_glare(glared)
+    assert preprocess.blown_fraction(out) >= preprocess.blown_fraction(glared)
+
+
+@pytest.mark.tc("TC-12")
+def test_the_glare_mask_covers_the_highlight(clean: np.ndarray) -> None:
+    """Defaults put the patch over the lower portion, where the warning sits."""
+    glared = degrade.glare(clean)
+    mask = preprocess.glare_mask(glared)
+    bottom_half = mask[mask.shape[0] // 2 :]
+    assert bottom_half.mean() > mask[: mask.shape[0] // 2].mean()
+
+
+@pytest.mark.tc("TC-12")
+def test_a_clean_label_has_no_glare_mask(clean: np.ndarray) -> None:
+    assert preprocess.glare_mask(clean).sum() == 0
+
+
+@pytest.mark.tc("TC-12")
+def test_glare_recovery_runs_on_a_real_highlight(clean: np.ndarray) -> None:
+    result = preprocess.preprocess(degrade.glare(clean))
+    assert result.glare_enhanced
+    assert result.glare_fraction > 0.0
+
+
+def test_a_stray_specular_pixel_is_not_chased(clean: np.ndarray) -> None:
+    """A speck on a foil capsule is not glare, and running a local operator over the whole
+    image to chase it changes every pixel for no gain."""
+    speck = clean.copy()
+    speck[10:14, 10:14] = 255
+    assert not preprocess.preprocess(speck).glare_enhanced
+
+
+@pytest.mark.tc("TC-12")
+def test_the_note_says_nothing_was_painted_in(clean: np.ndarray) -> None:
+    """An agent reading the log has to be able to tell recovery from invention."""
+    notes = " ".join(preprocess.preprocess(degrade.glare(clean)).notes)
+    assert "nothing was painted into it" in notes
+
+
+@pytest.mark.tc("TC-12")
+def test_glare_recovery_leaves_the_dry_half_of_the_label_alone(clean: np.ndarray) -> None:
+    """TC-12's whole point: the warning under the flash is lost, the brand above it is
+    not. If recovery smeared the top of the label the brand would be collateral."""
+    glared = degrade.glare(clean)
+    out = preprocess.enhance_glare(glared)
+    top = slice(0, int(clean.shape[0] * 0.25))
+    assert quality.blur_score(out[top]) >= quality.blur_score(glared[top]) - 0.05
 
 
 # --- honesty of the report --------------------------------------------------------------------

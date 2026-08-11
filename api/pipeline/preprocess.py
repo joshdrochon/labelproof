@@ -1,7 +1,20 @@
-"""Photometric correction and the ordered preprocessing pass (IMG-2, IMG-6).
+"""Photometric correction and the ordered preprocessing pass (IMG-2, IMG-3, IMG-6).
 
 Geometry lives in `deskew`. This module handles light: lifting a photograph that is too
-dim to read.
+dim to read, and recovering what can honestly be recovered from one with glare on it.
+
+**Glare is enhanced, never inpainted (IMG-3, IMG-5, LP-191).** A pixel at 255 carries no
+information about what was underneath it. Filling that area with plausible label content
+is fabrication with extra steps, and this product's whole argument is that it does not
+invent values. Inpainting would also fail in the most expensive possible way: it produces
+*confident* pixels, so the extractor reads clean text off a region where the label was
+never visible, and the resulting verdict is a false pass with evidence attached.
+
+So what happens instead is: recover detail in the near-saturated shoulder around a
+highlight, restore the blown core to exactly the pixels it arrived as, and publish a mask
+of it so per-field readability can mark whatever sits underneath Unreadable. The
+government warning under a flash reflection comes back Unreadable and the brand on the dry
+half of the label still comes back verified — TC-12.
 
 **Normalization is remedial, never cosmetic — and that is a correctness rule, not taste.**
 The government warning has a prominence requirement (WARN-5): a statement printed in pale
@@ -24,6 +37,11 @@ from api.models import ImageQuality
 from api.pipeline import deskew as deskew_mod
 from api.pipeline import quality as quality_mod
 
+#: Luminance at or above which a pixel is treated as blown — no detail survives, and none
+#: will be invented. The same level `quality.glare_score` counts, deliberately: the score
+#: that reports glare and the mask that acts on it have to mean the same thing.
+BLOWN_LEVEL = 250
+
 #: CLAHE tile grid. Small enough to lift a shadowed corner independently of a lit one,
 #: large enough that a tile still contains whole letters rather than parts of strokes.
 _CLAHE_TILES = (8, 8)
@@ -32,6 +50,14 @@ _CLAHE_TILES = (8, 8)
 #: to make the photograph look good. Above ~3 the noise in a dim phone photo is amplified
 #: into speckle that the blur measure then reads as detail.
 _CLAHE_CLIP_DIM = 2.0
+
+#: …and for glare recovery, which touches a narrower tonal range and needs less push.
+_CLAHE_CLIP_GLARE = 1.5
+
+#: Blown-out share of the frame below which glare recovery is not attempted. A stray
+#: specular pixel on a foil capsule is not glare, and running a local operator across the
+#: whole image to chase it changes every pixel for no gain.
+_GLARE_ENHANCE_FRACTION = 0.005
 
 
 @dataclass(frozen=True)
@@ -50,6 +76,8 @@ class Preprocessed:
     rotation_deg: float = 0.0
     perspective_applied: bool = False
     exposure_normalized: bool = False
+    glare_enhanced: bool = False
+    glare_fraction: float = 0.0
     notes: list[str] = field(default_factory=list)
 
     @property
@@ -58,6 +86,7 @@ class Preprocessed:
             self.rotation_deg != 0.0
             or self.perspective_applied
             or self.exposure_normalized
+            or self.glare_enhanced
         )
 
 
@@ -105,10 +134,40 @@ def needs_exposure_normalization(assessment: ImageQuality) -> bool:
     return assessment.exposure < 1.0
 
 
-def preprocess(image: np.ndarray, *, allow_perspective: bool = True) -> Preprocessed:
-    """The ordered pass: geometry, then exposure (BUILD.md §6 step 6).
+def glare_mask(image: np.ndarray) -> np.ndarray:
+    """Pixels that are blown out — where the label is, as far as anyone can tell, gone.
 
-    Geometry first because the photometric step is a local operator over tiles, and a
+    Dilated slightly, because the ring immediately around a specular highlight is
+    compressed to within a hair of saturation, and a letter stroke read out of it is a
+    guess dressed up as a reading.
+    """
+    blown = (_to_gray(image) >= BLOWN_LEVEL).astype(np.uint8) * 255
+    return cv2.dilate(blown, np.ones((5, 5), np.uint8), iterations=1)
+
+
+def blown_fraction(image: np.ndarray) -> float:
+    """Share of the frame with no recoverable detail left in it."""
+    gray = _to_gray(image)
+    return float((gray >= BLOWN_LEVEL).sum()) / gray.size
+
+
+def enhance_glare(image: np.ndarray) -> np.ndarray:
+    """Recover the shoulder around a highlight. Never fill the highlight itself.
+
+    The blown pixels are written back from the input afterwards, so this cannot invent
+    label content whatever the local operator does to their neighbourhood — a property
+    the tests assert directly on the pixels rather than infer from the code.
+    """
+    blown = _to_gray(image) >= BLOWN_LEVEL
+    enhanced = _apply_to_luminance(image, _CLAHE_CLIP_GLARE)
+    enhanced[blown] = image[blown]
+    return enhanced
+
+
+def preprocess(image: np.ndarray, *, allow_perspective: bool = True) -> Preprocessed:
+    """The ordered pass: geometry, then exposure, then glare (BUILD.md §6 step 6).
+
+    Geometry first because both photometric steps are local operators over tiles, and a
     tile that straddles the label edge and the desk it is lying on is measuring two
     different scenes. Rectifying first means the tiles see label.
     """
@@ -130,6 +189,18 @@ def preprocess(image: np.ndarray, *, allow_perspective: bool = True) -> Preproce
     else:
         notes.append("exposure left alone — the photograph is not underexposed")
 
+    fraction = blown_fraction(working)
+    glare_enhanced = False
+    if fraction >= _GLARE_ENHANCE_FRACTION:
+        working = enhance_glare(working)
+        glare_enhanced = True
+        notes.append(
+            f"recovered detail around glare covering {fraction:.1%} of the image; the "
+            f"blown area itself is untouched and nothing was painted into it"
+        )
+    else:
+        notes.append("no glare worth recovering from")
+
     return Preprocessed(
         image=working,
         quality_before=before,
@@ -137,5 +208,7 @@ def preprocess(image: np.ndarray, *, allow_perspective: bool = True) -> Preproce
         rotation_deg=geometry.rotation_deg,
         perspective_applied=geometry.perspective_applied,
         exposure_normalized=exposure_normalized,
+        glare_enhanced=glare_enhanced,
+        glare_fraction=round(fraction, 4),
         notes=notes,
     )
