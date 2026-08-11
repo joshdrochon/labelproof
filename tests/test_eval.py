@@ -1479,14 +1479,17 @@ class _Harness:
         return [ImageInput(index=i, data=b"x", role=r) for i, r in enumerate(roles)]
 
     def extract(self, request: ExtractionRequest) -> ExtractionResponse:
-        # A model that FAILS CLOSED where the rules engine currently fails open. These
-        # tests exercise the sweep's table, disqualification rule and recommendation; the
-        # pipeline's own LP-211 gap is asserted separately and would otherwise turn every
-        # simulated model into a false-pass disqualification for a reason unrelated to
-        # what is under test.
+        # A model that FAILS CLOSED where the rules engine currently fails open. Keyed on
+        # the defect rendered, not on a fixture name, so the local prominence stand-ins get
+        # the same treatment as tc06 — they exercise the same missing capability (LP-211).
+        # These tests are about the sweep's table, disqualification rule and
+        # recommendation; the pipeline's own gap is asserted separately and would otherwise
+        # turn every simulated model into a false-pass disqualification for a reason
+        # unrelated to what is under test.
         illegible = (
             {FieldName.GOVERNMENT_WARNING}
-            if self.spec.name in KNOWN_LIVE_FALSE_PASSES
+            if "prominence" in warning_defects(self.spec)
+            or self.spec.name in KNOWN_LIVE_FALSE_PASSES
             else set()
         )
         response = SpecBackedProvider(self.spec, illegible=illegible).extract(request)
@@ -1516,40 +1519,46 @@ def _run_sweep(
     return results
 
 
+#: One change per posture that renders exactly that defect and nothing else.
+POSTURE_DEFECTS: dict[str, dict[str, object]] = {
+    "header_not_all_caps": {"warning_header_case": "title"},
+    "header_not_bold": {"warning_header_bold": False},
+    "body_bold": {"warning_body_bold": True},
+    "text_altered": {"warning_text": "According to the Surgeon General, drink less."},
+    "prominence": {"warning_scale": 0.45, "warning_contrast": 0.35},
+    "warning_absent": {"include_warning": False},
+}
+
+
 def evidence_complete_specs() -> list[LabelSpec]:
-    """The catalog plus enough DISTINCT fixtures to satisfy the evidence gate.
+    """The catalog plus enough DISTINCT RENDERINGS to satisfy the evidence gate.
 
-    Two per posture, because that is what the gate now requires: one fixture cannot
-    distinguish "the model reads this posture" from "the model reads this one picture",
-    and re-sending the same PNG does not help.
+    `MIN_FIXTURES_PER_POSTURE` isolating renderings per posture, each genuinely different
+    in the warning region — varying `width` changes the rendered type size, so these are
+    distinct pixels rather than distinct filenames. Two specs differing only in `name`, or
+    only in `brand_name`, are one rendering as far as the warning is concerned, which is
+    what the posture is about.
 
-    These stay test-local. The catalog's real gap (`header_not_bold` has zero fixtures,
-    every other posture has one) is deliberately left alone — the fixtures that close it
-    belong to the warning agent, and the sweep is supposed to keep reporting the gap until
-    they land. These stand-ins exist so the ship rule itself can be tested on a set that
-    does have evidence.
+    These stay test-local. The catalog's real gaps are deliberately left alone — the
+    fixtures that close them belong to the warning agent, and the sweep is supposed to keep
+    reporting them until they land. These stand-ins exist so the ship rule itself can be
+    tested on a set that does have evidence.
     """
     base = CATALOG[0]
-    variants = [
-        ("header_not_bold_a", {"warning_header_bold": False}),
-        ("header_not_bold_b", {"warning_header_bold": False, "brand_name": "SECOND LABEL"}),
-        ("header_case_b", {"warning_header_case": "lower"}),
-        ("body_bold_b", {"warning_body_bold": True, "brand_name": "SECOND LABEL"}),
-        ("text_altered_b", {"warning_text": "According to the Surgeon General, drink less."}),
-        ("warning_absent_b", {"include_warning": False}),
-    ]
-    return [
-        *CATALOG,
-        *(
-            base.with_(
-                name=f"local_{name}",
-                expect={"government_warning": "mismatch"},
-                notes=f"Local stand-in giving the {name} posture a second distinct label.",
-                **changes,  # type: ignore[arg-type]
+    extra: list[LabelSpec] = []
+    for posture, changes in POSTURE_DEFECTS.items():
+        for index in range(sweep.MIN_FIXTURES_PER_POSTURE):
+            extra.append(
+                base.with_(
+                    name=f"local_{posture}_{index}",
+                    width=1000 + index * 20,
+                    brand_name=f"LOCAL {posture.upper()} {index}",
+                    expect={"government_warning": "mismatch"},
+                    notes=f"Local stand-in: isolating rendering {index} of {posture}.",
+                    **changes,
+                )
             )
-            for name, changes in variants
-        ),
-    ]
+    return [*CATALOG, *extra]
 
 
 def test_the_sweep_measures_accuracy_cost_and_latency_per_model() -> None:
@@ -1745,18 +1754,51 @@ def test_a_hundred_repeats_of_one_image_does_not_claim_a_small_blind_spot() -> N
     specs = [s for s in CATALOG if s.name == "tc04_bold_warning_body"]
     results = _run_sweep({"claude-opus-5": 1.0}, specs, repeat=100)
     text = sweep.render(results, specs)
-    assert "1 fixture(s) x 100 run(s)" in text
-    # The blind-spot figure is bounded by the fixture count, so it stays at 95%.
-    assert "up to 95% would go unseen" in text
+    assert "1 rendering(s) x 100 run(s)" in text
+    # Risk is bounded by the rendering count, so 100 re-sends move it not at all.
+    assert f"passes {sweep.false_blessing_risk(1):5.1%} of the time" in text
     assert "NO RECOMMENDATION" in text
 
 
-def test_the_report_prints_fixtures_and_runs_separately() -> None:
+def test_renaming_a_fixture_is_not_a_second_rendering() -> None:
+    """Two specs differing only in `name` render byte-identical PNGs."""
+    original = by_name("tc04_bold_warning_body")
+    twin = original.with_(name="tc04_twin")
+    assert sweep.warning_fingerprint(original) == sweep.warning_fingerprint(twin)
+    assert sweep.posture_coverage([original, twin])["body_bold"] == 1
+
+
+def test_relabelling_a_fixture_is_not_a_second_rendering_either() -> None:
+    """Different brand name, identical warning region — one sample of the posture."""
+    original = by_name("tc04_bold_warning_body")
+    relabelled = original.with_(name="tc04_relabelled", brand_name="A DIFFERENT BRAND")
+    assert sweep.warning_fingerprint(original) == sweep.warning_fingerprint(relabelled)
+    assert sweep.posture_coverage([original, relabelled])["body_bold"] == 1
+
+
+def test_a_genuinely_different_warning_rendering_does_count() -> None:
+    original = by_name("tc04_bold_warning_body")
+    bigger = original.with_(name="tc04_bigger", width=1200)
+    assert sweep.warning_fingerprint(original) != sweep.warning_fingerprint(bigger)
+    assert sweep.posture_coverage([original, bigger])["body_bold"] == 2
+
+
+def test_a_fixture_carrying_two_defects_is_evidence_for_neither() -> None:
+    """Catching either one yields the same verdict, so it isolates nothing."""
+    both = by_name("tc01_old_tom_clean").with_(
+        name="both", warning_body_bold=True, warning_header_case="title"
+    )
+    coverage = sweep.posture_coverage([both])
+    assert coverage["body_bold"] == 0
+    assert coverage["header_not_all_caps"] == 0
+
+
+def test_the_report_prints_renderings_and_runs_separately() -> None:
     """A single 'samples' figure cannot tell two labels from one label sent twice."""
     specs = evidence_complete_specs()
     text = sweep.render(_run_sweep({"claude-opus-5": 1.0}, specs, repeat=3), specs)
-    assert "fixture(s) x 3 run(s)" in text
-    assert "Blind-spot figures come from the fixture count alone" in text
+    assert "rendering(s) x 3 run(s)" in text
+    assert "Risk figures come from the rendering count alone" in text
 
 
 def test_too_few_runs_per_fixture_also_blocks_a_recommendation() -> None:
@@ -1783,7 +1825,30 @@ def test_a_single_sample_proves_almost_nothing_and_the_report_says_so() -> None:
     assert sweep.undetectable_error_rate(3) == pytest.approx(0.632, abs=0.01)
     assert sweep.undetectable_error_rate(30) < 0.10
     text = sweep.render(_run_sweep({"claude-opus-5": 1.0}, list(CATALOG)), list(CATALOG))
-    assert "would go unseen" in text
+    assert "misreader passes" in text
+
+
+def test_the_threshold_is_derived_from_a_stated_risk_tolerance() -> None:
+    """Not a magic number: solve (1 - rate) ** n <= tolerance."""
+    n = sweep.MIN_FIXTURES_PER_POSTURE
+    assert sweep.false_blessing_risk(n) <= sweep.MAX_FALSE_BLESSING_RISK
+    assert sweep.false_blessing_risk(n - 1) > sweep.MAX_FALSE_BLESSING_RISK
+    assert n == 6, "the measured 44% misread rate and a 5% tolerance give six"
+
+
+def test_ok_is_never_printed_next_to_an_unacceptable_risk() -> None:
+    """It used to mark a posture ok beside 'an error rate up to 78% would go unseen'."""
+    specs = evidence_complete_specs()
+    for line in sweep.evidence_section(specs, _run_sweep({"claude-opus-5": 1.0}, specs)):
+        if not line.strip().startswith("ok "):
+            continue
+        percent = float(line.rsplit("passes", 1)[1].split("%", 1)[0])
+        assert percent <= sweep.MAX_FALSE_BLESSING_RISK * 100, line
+
+
+def test_two_renderings_no_longer_earn_an_ok() -> None:
+    assert sweep.false_blessing_risk(2) > sweep.MAX_FALSE_BLESSING_RISK
+    assert sweep.false_blessing_risk(2) == pytest.approx(0.31, abs=0.01)
 
 
 def test_repeat_actually_runs_each_label_more_than_once() -> None:

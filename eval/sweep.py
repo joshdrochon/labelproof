@@ -31,6 +31,7 @@ than fails — an offline machine has not regressed.
 
 from __future__ import annotations
 
+import math
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
@@ -42,6 +43,7 @@ from api.verify import verify
 from eval.outcomes import ACCURACY_FLOOR, Report, expected_verdicts, outcome_for
 from eval.pricing import DEFAULT_SWEEP, estimate_usd, price_for
 from eval.report import ascii_safe
+from fixtures.generator.catalog import warning_defects
 from fixtures.generator.spec import LabelSpec
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -62,27 +64,49 @@ P95_BUDGET_S = 5.0
 #: sample and zero samples.
 #:
 #: A model cannot be recommended on a posture that was never shown to it.
-WARNING_POSTURES: dict[str, Callable[[LabelSpec], bool]] = {
-    "header_not_all_caps": lambda s: s.include_warning and s.warning_header_case != "upper",
-    "header_not_bold": lambda s: s.include_warning and not s.warning_header_bold,
-    "body_bold": lambda s: s.include_warning and s.warning_body_bold,
-    "text_altered": lambda s: s.include_warning and s.warning_text is not None,
-    "warning_absent": lambda s: not s.include_warning,
+#: Posture name -> the defect set a fixture must render to be evidence FOR that posture.
+#:
+#: Exact sets, not predicates, because a fixture carrying two defects is not evidence for
+#: either. A label that is both body-bold and title-case comes back non-passing if the
+#: model catches *either* one, so it cannot show that body-bold specifically was read. Only
+#: a fixture that isolates a posture can testify about it.
+WARNING_POSTURES: dict[str, frozenset[str]] = {
+    "header_not_all_caps": frozenset({"header_not_all_caps"}),
+    "header_not_bold": frozenset({"header_not_bold"}),
+    "body_bold": frozenset({"body_bold"}),
+    "text_altered": frozenset({"text_altered"}),
+    "prominence": frozenset({"prominence"}),
+    "warning_absent": frozenset({"absent"}),
 }
 
-#: DISTINCT FIXTURES per posture below which the sweep declines to name a winner.
-#:
-#: Distinct fixtures, not reads. The first version of this gate multiplied the fixture
-#: count by `--repeat`, so `--repeat 3` — the default, and equal to the threshold — cleared
-#: it on its own. At `--repeat 100` the artifact read "body_bold 100 sample(s), an error
-#: rate up to 3% would go unseen" from a single PNG. Re-sending one image is not an
-#: independent read: a model that misreads a particular rendering misreads it every time,
-#: and the reviewer's re-simulation put the deterministic case at 53% of runs still
-#: shipping Haiku.
-#:
-#: Two is the smallest number that can distinguish "the model reads this posture" from
-#: "the model reads this one picture".
-MIN_FIXTURES_PER_POSTURE = 2
+#: Largest chance we accept of this sweep blessing a model that misreads a posture.
+MAX_FALSE_BLESSING_RISK = 0.05
+
+#: Worst per-image misread rate to design against, from the measured Haiku 4.5 figures
+#: (30% body-bold, 20% header-bold) blended to the ~44% worst case used in the round-2
+#: re-simulation. Always in the false-pass direction, never abstaining.
+ASSUMED_MISREAD_RATE = 0.44
+
+def _required_fixtures() -> int:
+    """How many distinct renderings a posture needs before a blessing means anything.
+
+    Derived, not chosen. A model that misreads a posture at `ASSUMED_MISREAD_RATE` slips
+    through n independent renderings with probability `(1 - rate) ** n`; solve for that
+    falling under `MAX_FALSE_BLESSING_RISK`. At the measured 44% that is six.
+
+    The previous value of two was below the honesty bar this module prints: it marked a
+    posture "ok" next to "an error rate up to 78% would go unseen", and a re-simulation
+    put a two-fixture set at ~30% of runs still blessing Haiku under the realistic
+    deterministic-misread model. Two distinguishes "reads this posture" from "reads this
+    picture"; it does not support a recommendation.
+    """
+    return math.ceil(
+        math.log(MAX_FALSE_BLESSING_RISK) / math.log(1.0 - ASSUMED_MISREAD_RATE)
+    )
+
+
+#: DISTINCT renderings per posture below which the sweep declines to name a winner.
+MIN_FIXTURES_PER_POSTURE = _required_fixtures()
 
 #: Runs per label. Widens the confidence claim WITHIN a fixture — it catches a model that
 #: is right on Tuesday and wrong on Wednesday — and never substitutes for a second fixture.
@@ -122,16 +146,67 @@ class LabelRun:
     usd: float
 
 
+def warning_fingerprint(spec: LabelSpec) -> tuple[object, ...]:
+    """What this spec actually DRAWS in the warning region.
+
+    Distinctness was by fixture NAME, which meant two specs differing only in `name`
+    rendered byte-identical PNGs and counted as two — and two differing only in
+    `brand_name` were two files but one warning rendering, which is the thing the posture
+    is about. This keys on the pixels that matter instead.
+
+    When the warning is absent there is no region to key on, so the whole label is the
+    fingerprint: noticing a missing warning depends on the rest of the label, not on a
+    blank space.
+    """
+    if not spec.include_warning:
+        return (
+            "absent",
+            spec.brand_name,
+            spec.class_type,
+            spec.producer,
+            spec.face,
+            spec.width,
+            spec.height,
+            spec.background,
+        )
+    return (
+        spec.rendered_warning(),
+        spec.warning_header_bold,
+        spec.warning_body_bold,
+        round(spec.warning_scale, 4),
+        round(spec.warning_contrast, 4),
+        spec.width,
+        spec.background,
+    )
+
+
 def posture_coverage(specs: Sequence[LabelSpec]) -> dict[str, int]:
-    """DISTINCT fixtures exercising each warning posture.
+    """DISTINCT renderings that ISOLATE each warning posture.
+
+    Two restrictions, each closing a way to satisfy this cheaply. Distinct renderings, not
+    fixture names, because re-labelling one image is not a second sample. And only fixtures
+    whose defect set is exactly the posture count, because a label carrying two defects
+    comes back non-passing if the model catches either one and therefore says nothing about
+    which.
 
     Deliberately takes no `repeat`: re-sending the same PNG produces no new evidence about
     the posture, only about run-to-run stability of one rendering.
     """
     return {
-        posture: len({spec.name for spec in specs if matches(spec)})
-        for posture, matches in WARNING_POSTURES.items()
+        posture: len(
+            {
+                warning_fingerprint(spec)
+                for spec in specs
+                if warning_defects(spec) == defects
+            }
+        )
+        for posture, defects in WARNING_POSTURES.items()
     }
+
+
+def false_blessing_risk(fixtures: int) -> float:
+    """Chance a model misreading this posture at the assumed rate still comes back clean."""
+    return (1.0 - ASSUMED_MISREAD_RATE) ** max(fixtures, 0)
 
 
 def undetectable_error_rate(fixtures: int, confidence: float = 0.95) -> float:
@@ -159,10 +234,11 @@ def evidence_problems(specs: Sequence[LabelSpec], repeat: int = 1) -> list[str]:
             )
         elif fixtures < MIN_FIXTURES_PER_POSTURE:
             problems.append(
-                f"{posture}: {fixtures} distinct fixture(s), need "
-                f"{MIN_FIXTURES_PER_POSTURE}. An error rate up to "
-                f"{undetectable_error_rate(fixtures):.0%} would go unseen, and repeats "
-                f"cannot close that — they re-read the same rendering"
+                f"{posture}: {fixtures} distinct rendering(s), need "
+                f"{MIN_FIXTURES_PER_POSTURE}. A model misreading this posture "
+                f"{ASSUMED_MISREAD_RATE:.0%} of the time is blessed "
+                f"{false_blessing_risk(fixtures):.0%} of the time, and repeats cannot "
+                f"close that — they re-read the same rendering"
             )
     if repeat < MIN_RUNS_PER_FIXTURE:
         problems.append(
@@ -486,19 +562,26 @@ def evidence_section(
     coverage = posture_coverage(specs)
     out = [
         "",
-        "Warning-posture evidence. Distinct fixtures bound what this sweep can claim;",
-        "runs only widen the claim within a fixture. Repeats are not extra evidence:",
+        "Warning-posture evidence. Distinct renderings bound what this sweep can claim;",
+        "runs only widen the claim within a rendering. Repeats are not extra evidence:",
     ]
     for posture, fixtures in sorted(coverage.items()):
-        mark = "ok " if fixtures >= MIN_FIXTURES_PER_POSTURE else "!! "
-        blind = undetectable_error_rate(fixtures)
+        risk = false_blessing_risk(fixtures)
+        # "ok" is earned by clearing the risk tolerance, not by clearing a count. It used
+        # to sit next to "an error rate up to 78% would go unseen".
+        mark = "ok " if risk <= MAX_FALSE_BLESSING_RISK else "!! "
         out.append(
-            f"  {mark}{posture:22s}{fixtures:2d} fixture(s) x {repeat} run(s)   "
-            f"an error rate up to {blind:.0%} would go unseen"
+            f"  {mark}{posture:22s}{fixtures:2d} rendering(s) x {repeat} run(s)   "
+            f"a {ASSUMED_MISREAD_RATE:.0%} misreader passes {risk:5.1%} of the time"
         )
     out.append(
-        f"  Blind-spot figures come from the fixture count alone "
-        f"(need {MIN_FIXTURES_PER_POSTURE}, {MIN_RUNS_PER_FIXTURE} runs each)."
+        f"  Risk figures come from the rendering count alone: need "
+        f"{MIN_FIXTURES_PER_POSTURE} isolating rendering(s) per posture and "
+        f"{MIN_RUNS_PER_FIXTURE} runs each"
+    )
+    out.append(
+        f"  to hold false blessing under {MAX_FALSE_BLESSING_RISK:.0%} against a "
+        f"{ASSUMED_MISREAD_RATE:.0%} misreader."
     )
     return out
 

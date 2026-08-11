@@ -187,25 +187,39 @@ and got `SHIPS: claude-haiku-4-5` in 277 of 400 runs — a coin flip on the deci
 instrument exists to make. Two changes:
 
 - The sweep names no winner unless every warning posture (`header_not_all_caps`,
-  `header_not_bold`, `body_bold`, `text_altered`, `warning_absent`) is exercised by at
-  least `MIN_FIXTURES_PER_POSTURE` **distinct fixtures**.
+  `header_not_bold`, `body_bold`, `text_altered`, `prominence`, `warning_absent`) is
+  exercised by at least `MIN_FIXTURES_PER_POSTURE` **distinct renderings that isolate it**.
 - `--repeat N` (default `MIN_RUNS_PER_FIXTURE` = 3) runs every label N times. A model's
   warning reading is stochastic; one pass cannot tell a reliable model from a lucky one.
 
-**Repeats are not evidence, and the gate no longer treats them as such.** The first
-version multiplied the fixture count by `--repeat`, so the default cleared its own
-threshold: at `--repeat 100` the artifact read `body_bold 100 sample(s) — an error rate up
-to 3% would go unseen`, from a single PNG. Re-sending one image is the opposite of an
-independent read — a model that misreads a rendering misreads it every time — and a
-re-simulation put that deterministic case at 53% of runs still shipping Haiku. The
-blind-spot figure is now computed from distinct fixtures alone, and the report prints both
-numbers (`2 fixture(s) x 3 run(s)`) so a reader can tell two labels from one label sent
-twice.
+Three things count as evidence and three things do not.
 
-On this branch `header_not_bold` has **zero** fixtures and every other posture has one, so
-the sweep reports `NO RECOMMENDATION` rather than blessing a tier. Closing it needs a
-second distinct fixture per posture; `tc03b_non_bold_warning_header` on `wave/warning` is
-the first of them.
+**Repeats are not evidence.** The first version multiplied the fixture count by `--repeat`,
+so the default cleared its own threshold: at `--repeat 100` the artifact read
+`body_bold 100 sample(s) — an error rate up to 3% would go unseen`, from a single PNG.
+Re-sending one image is the opposite of an independent read.
+
+**A rename or a relabel is not a second rendering.** Distinctness was keyed on the fixture
+*name*, so two specs differing only in `name` rendered byte-identical PNGs and counted as
+two — and two differing only in `brand_name` were two files but one warning region, which
+is the thing the posture is about. It now keys on `warning_fingerprint`: the rendered
+statement, its weights, scale, contrast and type size.
+
+**A fixture carrying two defects is evidence for neither.** A label that is both body-bold
+and title-case comes back non-passing if the model catches *either*, so it cannot show that
+body-bold specifically was read. Only isolating renderings count.
+
+**The threshold is derived, not chosen.** `MIN_FIXTURES_PER_POSTURE` solves
+`(1 - ASSUMED_MISREAD_RATE) ** n <= MAX_FALSE_BLESSING_RISK` — at the measured 44% misread
+rate and a 5% tolerance, six. It was two, which marked a posture `ok` next to *"an error
+rate up to 78% would go unseen"* and left a minimum-compliant set blessing Haiku in ~30% of
+simulated runs. `ok` is now earned by clearing the risk tolerance, never by clearing a
+count, and each line states plainly how often a 44% misreader would pass.
+
+On this branch every posture has **one** isolating rendering and `header_not_bold` has
+**none**, so the sweep reports `NO RECOMMENDATION` and names each gap. Closing it needs six
+distinct renderings per posture — more than `tc03b_non_bold_warning_header` on
+`wave/warning` alone provides, and the report enumerates exactly what is missing.
 
 The warn-FP column reads `false passes / violation rows checked`, because `0` alone reads
 identically whether it was 0-of-4 or 0-of-1.
