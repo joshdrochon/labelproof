@@ -49,6 +49,21 @@ def _variables_the_example_documents() -> set[str]:
     return set(re.findall(r"^([A-Z_]+)=", ENV_EXAMPLE.read_text(), re.M))
 
 
+def _documented_value(variable: str) -> str | None:
+    """The value `.env.example` gives one variable, anchored to its own line.
+
+    Anchored deliberately. A substring search for `"=4"` is satisfied by
+    `LABELPROOF_PROVIDER_TIMEOUT_MS=4000`, so an unanchored assertion about
+    `LABELPROOF_MAX_IMAGES` passes whatever that variable is actually set to.
+    Returns `None` when the variable is documented with an empty value, which this file
+    treats as a deliberate "derive it" rather than as a missing number.
+    """
+    match = re.search(rf"^{re.escape(variable)}=(.*)$", ENV_EXAMPLE.read_text(), re.M)
+    if match is None:
+        return None
+    return match.group(1).strip() or None
+
+
 # --------------------------------------------------------------------------------------
 # The example and the code agree
 # --------------------------------------------------------------------------------------
@@ -224,32 +239,67 @@ def test_anything_else_means_live(monkeypatch: pytest.MonkeyPatch, value: str) -
 
 
 @pytest.mark.parametrize(
-    ("attribute", "expected"),
+    ("attribute", "variable"),
     [
-        ("request_budget_ms", 5000),
-        ("provider_timeout_ms", 4000),
-        ("max_images", 4),
-        ("max_pdf_pages", 5),
-        ("target_long_edge_px", 2576),
-        ("retention_hours", 24),
-        ("rate_limit_per_minute", 30),
+        ("max_images", "LABELPROOF_MAX_IMAGES"),
+        ("max_pdf_pages", "LABELPROOF_MAX_PDF_PAGES"),
+        ("max_image_bytes", "LABELPROOF_MAX_IMAGE_BYTES"),
+        ("target_long_edge_px", "LABELPROOF_TARGET_LONG_EDGE_PX"),
+        ("retention_hours", "LABELPROOF_RETENTION_HOURS"),
+        ("rate_limit_per_minute", "LABELPROOF_RATE_LIMIT_PER_MINUTE"),
+        ("adjudication_reserve_ms", "LABELPROOF_ADJUDICATION_RESERVE_MS"),
     ],
 )
 def test_the_dataclass_default_matches_the_documented_one(
-    attribute: str, expected: int
+    attribute: str, variable: str
 ) -> None:
     """The example file quotes numbers a reviewer will hold the product to.
 
-    PERF-1's 5s budget, SEC-2's 24h retention, SEC-9's rate limit. A default that
+    SEC-2's 24h retention, SEC-9's rate limit, the 1568px vision floor. A default that
     drifted from the documented one would make the README wrong about the thing it is
     most likely to be checked on.
+
+    The expected value is read out of `.env.example`, anchored to its own line. An
+    earlier version hard-coded the number and asserted `f"={expected}" in text` — an
+    unanchored substring, so the check for `max_images` (4) was satisfied by
+    `LABELPROOF_PROVIDER_TIMEOUT_MS=4000` on an unrelated line. Setting
+    `LABELPROOF_MAX_IMAGES=99` passed it. Reading the value instead means the assertion
+    has exactly one source and cannot be satisfied by a coincidence somewhere else in
+    the file.
     """
-    assert getattr(Config(), attribute) == expected
-    assert f"={expected}" in ENV_EXAMPLE.read_text()
+    documented = _documented_value(variable)
+    assert documented is not None, f"{variable} has no value in .env.example"
+    assert getattr(Config(), attribute) == int(documented)
+
+
+@pytest.mark.parametrize(
+    "variable", ["LABELPROOF_REQUEST_BUDGET_MS", "LABELPROOF_PROVIDER_TIMEOUT_MS"]
+)
+def test_the_budget_variables_are_documented_as_derived_rather_than_as_numbers(
+    variable: str,
+) -> None:
+    """The two timing knobs are measured from the model, and the example says so.
+
+    They used to carry numbers here, and setting them by hand is how the service was
+    once configured to fail every request — a 4000 ms timeout against a model whose
+    calls take ten seconds. An example file that still quoted a number would be
+    inviting exactly that, so "documented with an empty value" is the contract, and a
+    number reappearing is the regression.
+    """
+    assert variable in _variables_the_example_documents()
+    assert _documented_value(variable) is None, (
+        f"{variable} quotes a number again; empty means 'derive from the model'"
+    )
 
 
 def test_the_default_configuration_satisfies_its_own_invariants() -> None:
-    """The defaults have to be a valid configuration, or a bare `docker run` fails."""
+    """The defaults have to be a valid configuration, or a bare `docker run` fails.
+
+    Asserted as relationships rather than as figures: the budget is derived from
+    measured model latency, so pinning it to a number would make a legitimate model
+    change look like a regression. What must hold whatever the numbers are is that the
+    provider call fits inside the request, with room left to adjudicate.
+    """
     config = Config()
     assert config.provider_timeout_ms < config.request_budget_ms
     assert config.target_long_edge_px >= 1568

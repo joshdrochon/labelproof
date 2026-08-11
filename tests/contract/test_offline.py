@@ -17,7 +17,9 @@ the ASGI app in-process, reading fixtures off disk, and using SQLite.
 
 from __future__ import annotations
 
+import re
 import socket
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -168,28 +170,34 @@ def test_the_live_adapter_refuses_to_build_a_real_client_without_a_key() -> None
         AnthropicVisionProvider(Config(anthropic_api_key=""))
 
 
-def test_no_test_module_hard_codes_a_plausible_api_key() -> None:
+#: A key that could actually authenticate: the prefix plus enough trailing material to
+#: be real. Assembled at runtime so this file does not contain the literal it hunts for.
+#:
+#: The length bound is the whole point. Matching the bare prefix flags `sk-ant-test`,
+#: which several suites use as an obviously-inert placeholder in `monkeypatch.setenv` —
+#: and a check that fires on every placeholder gets an exemption list, then gets
+#: disabled. What must never appear is a string long enough to be a credential.
+_KEY_PATTERN = re.compile("sk-" + r"ant-[A-Za-z0-9_-]{24,}")
+
+
+def test_no_test_module_hard_codes_a_usable_api_key() -> None:
     """A key literal in a test file is a key that reaches CI logs and git history.
 
     Test doubles need no credential — every adapter test injects a client instead. A
-    string that looks like a key is either a real one somebody pasted or a fake one
+    string long enough to authenticate is either one somebody pasted or a fake one
     teaching the next person to paste a real one.
     """
-    from pathlib import Path
-
-    # Assembled at runtime so this file does not contain the literal it searches for.
-    marker = "sk-" + "ant-"
     tests = Path(__file__).resolve().parents[1]
     offenders = [
         f"{module.relative_to(tests)}:{number}"
         for module in tests.rglob("test_*.py")
         for number, line in enumerate(module.read_text().splitlines(), start=1)
-        if marker in line
+        if _KEY_PATTERN.search(line)
     ]
     assert offenders == [], offenders
 
 
-def test_no_real_api_key_is_present_in_the_environment() -> None:
+def test_no_usable_api_key_is_present_in_the_environment() -> None:
     """A key in the environment is how an accidental live call becomes an expensive one.
 
     Blocked sockets make it harmless, but a key present at all means the suite is one
@@ -198,5 +206,17 @@ def test_no_real_api_key_is_present_in_the_environment() -> None:
     """
     import os
 
-    key = os.environ.get("ANTHROPIC_API_KEY", "")
-    assert not key.startswith("sk-" + "ant-"), "a real API key is set while the suite runs"
+    assert not _KEY_PATTERN.match(os.environ.get("ANTHROPIC_API_KEY", "")), (
+        "a usable API key is set while the suite runs"
+    )
+
+
+def test_the_key_check_would_catch_a_real_key() -> None:
+    """The pattern has teeth.
+
+    A length-bounded check is one edit away from being a check that matches nothing.
+    Both directions are asserted here so that loosening it to accept placeholders
+    cannot quietly loosen it to accept credentials.
+    """
+    assert _KEY_PATTERN.search("sk-" + "ant-api03-" + "A" * 90)
+    assert not _KEY_PATTERN.search("sk-" + "ant-test")

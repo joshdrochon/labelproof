@@ -158,6 +158,10 @@ def test_the_request_carries_only_parameters_the_api_accepts(
     permitted = {
         "model", "max_tokens", "thinking", "output_config", "system", "messages",
         "tools", "tool_choice", "stop_sequences", "metadata", "stream",
+        # Data residency (NET-4 / SEC-8). A top-level Messages API parameter — it is
+        # *not* nested inside `output_config`, and putting it there would be accepted
+        # by the SDK and ignored by the API.
+        "inference_geo",
     }
     assert set(captured.kwargs) <= permitted, sorted(set(captured.kwargs) - permitted)
 
