@@ -62,6 +62,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from api import logging as applog
+from api.config import Config
 
 # --------------------------------------------------------------------------------------
 # Configuration
@@ -106,32 +107,32 @@ def _int(name: str, default: int) -> int:
 
 @dataclass
 class Settings:
+    """Keep-warm's own knobs, plus the app's `Config` carried whole.
+
+    The `Config` is held as an object rather than unpacked into `model`, `effort` and
+    `api_key` fields. Copying fields across is how a parameter gets left behind: each one
+    copied here has to be remembered again the next time the adapter grows a new one, and
+    that is precisely how `inference_geo` was missed.
+    """
+
     enabled: bool = False
     interval_s: int = DEFAULT_INTERVAL_S
     base_url: str = "http://127.0.0.1:8080"
     warm_cache: bool = True
-    api_key: str = ""
-    model: str = "claude-opus-5"
-    effort: str = "low"
+    config: Config = field(default_factory=Config)
 
     @classmethod
     def from_env(cls) -> Settings:
         port = os.environ.get("PORT", "8080")
         interval = _int("LABELPROOF_KEEPWARM_INTERVAL_S", DEFAULT_INTERVAL_S)
-        # The model and effort come from the app's own Config so the warm request cannot
-        # drift from the real one by reading a different default.
-        from api.config import Config
-
-        config = Config.from_env()
         return cls(
             enabled=_truthy("LABELPROOF_KEEPWARM"),
             # Clamped, not just defaulted — see MAX_INTERVAL_S.
             interval_s=max(30, min(interval, MAX_INTERVAL_S)),
             base_url=os.environ.get("LABELPROOF_KEEPWARM_URL", f"http://127.0.0.1:{port}"),
             warm_cache=_truthy("LABELPROOF_KEEPWARM_CACHE", default=True),
-            api_key=config.anthropic_api_key,
-            model=config.extraction_model,
-            effort=config.effort,
+            # The app's own configuration, not a second reading of the same environment.
+            config=Config.from_env(),
         )
 
 
@@ -216,33 +217,35 @@ def _error_code(body: dict[str, Any]) -> str:
 # --------------------------------------------------------------------------------------
 
 
-def cache_parameters(model: str, effort: str) -> dict[str, Any]:
+def cache_parameters(config: Config) -> dict[str, Any]:
     """The request parameters that determine which cache entry is written or read.
 
     This mirrors `AnthropicVisionProvider._one_call` exactly, and the mirroring is the
     entire correctness property. Prompt caching keys on the rendered prefix, and the
-    prefix is not just `system`:
+    prefix is emphatically not just `system`:
 
-    - `output_config.format` carries the extraction JSON schema, which adds ~2.3k tokens
-      to the prefix. A warm request without it writes a ~2.1k-token entry; the real
-      request needs a ~4.4k-token entry. Different objects.
-    - On models that support them, `thinking` and `effort` render ahead of `system` and
-      invalidate the system tier, so omitting them writes a third distinct entry again.
+    - `output_config.format` carries the extraction JSON schema, ~2.3k tokens of prefix.
+    - `thinking` and `effort`, on models that accept them, render ahead of `system`.
+    - **`inference_geo` partitions the cache.** Two requests with byte-identical prompts
+      and different geographies address different entries — measured in both directions
+      on a fresh key, a request *without* it writes a fresh entry immediately after the
+      same prefix was read successfully *with* it.
 
-    The first version of this warmer omitted all three, on a reading of the caching rules
-    that was correct about `system` and wrong about everything ahead of it. Measured
-    against the live API it wrote 2,067 tokens, read back its own 2,067 tokens, logged a
-    healthy cache forever, and the real request still paid a full 4,351-token write every
-    time. Roughly $4.70/month for nothing, with an honesty check that confirmed it was
-    working — the worst of the available outcomes, because the reassurance was the bug.
+    This function has now shipped wrong twice, the same way both times: a parameter was
+    added to the real request and not here, so the warmer wrote an entry only it ever
+    read. The first time the numbers gave it away — 2,067 tokens warmed against the 4,351
+    the real call needed. The second time (`inference_geo`) both sides wrote 4,351, and
+    the log signature of "working" and "broken" was byte-identical.
 
-    Every value here comes from the adapter rather than being restated. `SYSTEM_BLOCKS`
-    and `EXTRACTION_SCHEMA` are imported, and thinking/effort follow the same
-    `supports_thinking_and_effort` gate, so a change in the adapter changes the warm
-    request in the same commit.
+    So the defence is structural rather than attentive. Everything comes from the `Config`
+    the app itself runs on and from the adapter's own module constants; nothing is
+    restated. `tests/test_keepwarm.py` then takes a **set difference** against the kwargs
+    the adapter really sends, so a parameter added to `_one_call` and forgotten here fails
+    the build instead of quietly costing money.
 
-    `messages` and `max_tokens` are deliberately NOT here: they sit after the cache
-    breakpoint on the last system block, so they cannot affect which entry is used.
+    `messages` and `max_tokens` are deliberately absent: they sit after the cache
+    breakpoint on the last system block, so they cannot select a different entry. They are
+    the only two exempt, and the test names them explicitly for that reason.
     """
     from api.provider.anthropic_adapter import (
         EXTRACTION_SCHEMA,
@@ -250,6 +253,7 @@ def cache_parameters(model: str, effort: str) -> dict[str, Any]:
         supports_thinking_and_effort,
     )
 
+    model = config.extraction_model
     output_config: dict[str, Any] = {
         "format": {"type": "json_schema", "schema": EXTRACTION_SCHEMA}
     }
@@ -257,9 +261,12 @@ def cache_parameters(model: str, effort: str) -> dict[str, Any]:
         "model": model,
         "output_config": output_config,
         "system": SYSTEM_BLOCKS,
+        "inference_geo": config.inference_geo,
+        # Cache-partitioning, and a compliance property besides — the warm entry has to
+        # live in the same geography as the request that will read it.
     }
     if supports_thinking_and_effort(model):
-        output_config["effort"] = effort
+        output_config["effort"] = config.effort
         parameters["thinking"] = {"type": "adaptive"}
     return parameters
 
@@ -281,9 +288,7 @@ class CacheWarmer:
     asserting the two parameter sets are equal rather than a comment asserting it.
     """
 
-    model: str
-    api_key: str
-    effort: str = "low"
+    config: Config
     _client: Any = field(default=None, repr=False)
     _miss_streak: int = 0
     _ever_read: bool = False
@@ -295,14 +300,16 @@ class CacheWarmer:
             # `max_retries=0`: a warm ping that fails is retried on the next tick, four
             # minutes from now. Silent SDK backoff inside a warm-up call buys nothing and
             # hides the failure from the logs.
-            self._client = anthropic.Anthropic(api_key=self.api_key, max_retries=0)
+            self._client = anthropic.Anthropic(
+                api_key=self.config.anthropic_api_key, max_retries=0
+            )
         return self._client
 
     def warm(self) -> bool:
         started = time.perf_counter()
         try:
             message = self.client().with_options(timeout=WARM_TIMEOUT_S).messages.create(
-                **cache_parameters(self.model, self.effort),
+                **cache_parameters(self.config),
                 # Not part of the cached prefix, and not shared with the real request.
                 # 1 rather than 0: `max_tokens: 0` is rejected outright when a response
                 # format is set, and the format is one of the things that has to match.
@@ -313,7 +320,7 @@ class CacheWarmer:
             applog.warn(
                 "keepwarm_cache_failed",
                 provider="anthropic",
-                model=self.model,
+                model=self.config.extraction_model,
                 reason_code=type(exc).__name__,
                 duration_ms=int((time.perf_counter() - started) * 1000),
             )
@@ -327,7 +334,7 @@ class CacheWarmer:
         applog.log(
             "keepwarm_cache",
             provider="anthropic",
-            model=self.model,
+            model=self.config.extraction_model,
             duration_ms=int((time.perf_counter() - started) * 1000),
             cache_read_tokens=read,
             input_tokens=uncached,
@@ -362,7 +369,7 @@ class CacheWarmer:
             applog.warn(
                 "keepwarm_cache_not_engaging",
                 provider="anthropic",
-                model=self.model,
+                model=self.config.extraction_model,
                 count=self._miss_streak,
                 reason_code=(
                     "prefix_below_model_minimum" if not self._ever_read else "cache_evicted"
@@ -385,16 +392,14 @@ def run(settings: Settings, *, ticks: int | None = None, sleep: Any = time.sleep
     """
     applog.log(
         "keepwarm_started",
-        model=settings.model,
+        model=settings.config.extraction_model,
         duration_ms=settings.interval_s * 1000,
-        ok=settings.warm_cache and bool(settings.api_key),
+        ok=settings.warm_cache and bool(settings.config.anthropic_api_key),
     )
 
     warmer: CacheWarmer | None = None
-    if settings.warm_cache and settings.api_key:
-        warmer = CacheWarmer(
-            model=settings.model, api_key=settings.api_key, effort=settings.effort
-        )
+    if settings.warm_cache and settings.config.anthropic_api_key:
+        warmer = CacheWarmer(config=settings.config)
     elif settings.warm_cache:
         # No key means the deployment is already broken in a way `/ready` reports. Say it
         # once at startup rather than once every four minutes forever.

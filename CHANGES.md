@@ -209,10 +209,23 @@ produced the numbers.
    and 1,602 on Haiku 4.5, against minimum cacheable prefixes of 512 and 4,096. So on
    Opus 5 it caches comfortably, and Haiku 4.5 is the model where it would not. An
    earlier version of this note had that comparison backwards and read as though the
-   cache were broken today; it is not. The real defect was that the pre-warm was building
-   a *different* request than the extractor, so it warmed an entry only it ever read —
-   fixed, and now asserted by `tests/test_keepwarm.py`. `keepwarm_cache_not_engaging` in
-   the logs is how you find out if this changes.
+   cache were broken today; it is not. `keepwarm_cache_not_engaging` in the logs is how
+   you find out if this changes.
+
+   **The pre-warm has to send the same request the extractor does, and this has been got
+   wrong twice.** Anything rendered at or before the cache breakpoint selects the entry:
+   the response-format schema, `thinking`, `effort`, and `inference_geo` — which
+   *partitions* the cache, so the same prompt in two geographies is two entries. Miss one
+   and the warmer writes an entry only it ever reads, while the logs say `cache_read`
+   forever. The second time this happened both requests wrote 4,351 tokens, so the log
+   signature of working and broken was byte-identical; the numbers will not save you.
+
+   `scripts/keepwarm.py:cache_parameters` therefore builds from the app's own `Config`
+   and the adapter's own constants, restating nothing, and
+   `tests/test_keepwarm.py` takes a **set difference** against the kwargs the adapter
+   really sends. Add a parameter to `_one_call` and forget the warmer and the build
+   fails. The earlier version of that test iterated a hand-written list of keys and
+   could not fail — which is how the second miss shipped.
 2. **The latency budget is pinned to the configured model** in `fly.toml`
    (`LABELPROOF_PROVIDER_TIMEOUT_MS` / `LABELPROOF_REQUEST_BUDGET_MS`). Change the model
    and these have to move with it — `scripts/smoke.sh` fails loudly if the budget is

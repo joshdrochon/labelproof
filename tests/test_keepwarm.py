@@ -21,6 +21,7 @@ from typing import Any
 import pytest
 
 from api import logging as lp_logging
+from api.config import Config
 from scripts import keepwarm
 
 
@@ -154,7 +155,7 @@ def test_repeated_cache_absence_is_reported(_capture: io.StringIO) -> None:
     The usual cause is a system prompt shorter than the model's minimum cacheable size —
     a threshold that varies by model and produces no error, just a silent full-price bill.
     """
-    warmer = keepwarm.CacheWarmer(model="test-model", api_key="k")
+    warmer = keepwarm.CacheWarmer(config=Config(anthropic_api_key="k"))
 
     for _ in range(keepwarm.MISS_STREAK_BEFORE_WARNING):
         warmer._note(read=0, written=0)
@@ -166,7 +167,7 @@ def test_repeated_cache_absence_is_reported(_capture: io.StringIO) -> None:
 
 
 def test_a_successful_read_clears_the_streak(_capture: io.StringIO) -> None:
-    warmer = keepwarm.CacheWarmer(model="test-model", api_key="k")
+    warmer = keepwarm.CacheWarmer(config=Config(anthropic_api_key="k"))
 
     warmer._note(read=0, written=0)
     warmer._note(read=0, written=2000)  # first write after a TTL lapse — expected
@@ -179,7 +180,7 @@ def test_a_successful_read_clears_the_streak(_capture: io.StringIO) -> None:
 def test_eviction_is_distinguished_from_never_caching(_capture: io.StringIO) -> None:
     """Once a read has been seen, a later run of misses is eviction, not a broken prefix.
     Different diagnosis, different fix — the log should not conflate them."""
-    warmer = keepwarm.CacheWarmer(model="test-model", api_key="k")
+    warmer = keepwarm.CacheWarmer(config=Config(anthropic_api_key="k"))
     warmer._note(read=2000, written=0)
 
     for _ in range(keepwarm.MISS_STREAK_BEFORE_WARNING):
@@ -234,11 +235,39 @@ def test_the_warm_request_targets_the_same_cache_entry_as_a_real_extraction() ->
 
     assert captured, "the adapter did not issue a request; the capture harness is stale"
 
-    warm = keepwarm.cache_parameters(config.extraction_model, config.effort)
+    warm = keepwarm.cache_parameters(config)
 
-    # Everything that renders at or before the cache breakpoint must match exactly.
-    for key in ("model", "system", "output_config", "thinking"):
-        assert warm.get(key) == captured.get(key), (
+    # A SET DIFFERENCE, not a list of keys to check.
+    #
+    # The first version of this test iterated an allowlist — ("model", "system",
+    # "output_config", "thinking") — while its docstring claimed it "fails if `_one_call`
+    # changes shape". It could not. When `inference_geo` was added to the real request the
+    # test stayed green, the warm request kept addressing a different cache entry, and the
+    # bug this file exists to prevent shipped a second time. An allowlist can only ever
+    # notice parameters someone remembered to add to it, which is the opposite of what a
+    # regression test is for.
+    #
+    # Only `messages` and `max_tokens` may legitimately differ: they sit after the cache
+    # breakpoint on the last system block, so they cannot select a different entry. Every
+    # other parameter the adapter sends must be mirrored.
+    after_the_breakpoint = {"messages", "max_tokens"}
+    missing = (set(captured) - after_the_breakpoint) - set(warm)
+    assert not missing, (
+        f"the real request sends {sorted(missing)}; the warm request does not. Anything "
+        f"rendered at or before the cache breakpoint changes which entry is addressed, "
+        f"so the pre-warm would warm an entry only it ever reads. Add it to "
+        f"keepwarm.cache_parameters — or, if it genuinely sits after the breakpoint, to "
+        f"`after_the_breakpoint` above with a reason."
+    )
+
+    unexpected = set(warm) - set(captured)
+    assert not unexpected, (
+        f"the warm request sends {sorted(unexpected)}, which the real request does not. "
+        f"Same consequence in the other direction."
+    )
+
+    for key in sorted(set(warm)):
+        assert warm[key] == captured.get(key), (
             f"the pre-warm and the real extraction disagree on '{key}', so they address "
             f"different cache entries. The warm entry would be read only by the warmer."
         )
@@ -247,7 +276,7 @@ def test_the_warm_request_targets_the_same_cache_entry_as_a_real_extraction() ->
 def test_the_warm_request_does_not_pin_what_lives_after_the_breakpoint() -> None:
     """`messages` and `max_tokens` sit after the cache breakpoint, so they must NOT be in
     the shared parameter set — pinning them would force the warmer to send an image."""
-    warm = keepwarm.cache_parameters("claude-opus-5", "low")
+    warm = keepwarm.cache_parameters(Config(extraction_model="claude-opus-5"))
     assert "messages" not in warm
     assert "max_tokens" not in warm
 
@@ -255,7 +284,7 @@ def test_the_warm_request_does_not_pin_what_lives_after_the_breakpoint() -> None
 def test_thinking_is_omitted_on_models_that_reject_it() -> None:
     """Haiku 4.5 returns a 400 for `thinking` and `output_config.effort`. The warm request
     follows the adapter's own capability gate rather than a second copy of the rule."""
-    warm = keepwarm.cache_parameters("claude-haiku-4-5", "low")
+    warm = keepwarm.cache_parameters(Config(extraction_model="claude-haiku-4-5"))
     assert "thinking" not in warm
     assert "effort" not in warm["output_config"]
     # The schema is not optional — it is most of the cached prefix.
@@ -277,7 +306,7 @@ def test_warm_request_survives_a_provider_outage(_capture: io.StringIO) -> None:
         def create(self, **_: object) -> None:
             raise RuntimeError("connection refused")
 
-    warmer = keepwarm.CacheWarmer(model="test-model", api_key="k", _client=Exploding())
+    warmer = keepwarm.CacheWarmer(config=Config(anthropic_api_key="k"), _client=Exploding())
 
     assert warmer.warm() is False
     assert any(e["event"] == "keepwarm_cache_failed" for e in _events(_capture))
@@ -314,7 +343,10 @@ def test_cache_warm_is_skipped_when_the_server_is_not_ready(
             calls.append(1)
             return True
 
-    settings = keepwarm.Settings(enabled=True, interval_s=30, warm_cache=True, api_key="k")
+    settings = keepwarm.Settings(
+        enabled=True, interval_s=30, warm_cache=True,
+        config=Config(anthropic_api_key="k"),
+    )
     monkeypatch.setattr(keepwarm, "CacheWarmer", Counting)
 
     keepwarm.run(settings, ticks=2, sleep=lambda _: None)
