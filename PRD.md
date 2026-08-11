@@ -210,7 +210,7 @@ Everything in MVP, plus:
 - [ ] E2E tests (single, batch, unreadable, provider-down degradation) green in CI; failing CI blocks deploy with rollback
 - [ ] Load behavior recorded: 300-item batch wall-clock, provider throttling behavior, Verify Now p95 unaffected during a running batch
 - [ ] Cost analysis complete with measured per-label cost and projections
-- [ ] Submission package: README (approach, tools, assumptions, trade-offs, limitations), deployed URL, demo script, downloadable sample label set
+- [ ] Submission package: README (approach, tools, assumptions, trade-offs, limitations), deployed URL, downloadable sample label set
 
 ---
 
@@ -337,12 +337,10 @@ Fill with measured numbers, and include the assumptions: average images per appl
 | Source repository (GitHub) | All source; clean history; no secrets |
 | `README.md` | Setup + run instructions; approach; tools used; assumptions; trade-offs and limitations; egress table; production-path notes |
 | `PRD.md` | This document — the source of truth |
-| `TICKETS.md` | The execution plan; every ticket traces to requirement IDs here |
 | `CHANGES.md` | Developer log: what was built, how to run/test, how to roll back |
 | Deployed application URL | Working prototype, publicly accessible, keep-warm, sample demo one click in |
 | Golden label set | ≥25 labels + expected verdicts + generation prompts/scripts |
 | Accuracy report | Final eval: field accuracy, confusion matrix, zero-false-pass verification |
-| Demo script | 3-minute walkthrough hitting: speed, checklist UI, STONE'S THROW, warning catch, batch triage |
 
 Sections due by checkpoint:
 

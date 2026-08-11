@@ -1,0 +1,42 @@
+# Working documents — not part of the submission
+TICKETS.md
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+dist/
+*.egg-info/
+
+# Node / web
+node_modules/
+web/dist/
+web/.vite/
+
+# Environment and secrets — never commit
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Runtime artifacts (ephemeral by design — SEC-2)
+uploads/
+results/
+jobs.db
+*.sqlite3
+
+# Eval and test output
+eval/out/
+playwright-report/
+test-results/
+.coverage
+htmlcov/
+
+# OS
+.DS_Store
+Thumbs.db
