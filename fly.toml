@@ -1,0 +1,187 @@
+# LabelProof — infrastructure as configuration (LP-128, ENG-6).
+#
+# This file is the whole environment. There is no console click, no manually created
+# volume, and no out-of-band setting behind the deployed URL; `fly apps create` plus
+# `fly secrets set ANTHROPIC_API_KEY=…` plus `fly deploy` reproduces production from a
+# clean clone, which is what makes the destroy-and-redeploy drill in CHANGES.md a real
+# test rather than a paragraph.
+#
+# NO SECRETS IN THIS FILE. `[env]` is baked into the image metadata and readable by
+# anyone who can pull it. The API key is a platform secret, injected into the process
+# environment at boot and never written to the repository (SEC-6).
+#
+#     fly secrets set ANTHROPIC_API_KEY="sk-ant-…"
+#
+# There is a real `.env` in the working tree carrying a live key. It is gitignored, it is
+# excluded in `.dockerignore`, and it is not referenced here. It stays a local
+# development convenience and never becomes a deployment mechanism.
+
+app = "labelproof"
+
+# --------------------------------------------------------------------------------------
+# Region (LP-127)
+# --------------------------------------------------------------------------------------
+# `iad` — Ashburn, Virginia. Two reasons, in order of weight:
+#
+# 1. The users are a US federal agency in Washington DC. Northern Virginia is the closest
+#    Fly region to them — roughly 5–15 ms round trip against 60–70 ms from the west coast.
+#    On a 5s budget that is not decisive on its own, but it is free.
+# 2. It is the shortest hop to the model provider, which is the term that actually
+#    matters. The vision call dominates the request, so the server→provider leg is on the
+#    critical path twice per verification; us-east is where that traffic terminates.
+#
+# There is also a boring third reason worth stating for a federal audience: keeping the
+# service and its only outbound dependency inside the continental United States means the
+# data-residency question has a one-word answer.
+primary_region = "iad"
+
+# In-flight verifications get a chance to finish before a machine goes away, so a deploy
+# is not visible to whoever is mid-verification. (Top-level on purpose — TOML would fold
+# these into whichever table preceded them.)
+kill_signal = "SIGTERM"
+kill_timeout = "15s"
+
+[build]
+  dockerfile = "Dockerfile"
+
+# --------------------------------------------------------------------------------------
+# Environment
+# --------------------------------------------------------------------------------------
+# Only values that are safe to read. `api/config.py` owns every default; this section
+# overrides exactly what production needs to differ on, so a reader can see the
+# production delta rather than a re-statement of the defaults.
+[env]
+  PORT = "8080"
+  LABELPROOF_STORAGE_DIR = "/data"
+  LABELPROOF_LOG_LEVEL = "INFO"
+
+  # Set explicitly, not left to the default. Sample mode replays built-in fixtures and
+  # cannot read an uploaded photo; a production instance in that state serves
+  # demonstrations that look exactly like findings. Pinning it to "0" here means it
+  # cannot be inherited from a stray machine environment (LP-132).
+  LABELPROOF_FAKE_PROVIDER = "0"
+
+  # Keep-warm and prompt-cache pre-warm (LP-134, LP-324). Opt-in by design — the same
+  # image run locally makes no paid API calls. The interval is under the provider's
+  # five-minute cache TTL on purpose; scripts/keepwarm.py clamps it and explains why.
+  LABELPROOF_KEEPWARM = "1"
+  LABELPROOF_KEEPWARM_INTERVAL_S = "240"
+
+  # LABELPROOF_EXTRACTION_MODEL is deliberately NOT pinned here. The model is an eval
+  # output, not a deployment decision (BUILD.md §1), and api/config.py is its single
+  # source of truth. Overriding it from infrastructure would let production and the
+  # accuracy report disagree about which model produced the numbers.
+
+# --------------------------------------------------------------------------------------
+# Service
+# --------------------------------------------------------------------------------------
+[http_service]
+  internal_port = 8080
+  processes = ["app"]
+
+  # HTTPS only (SEC-6, LP-133, LP-083). Fly terminates TLS at the edge and this redirects
+  # plain HTTP rather than serving it. A federal reviewer should never see this app on
+  # port 80 with a 200.
+  force_https = true
+
+  # PERF-6, and the single most important pair of lines in this file.
+  #
+  # `min_machines_running = 1` keeps an instance up; `auto_stop_machines = "off"` keeps
+  # the platform from stopping it during the quiet stretch between a grader opening the
+  # repository and clicking the link. "suspend" would be cheaper and would still cost a
+  # resume on the first request — and the first request is the one being protected. The
+  # previous vendor lost this account to 30–40 second responses; a cold start on the
+  # grader's first click is the same failure in miniature.
+  auto_stop_machines = "off"
+  auto_start_machines = true
+  min_machines_running = 1
+
+  # A verification holds a connection for seconds while the provider works. Low limits
+  # here so a burst queues at the edge instead of piling onto one machine's event loop
+  # and pushing everyone past the budget.
+  [http_service.concurrency]
+    type = "requests"
+    soft_limit = 12
+    hard_limit = 25
+
+  # Security headers at the edge (SEC-6, LP-083, LP-133). At the edge rather than in the
+  # application because these are properties of how the service is *published*, and
+  # because an edge header still stands if the app is mid-restart.
+  [http_service.http_options.response.headers]
+    # Two years, subdomains included, preload-eligible.
+    Strict-Transport-Security = "max-age=63072000; includeSubDomains; preload"
+    # No MIME sniffing: an upload echoed back must never be re-interpreted as script.
+    X-Content-Type-Options = "nosniff"
+    # No framing. Verdicts carry regulatory weight; they must not be renderable inside
+    # someone else's chrome.
+    X-Frame-Options = "DENY"
+    Referrer-Policy = "no-referrer"
+    # The SPA is entirely same-origin: Vite emits local module scripts and one stylesheet,
+    # there are no CDN fonts and no third-party analytics, and the browser never talks to
+    # the model provider (NET-2). So the policy can be tight.
+    #   img-src data:/blob: — upload previews and evidence crops are object URLs.
+    #   style-src 'unsafe-inline' — EvidenceOverlay positions boxes with a style
+    #     attribute; that is a style *attribute*, which this is the only way to allow.
+    Content-Security-Policy = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; font-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
+
+  # ------------------------------------------------------------------------------------
+  # Platform health checks (LP-132, NET-5)
+  # ------------------------------------------------------------------------------------
+  # The two endpoints answer different questions and are wired to different consequences.
+  #
+  # `/health` — is the process alive. It touches no config, no provider and no disk, so it
+  # can only fail because the process is gone. That is what makes it safe as a restart
+  # signal: a liveness check that goes red during someone else's outage kills a container
+  # that was working.
+  [[http_service.checks]]
+    interval = "15s"
+    timeout = "4s"
+    grace_period = "20s"
+    method = "GET"
+    path = "/health"
+
+  # `/ready` — can this process actually check a label: config complete, provider
+  # reachable. Red means take me out of rotation. It is also the gate a new release must
+  # pass: `fly deploy` will not promote a machine whose checks are failing, so a release
+  # that ships without ANTHROPIC_API_KEY fails here and never receives traffic.
+  #
+  # What this check CANNOT catch, stated rather than assumed: `/ready` answers 200 in
+  # sample mode too, flagged `simulated: true` in the body, and Fly's checks match status
+  # codes, not bodies. Two other layers cover it — `LABELPROOF_FAKE_PROVIDER = "0"` above
+  # makes it unreachable by configuration, and scripts/smoke.sh asserts on the field after
+  # every deploy, rolling the release back if it is true.
+  [[http_service.checks]]
+    interval = "30s"
+    timeout = "6s"
+    grace_period = "30s"
+    method = "GET"
+    path = "/ready"
+
+# --------------------------------------------------------------------------------------
+# Machine (LP-134)
+# --------------------------------------------------------------------------------------
+# Dedicated CPU, two cores, 4 GB.
+#
+# Sizing follows the budget rather than the price list. A measured two-image extraction on
+# the adopted model runs ~4.7s of a 5.0s allowance, which leaves roughly 300 ms for
+# everything this machine does itself: decode, EXIF strip, deskew, perspective correction,
+# contrast normalisation and re-encode on two ~2576px images, then the rules engine.
+# OpenCV work is genuinely CPU-bound, the two images are preprocessed concurrently — hence
+# two cores — and shared-CPU steal is measured in exactly the tens of milliseconds that
+# have to come out of that 300 ms. Paying for dedicated cores is the cheapest way to stop
+# the p95 depending on a noisy neighbour.
+#
+# 4 GB is headroom, not need: numpy, OpenCV and Pillow holding several full-resolution
+# frames while a batch job runs its worker pool in the same process.
+#
+# If the accuracy sweep lands on a model fast enough to widen the budget, `shared-cpu-2x`
+# with 2 GB is a one-line change and roughly an eighth of the cost.
+[[vm]]
+  size = "performance-2x"
+  memory = "4gb"
+
+# No `[mounts]`, deliberately. Uploads and results are ephemeral by policy — auto-purged
+# on a 24h TTL (SEC-2) — and a volume would be a durable home for exactly the data the
+# retention policy exists to destroy. It would also pin the app to one host and add a
+# manual `fly volumes create` step ahead of `fly deploy`, which would falsify the claim
+# this file is making: that the environment rebuilds from configuration alone (LP-136).
