@@ -369,7 +369,13 @@ def check_typography(signals: WarningTypography) -> list[Finding]:
 
 
 def type_size_context(net_contents_ml: float | None) -> str:
-    """WARN-9 — state the applicable minimum, and admit it cannot be verified here."""
+    """WARN-9 — state the applicable minimum, and admit it cannot be verified here.
+
+    Two sentences, and the order is deliberate. The number comes first because it is
+    useful — an agent holding the bottle can act on "at least 2 mm". The disclaimer comes
+    second because without it the number reads as a measurement the tool took, and that
+    would be the tool claiming precision it does not have.
+    """
     if net_contents_ml is None:
         return (
             "Type size cannot be verified from a photograph, and the container size is "
@@ -381,6 +387,21 @@ def type_size_context(net_contents_ml: float | None) -> str:
         f"no more than {max_cpi} characters per inch. Type size is not verifiable from "
         f"an unscaled photograph — this is context for your own eye, not a check the "
         f"tool performed."
+    )
+
+
+def type_size_finding(net_contents_ml: float | None) -> Finding:
+    """The same honesty, as a finding rather than a sentence bolted onto a rationale.
+
+    It rides on every warning result, including a Match. A clean label is exactly where
+    this matters most: the row says Match, and the agent has to know that "match" covered
+    the wording and the type style and did *not* cover the millimetres.
+    """
+    return Finding(
+        code="warning_type_size_not_verified",
+        message=type_size_context(net_contents_ml),
+        citation=canon.CITATIONS["warning_format"],
+        severity=typography.SEVERITY_CONTEXT,
     )
 
 
@@ -409,14 +430,20 @@ def evaluate(
     signals: WarningTypography | None = None,
     *,
     legible: bool = True,
+    net_contents_ml: float | None = None,
 ) -> WarningResult:
     """Full warning verdict.
 
     Order matters. Illegibility is reported before absence, because "we could not read
     it" and "it is not there" are different findings and confusing them is exactly the
     false-pass this product must never produce.
+
+    `net_contents_ml` only ever adds context. It selects the type-size minimum quoted to
+    the agent (WARN-9) and it can never change a verdict — no container size makes a
+    wrong warning right.
     """
     signals = signals or WarningTypography()
+    honesty = [type_size_finding(net_contents_ml)]
 
     if not legible:
         return WarningResult(
@@ -425,6 +452,7 @@ def evaluate(
                 "The warning statement could not be read on this image. It has not been "
                 "checked — request a clearer image."
             ),
+            findings=honesty,
         )
 
     if found_text is None or not found_text.strip():
@@ -441,7 +469,8 @@ def evaluate(
                     message="No government warning statement found.",
                     citation=canon.CITATIONS["warning_text"],
                     severity=typography.SEVERITY_CRITICAL,
-                )
+                ),
+                *honesty,
             ],
         )
 
@@ -452,6 +481,7 @@ def evaluate(
         check_header_caps(found_text, signals)
         + text_findings(comparison)
         + list(look.findings)
+        + honesty
     )
 
     # 1. The words themselves. Everything else is secondary to "does it say the thing".

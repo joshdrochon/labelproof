@@ -36,7 +36,7 @@ def _asserted(result: warning.WarningResult) -> list[str]:
 def test_exact_warning_with_good_typography_matches() -> None:
     result = warning.evaluate(canon.CANONICAL_WARNING, GOOD)
     assert result.verdict is Verdict.MATCH
-    assert not result.findings
+    assert _asserted(result) == []
 
 
 @pytest.mark.tc("TC-01")
@@ -505,3 +505,45 @@ def test_type_size_context_admits_it_cannot_be_verified() -> None:
 
 def test_type_size_context_without_container_size() -> None:
     assert "unknown" in warning.type_size_context(None)
+
+
+@pytest.mark.parametrize(
+    ("ml", "expected"),
+    [(200.0, "1 mm"), (237.0, "1 mm"), (750.0, "2 mm"), (3000.0, "2 mm"), (5000.0, "3 mm")],
+)
+def test_the_applicable_minimum_follows_the_container(ml: float, expected: str) -> None:
+    """The number is only useful if it is the right number for this bottle."""
+    assert expected in warning.type_size_context(ml)
+
+
+def test_the_honesty_caveat_rides_on_a_match_too() -> None:
+    """The row where it matters most. "Match" covered the wording and the type style,
+    and it did not cover the millimetres — a clean row must still say so."""
+    result = warning.evaluate(canon.CANONICAL_WARNING, GOOD, net_contents_ml=750.0)
+    assert result.verdict is Verdict.MATCH
+    caveat = next(f for f in result.findings if f.code == "warning_type_size_not_verified")
+    assert caveat.severity == typography.SEVERITY_CONTEXT
+    assert "2 mm" in caveat.message
+
+
+@pytest.mark.parametrize("legible", [True, False])
+def test_the_honesty_caveat_rides_on_every_outcome(legible: bool) -> None:
+    for text in (None, canon.CANONICAL_WARNING, "GOVERNMENT WARNING: something else"):
+        result = warning.evaluate(text, GOOD, legible=legible, net_contents_ml=750.0)
+        assert any(f.code == "warning_type_size_not_verified" for f in result.findings)
+
+
+def test_container_size_never_changes_a_verdict() -> None:
+    """WARN-9 context is context. No bottle size makes a wrong warning right."""
+    title_case = _retitled("Government Warning:")
+    verdicts = {
+        warning.evaluate(title_case, GOOD, net_contents_ml=ml).verdict
+        for ml in (None, 50.0, 750.0, 5000.0)
+    }
+    assert verdicts == {Verdict.MISMATCH}
+
+
+def test_the_caveat_is_never_mistaken_for_a_check_that_ran() -> None:
+    caveat = warning.type_size_finding(750.0)
+    assert caveat.severity not in typography.ASSERTED_SEVERITIES
+    assert "not verifiable" in caveat.message

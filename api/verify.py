@@ -15,19 +15,19 @@ from __future__ import annotations
 import time
 import uuid
 
+from api import canon
 from api.models import (
     Aggregate,
     Application,
     Cost,
-    Extraction,
+    Evidence,
     ExtractedField,
+    Extraction,
     FieldName,
     FieldResult,
-    ImageReport,
     Recommendation,
     Timings,
     VerificationResult,
-    Verdict,
     WarningTypography,
 )
 from api.provider.base import (
@@ -82,28 +82,33 @@ def _warning_result(
     merged: dict[FieldName, ExtractedField],
     typography: WarningTypography,
     net_contents_ml: float | None,
+    warning_image: int | None = None,
 ) -> FieldResult:
     field = merged.get(FieldName.GOVERNMENT_WARNING)
     result = warn.evaluate(
         field.value if field else None,
         typography,
         legible=field.legible if field else True,
+        net_contents_ml=net_contents_ml,
     )
-
-    findings = list(result.findings)
-    rationale = result.rationale
-    if result.verdict is not Verdict.MATCH:
-        rationale = f"{rationale} {warn.type_size_context(net_contents_ml)}".strip()
 
     return FieldResult(
         field=FieldName.GOVERNMENT_WARNING,
         verdict=result.verdict,
         extracted=field.value if field else None,
-        expected="the statement required by 27 CFR 16.21",
+        # The canonical statement, not a description of it. This is the left-hand side of
+        # the diff the UI renders (WARN-8); a placeholder sentence there produces a
+        # word-level comparison between the regulation's name and its text, which is
+        # noise dressed up as evidence.
+        expected=canon.CANONICAL_WARNING,
         confidence=field.confidence if field else 0.0,
-        rationale=rationale,
-        evidence=None,
-        findings=findings,
+        rationale=result.rationale,
+        evidence=(
+            Evidence(image_index=warning_image or 0, bbox=field.bbox)
+            if field is not None and field.bbox is not None
+            else None
+        ),
+        findings=list(result.findings),
     )
 
 
@@ -145,7 +150,7 @@ def verify(
         )
 
     compare_started = time.perf_counter()
-    merged, _warning_image, typography, _provenance = merge_extractions(response.extractions)
+    merged, warning_image, typography, _provenance = merge_extractions(response.extractions)
 
     context = LabelContext(
         is_import=application.is_import,
@@ -181,7 +186,7 @@ def verify(
             application.country_of_origin,
             is_import=application.is_import,
         ),
-        _warning_result(merged, typography, net.ml),
+        _warning_result(merged, typography, net.ml, warning_image),
     ]
 
     aggregate = agg.recommend(results)
