@@ -33,7 +33,7 @@ from pathlib import Path
 from typing import Any
 
 from api.config import Config, ConfigError
-from eval import live, tier_b
+from eval import live, sweep, tier_b
 from eval.gates import EXIT_USAGE, exit_code_for, gates_for
 from eval.outcomes import (
     ACCURACY_FLOOR,
@@ -85,6 +85,39 @@ def run_tier_b(
         return None, f"SKIPPED — {exc}"
 
     return tier_b.evaluate(tier_b_set.labels, provider), ""
+
+
+def run_sweep(models: list[str], specs: list[Any], *, dry_run: bool) -> tuple[str, int]:
+    """The model-tier sweep. Returns (text to print, exit code).
+
+    Opt-in by construction — nothing reaches here without `--model` — and every exit is
+    zero. A sweep is a measurement, not a gate: it informs which tier ships, and a machine
+    with no credentials has not regressed, it has simply not measured.
+    """
+    lines = sweep.estimate_lines(models, specs)
+
+    if dry_run:
+        lines.append("")
+        lines.append("--dry-run: stopping before any live call. Nothing was spent.")
+        return "\n".join(lines), 0
+
+    if not live.has_credentials():
+        lines.append("")
+        lines.append(live.NO_CREDENTIALS)
+        return "\n".join(lines), 0
+
+    providers: dict[str, Any] = {}
+    for model in models:
+        try:
+            providers[model] = live.build(model, timeout_ms=60_000).provider
+        except ConfigError as exc:
+            lines.append("")
+            lines.append(f"SKIPPED — {exc}")
+            return "\n".join(lines), 0
+
+    results = sweep.run(models, specs, lambda m: providers[m])
+    lines.append(sweep.render(results, specs))
+    return "\n".join(lines), 0
 
 
 def payload(
@@ -193,6 +226,21 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--model",
+        action="append",
+        metavar="MODEL_ID",
+        help=(
+            "run the model-tier sweep against these LIVE models (LP-329). Costs real "
+            "money; never part of the CI run. Repeat the flag for each model. Omit to "
+            "run the offline eval only."
+        ),
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="with --model: print the planned calls and estimated spend, then stop.",
+    )
+    parser.add_argument(
         "--min-accuracy",
         type=float,
         default=ACCURACY_FLOOR,
@@ -244,6 +292,15 @@ def main(argv: list[str] | None = None) -> int:
     manifest_broken = wanted and not tier_b_set.usable
 
     body = payload(report, tier_b_set, tier_b_report, tier_b_note)
+
+    # Printed before the Tier A report so the status line stays the last thing on stdout.
+    # Reached only because the operator named a model: the CI command cannot get here,
+    # which is what keeps the live path out of the build (LP-329).
+    if args.model:
+        text, sweep_code = run_sweep(args.model, specs, dry_run=args.dry_run)
+        print(text, file=sys.stderr if args.json else sys.stdout)
+        if sweep_code:
+            return sweep_code
 
     if args.json:
         print(json.dumps(body, indent=2, sort_keys=True))

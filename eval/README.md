@@ -124,6 +124,33 @@ Two commands in this directory cost real money and must never run in the default
 - `python -m eval.run --tier b` — Tier B is real bottle photographs (LP-332). It needs a
   live model, is reported separately, and **never gates**.
 
+### Model-tier sweep
+
+```bash
+python -m eval.run --model claude-opus-5 --model claude-sonnet-5 --model claude-haiku-4-5
+python -m eval.run --model claude-haiku-4-5 --dry-run   # estimate only, spends nothing
+```
+
+Reports per model: field accuracy, **warning-field false passes**, p50/p95, and cost per
+label, then applies BUILD.md §1's rule — *the cheapest tier clearing ≥95% accuracy with
+zero false passes on warning rows ships.*
+
+**Correctness disqualifies; speed does not.** A model is `DISQUALIFIED` for a warning false
+pass, for accuracy below the floor, or for a crashed fixture, and for nothing else. p95 is
+printed and a model over the 5s budget is flagged `LATENCY RISK`, but latency never
+disqualifies and never rescues — a fast model that reads the warning wrong is disqualified
+by this report, not excused by it. When a cheaper tier is passed over, the report names it
+and says why.
+
+The p95 here is extraction plus rules, measured from a script. It is **not** PERF-1's
+upload-to-verdict number — that one comes from `scripts/timed_p95.py` against the deployed
+URL — and latency is grouped by call shape (one image is one call; two images are two
+concurrent calls) because a blended figure describes no request anyone makes.
+
+Every exit is `0`: a sweep is a measurement, not a gate. Prices come from `eval/pricing.py`
+at first-party list rates; cache reads are not credited, so every cost figure is an upper
+bound.
+
 ## Regenerating fixtures
 
 ```bash

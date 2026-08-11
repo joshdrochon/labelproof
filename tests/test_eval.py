@@ -15,7 +15,14 @@ from pathlib import Path
 import pytest
 
 from api.models import FieldName, Verdict
-from eval import tier_b
+from api.provider.base import (
+    ExtractionRequest,
+    ExtractionResponse,
+    ImageInput,
+    ProviderUsage,
+)
+from api.provider.fake import SpecBackedProvider
+from eval import sweep, tier_b
 from eval.gates import (
     EXIT_ACCURACY,
     EXIT_HARNESS_ERROR,
@@ -31,6 +38,7 @@ from eval.outcomes import ACCURACY_FLOOR, FieldOutcome, Report, evaluate
 from eval.report import render
 from eval.run import main, payload
 from fixtures.generator.catalog import CATALOG
+from fixtures.generator.spec import LabelSpec
 
 REPO = Path(__file__).resolve().parents[1]
 
@@ -814,6 +822,195 @@ def test_tier_b_does_not_report_a_missing_warning_violation_as_a_hole() -> None:
     report = Report(tier="B", outcomes=[outcome()])
     text = render(evaluate(CATALOG), tier_b.load(), report)
     assert "an approved label carries no violation to find" in text.lower()
+
+
+# --- model-tier sweep (LP-329) -----------------------------------------------------------------
+
+class _Harness:
+    """A stand-in for one model: fixed latency, fixed token cost, correct extraction.
+
+    Lets the whole sweep — the table, the disqualification rule, the recommendation — be
+    exercised with no network and no spend, which is the only way those rules get tested
+    at all. `load_images` doubles as the hook that tells the extractor which fixture is in
+    front of it, mirroring how the real adapter receives one label at a time.
+    """
+
+    def __init__(self, seconds: float, tokens: tuple[int, int] = (10_000, 800)) -> None:
+        self.name = "fake:timed"
+        self.seconds = seconds
+        self.tokens = tokens
+        self.spec = CATALOG[0]
+        self._now = 0.0
+
+    def clock(self) -> float:
+        value = self._now
+        self._now += self.seconds
+        return value
+
+    def load_images(self, spec: LabelSpec) -> list[ImageInput]:
+        self.spec = spec
+        roles = ["front", "back"] if spec.face != "single" else ["single"]
+        return [ImageInput(index=i, data=b"x", role=r) for i, r in enumerate(roles)]
+
+    def extract(self, request: ExtractionRequest) -> ExtractionResponse:
+        response = SpecBackedProvider(self.spec).extract(request)
+        response.usage = ProviderUsage(
+            input_tokens=self.tokens[0], output_tokens=self.tokens[1], model=self.name
+        )
+        return response
+
+
+def _run_sweep(models: dict[str, float], specs: list[LabelSpec]) -> list[sweep.ModelResult]:
+    """Run the sweep with a per-model latency, offline."""
+    results = []
+    for model, seconds in models.items():
+        harness = _Harness(seconds)
+        results.append(
+            sweep.run_model(
+                model,
+                specs,
+                harness,
+                clock=harness.clock,
+                load_images=harness.load_images,
+            )
+        )
+    return results
+
+
+def test_the_sweep_measures_accuracy_cost_and_latency_per_model() -> None:
+    results = _run_sweep({"claude-opus-5": 4.0, "claude-haiku-4-5": 2.0}, list(CATALOG))
+    opus, haiku = results
+    assert opus.report.accuracy == 1.0
+    assert opus.p50 == 4.0 and haiku.p50 == 2.0
+    # 10k input + 800 output at $5/$25 per MTok = $0.07; at $1/$5 = $0.014.
+    assert round(opus.usd_per_label, 4) == 0.07
+    assert round(haiku.usd_per_label, 4) == 0.014
+    assert opus.qualified and haiku.qualified
+
+
+def test_the_cheapest_qualifying_tier_is_what_ships() -> None:
+    """BUILD.md §1's rule, applied rather than restated."""
+    results = _run_sweep({"claude-opus-5": 4.0, "claude-haiku-4-5": 2.0}, list(CATALOG))
+    assert sweep.recommend(results).model == "claude-haiku-4-5"
+    assert "SHIPS: claude-haiku-4-5" in sweep.render(results, list(CATALOG))
+
+
+def test_a_fast_model_that_reads_the_warning_wrong_is_disqualified() -> None:
+    """The whole point of the instrument: speed does not buy a pass on the warning gate."""
+    fast_and_wrong = _run_sweep({"claude-haiku-4-5": 1.0}, list(CATALOG))
+    # Force a false pass by scoring the set against a provider that always reads a clean
+    # warning, regardless of which defect the fixture actually renders.
+    for result in fast_and_wrong:
+        result.report.outcomes.append(
+            warning_violation(fixture="tc03_title_case_warning", actual=Verdict.MATCH)
+        )
+
+    result = fast_and_wrong[0]
+    assert not result.qualified
+    assert any("false pass" in r for r in result.disqualifiers)
+
+    text = sweep.render(fast_and_wrong, list(CATALOG))
+    assert "DISQUALIFIED" in text
+    assert "fast and reads the warning wrong is disqualified here, not excused" in text
+
+
+def test_a_disqualified_cheaper_model_is_named_next_to_the_winner() -> None:
+    """The report must say why the cheap tier was passed over, not just pick another."""
+    results = _run_sweep({"claude-opus-5": 4.0, "claude-haiku-4-5": 1.0}, list(CATALOG))
+    results[1].report.outcomes.append(
+        warning_violation(fixture="tc07_missing_warning", actual=Verdict.MATCH)
+    )
+    text = sweep.render(results, list(CATALOG))
+    assert "SHIPS: claude-opus-5" in text
+    assert "claude-haiku-4-5 is cheaper" in text
+    assert "disqualified" in text
+
+
+def test_latency_never_disqualifies() -> None:
+    """p95 here is extraction plus rules, not upload-to-verdict. It is context, not a gate."""
+    results = _run_sweep({"claude-opus-5": 12.0}, list(CATALOG))
+    result = results[0]
+    assert result.latency_risk
+    assert result.qualified
+    assert result.disqualifiers == []
+    text = sweep.render(results, list(CATALOG))
+    assert "LATENCY RISK" in text
+    assert "CONTEXT only" in text
+
+
+def test_no_qualifying_model_is_reported_as_such() -> None:
+    results = _run_sweep({"claude-haiku-4-5": 1.0}, list(CATALOG))
+    results[0].report.errors.append(("tc01_old_tom_clean", "boom"))
+    assert sweep.recommend(results) is None
+    assert "NO MODEL QUALIFIES" in sweep.render(results, list(CATALOG))
+
+
+def test_latency_is_split_by_call_shape() -> None:
+    """One image is one call; two images are two concurrent calls. Blending describes
+    neither, and the split is what the current model decision turns on."""
+    results = _run_sweep({"claude-opus-5": 3.0}, list(CATALOG))
+    assert results[0].call_shapes == [1, 2]
+    text = sweep.render(results, list(CATALOG))
+    assert "Latency by call shape" in text
+    assert "1 image(s)" in text and "2 image(s)" in text
+
+
+def test_prices_cover_the_default_sweep() -> None:
+    from eval.pricing import DEFAULT_SWEEP, price_for
+
+    for model in DEFAULT_SWEEP:
+        assert price_for(model) is not None, model
+
+
+def test_an_unpriced_model_shows_no_price_rather_than_a_made_up_one() -> None:
+    from eval.pricing import price_for
+
+    assert price_for("claude-not-a-model") is None
+    results = _run_sweep({"claude-not-a-model": 2.0}, list(CATALOG))
+    assert results[0].priced is False
+    assert "no price" in sweep.render(results, list(CATALOG))
+    assert sweep.recommend(results) is None
+
+
+def test_percentile_is_nearest_rank() -> None:
+    assert sweep.percentile([1.0, 2.0, 3.0, 4.0], 0.5) == 2.0
+    assert sweep.percentile([1.0, 2.0, 3.0, 4.0], 0.95) == 4.0
+    assert sweep.percentile([], 0.95) == 0.0
+
+
+def test_the_sweep_is_opt_in_and_never_runs_by_default(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The CI command cannot reach the live path — that is what keeps the build free."""
+    assert main([]) == EXIT_OK
+    assert "MODEL-TIER SWEEP" not in capsys.readouterr().out
+
+
+def test_a_dry_run_estimates_the_spend_and_stops() -> None:
+    done = _run(["-m", "eval.run", "--model", "claude-opus-5", "--dry-run"])
+    assert done.returncode == EXIT_OK
+    assert "Estimated spend" in done.stdout
+    assert "Nothing was spent" in done.stdout
+    assert "MODEL-TIER SWEEP" not in done.stdout
+
+
+def test_the_sweep_skips_rather_than_fails_offline() -> None:
+    """An offline machine has not regressed; it has not measured."""
+    done = _run(["-m", "eval.run", "--model", "claude-haiku-4-5"], ANTHROPIC_API_KEY="")
+    assert done.returncode == EXIT_OK
+    assert "ANTHROPIC_API_KEY is not set" in done.stdout
+    assert "not a failure" in done.stdout
+
+
+def test_the_sweep_does_not_disturb_the_tier_a_status_line() -> None:
+    done = _run(["-m", "eval.run", "--model", "claude-opus-5", "--dry-run"])
+    assert done.stdout.strip().split("\n")[-1].startswith("::labelproof-eval::")
+
+
+def test_fixture_images_exist_for_every_spec() -> None:
+    """The sweep sends real pixels; a missing PNG must be a clear error, not a silent zero."""
+    for spec in CATALOG:
+        assert sweep.image_inputs(spec), spec.name
 
 
 # --- expectations are honest -----------------------------------------------------------------
