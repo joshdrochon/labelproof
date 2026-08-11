@@ -19,7 +19,7 @@ import numpy as np
 import pytest
 
 from api.models import Application, FieldName, Verdict
-from api.pipeline import deskew, preprocess, quality
+from api.pipeline import deskew, limitations, preprocess, quality
 from api.provider.base import ImageInput
 from api.provider.fake import SpecBackedProvider
 from api.rules import thresholds as T
@@ -790,3 +790,63 @@ def test_the_crop_bar_is_the_same_one_deskew_uses() -> None:
     """One number. A crop the preprocessing pass would refuse must not be a crop the
     upload path accepts."""
     assert crop_before_send.MAX_DETAIL_LOST == deskew._MAX_INK_OUTSIDE_QUAD
+
+
+# --- LP-202 · the limitations, kept honest by a test ---------------------------------------
+
+def test_the_committed_document_matches_the_code(report: robustness_eval.Report) -> None:
+    """A hand-written limitations list is a limitations list as of the day someone wrote
+    it. This one is generated, and this test is what stops it drifting away from the code
+    it describes."""
+    committed = robustness_eval.DOCS_PATH.read_text()
+    assert committed == robustness_eval.render_docs(report), (
+        "docs/robustness.md is stale — run `python -m scripts.robustness_eval --docs`"
+    )
+
+
+def test_every_limitation_says_what_is_not_handled() -> None:
+    """The second column is the one worth reading. An entry with an empty 'not handled'
+    is marketing wearing a limitations list's clothes."""
+    for limitation in limitations.LIMITATIONS:
+        assert limitation.handled and limitation.not_handled
+        assert limitation.why and limitation.evidence
+
+
+def test_the_limitations_cover_every_condition_family() -> None:
+    """Anything the robustness set exercises has to appear in the honest account, or the
+    account is describing a different pipeline."""
+    text = " ".join(limitation.area.lower() for limitation in limitations.LIMITATIONS)
+    for topic in ("angle", "curved", "lighting", "glare", "blur", "threshold"):
+        assert topic in text, topic
+
+
+def test_the_hardest_admissions_are_actually_in_there() -> None:
+    """The three a reviewer would find on their own: a cat photo passes the gate, glare
+    is never painted over, and the thresholds have never seen a photograph."""
+    text = robustness_eval.render_docs(robustness_eval.evaluate()).lower()
+    assert "photograph of a cat" in text
+    assert "no inpainting" in text
+    assert "calibrated against generated labels, not photographs" in text
+
+
+def test_the_document_says_how_to_reproduce_every_number() -> None:
+    text = robustness_eval.render_docs(robustness_eval.evaluate())
+    for command in (
+        "python -m scripts.robustness_eval",
+        "python -m scripts.calibrate_quality",
+        "python -m scripts.compression_sweep",
+        "python -m scripts.crop_before_send",
+    ):
+        assert command in text
+
+
+def test_the_document_names_the_tier_a_gap(report: robustness_eval.Report) -> None:
+    """It proves the pipeline can read our own renderer. Saying only that would be the
+    misleading number BUILD.md §5 warns about."""
+    text = robustness_eval.render_docs(report)
+    assert "read our own renderer" in text
+    assert "never averaged" in text
+
+
+def test_regenerating_the_document_is_idempotent(report: robustness_eval.Report) -> None:
+    assert robustness_eval.render_docs(report) == robustness_eval.render_docs(report)
