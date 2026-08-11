@@ -19,7 +19,7 @@ import numpy as np
 import pytest
 
 from api.models import Application, FieldName, Verdict
-from api.pipeline import preprocess, quality
+from api.pipeline import deskew, preprocess, quality
 from api.provider.base import ImageInput
 from api.provider.fake import SpecBackedProvider
 from api.rules import thresholds as T
@@ -29,7 +29,12 @@ from fixtures.generator.catalog import by_name
 from fixtures.generator.layout import FIELD_BANDS
 from fixtures.generator.render import render
 from fixtures.generator.spec import LabelSpec
-from scripts import calibrate_quality, compression_sweep, robustness_eval
+from scripts import (
+    calibrate_quality,
+    compression_sweep,
+    crop_before_send,
+    robustness_eval,
+)
 
 CLEAN = degrade.BASE_FIXTURE
 ROBUSTNESS_DIR = Path(__file__).resolve().parents[1] / "fixtures" / "robustness"
@@ -693,3 +698,95 @@ def test_the_sweep_runs_as_a_command() -> None:
     with mock.patch.object(compression_sweep, "QUALITIES", (100, 85)), \
          mock.patch.object(compression_sweep, "FORMATS", ("WEBP",)):
         assert compression_sweep.main(["--json"]) == 0
+
+
+# --- LP-326 · crop before send, measured rather than assumed --------------------------------
+
+@pytest.fixture(scope="module")
+def crop_report() -> crop_before_send.Report:
+    return crop_before_send.measure()
+
+
+def test_the_measurement_covers_the_whole_robustness_set(
+    crop_report: crop_before_send.Report,
+) -> None:
+    assert len(crop_report.measurements) == len(degrade.CONDITIONS)
+
+
+def test_no_crop_this_detector_proposes_would_cut_text(
+    crop_report: crop_before_send.Report,
+) -> None:
+    """A crop that takes the bottom off a back label takes the government warning with it,
+    and the pipeline then reports Missing on a compliant label — a false finding this
+    system manufactured, indistinguishable from a real one."""
+    assert crop_report.unsafe == []
+
+
+def test_the_feature_does_not_ship_on_this_evidence(
+    crop_report: crop_before_send.Report,
+) -> None:
+    """The ticket's condition: ships only if detection proves reliable across the set. It
+    fires on roughly a quarter of it, so it does not. Recording the negative result is the
+    deliverable — the alternative is shipping it because it seemed obviously good."""
+    assert not crop_report.ships
+    assert crop_report.detection_rate < 0.8
+
+
+def test_the_saving_is_real_where_detection_fires(
+    crop_report: crop_before_send.Report,
+) -> None:
+    """Not shipping it is a judgment about reliability, not a claim that it would not have
+    helped. Recording the size of what is being declined keeps the decision reviewable."""
+    assert crop_report.median_saving > 0.3
+
+
+def test_an_undetected_boundary_counts_as_safe() -> None:
+    """Not cropping is always safe. Only an attempted crop can cut anything."""
+    nothing = crop_before_send.Measurement(condition="x", tc="TC-11", detected=False)
+    assert nothing.safe and nothing.saving == 0.0
+
+
+def test_a_crop_that_loses_detail_is_unsafe() -> None:
+    bad = crop_before_send.Measurement(
+        condition="y", tc="TC-11", detected=True, detail_lost=0.4,
+        pixels_before=100, pixels_after=50,
+    )
+    assert not bad.safe
+
+
+def test_a_perfect_detector_that_never_fires_still_does_not_ship() -> None:
+    """Both halves of the gate. Perfect safety on a detector that fires twice in fifteen
+    is a feature that does nothing, carried forever, on a path where a future regression
+    is a compliance error."""
+    report = crop_before_send.Report()
+    report.measurements = [
+        crop_before_send.Measurement(condition=f"c{i}", tc="TC-11", detected=False)
+        for i in range(10)
+    ]
+    assert report.unsafe == []
+    assert not report.ships
+
+
+def test_the_report_says_why_not_just_no(crop_report: crop_before_send.Report) -> None:
+    text = crop_before_send.render(crop_report)
+    assert "DOES NOT SHIP" in text
+    assert "no boundary to find" in text
+
+
+def test_the_report_flags_that_tier_b_could_change_the_answer(
+    crop_report: crop_before_send.Report,
+) -> None:
+    """Most of this set is rendered edge to edge and genuinely has no boundary. Real
+    photographs mostly do. Reporting 27% without that caveat would read as "the detector
+    is weak", which is not what was measured."""
+    assert "Re-run against Tier B" in crop_before_send.render(crop_report)
+
+
+def test_the_measurement_runs_as_a_command() -> None:
+    assert crop_before_send.main(["--json"]) == 0
+
+
+def test_the_crop_bar_is_the_same_one_deskew_uses() -> None:
+    """One number. A crop the preprocessing pass would refuse must not be a crop the
+    upload path accepts."""
+    assert crop_before_send.MAX_DETAIL_LOST == deskew._MAX_INK_OUTSIDE_QUAD
