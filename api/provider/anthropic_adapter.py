@@ -132,17 +132,57 @@ SUPPORTED_MEDIA_TYPES: Final[frozenset[str]] = frozenset(
 
 #: USD per input / output / cached-read token, for the cost line only (OPS-4). Claude
 #: Opus 5 list price; cached reads are a tenth of input.
-_USD_PER_INPUT_TOKEN: Final[float] = 5.0 / 1_000_000
-_USD_PER_OUTPUT_TOKEN: Final[float] = 25.0 / 1_000_000
-_USD_PER_CACHE_READ_TOKEN: Final[float] = 0.5 / 1_000_000
+#: List price per million tokens, by model: (input, output). Cache reads are 0.1x input
+#: and cache writes 1.25x, which is why writes cannot be quietly folded into either.
+#:
+#: Keyed by model because a single hardcoded table is a 5x error waiting for someone to
+#: change `LABELPROOF_EXTRACTION_MODEL`: Opus 5 and Haiku 4.5 differ by exactly that
+#: factor, and the cost line looks equally authoritative either way.
+_PRICES_PER_MTOK: Final[dict[str, tuple[float, float]]] = {
+    "claude-opus-5": (5.0, 25.0),
+    "claude-sonnet-5": (3.0, 15.0),
+    "claude-haiku-4-5": (1.0, 5.0),
+}
+
+#: Used when the model is not in the table. Deliberately the MOST expensive tier: an
+#: unknown model should over-report cost, never under-report it, so a surprise shows up
+#: as a number someone questions rather than a number nobody notices.
+_UNKNOWN_PRICE_PER_MTOK: Final[tuple[float, float]] = (10.0, 50.0)
+
+_CACHE_READ_MULTIPLIER: Final[float] = 0.1
+_CACHE_WRITE_MULTIPLIER: Final[float] = 1.25
 
 
-def estimated_usd(usage: ProviderUsage) -> float:
-    """List-price cost of one extraction. Logged on every call (OPS-4)."""
+def price_for(model: str) -> tuple[tuple[float, float], bool]:
+    """`((input, output) per MTok, is_known)` — the second half is the point.
+
+    A caller that cannot tell a priced model from a guessed one will report both with
+    the same confidence.
+    """
+    for known, price in _PRICES_PER_MTOK.items():
+        if model.startswith(known):
+            return price, True
+    return _UNKNOWN_PRICE_PER_MTOK, False
+
+
+def estimated_usd(usage: ProviderUsage, model: str | None = None) -> float:
+    """List-price cost of one extraction. Logged on every call (OPS-4).
+
+    Counts cache WRITES. They are billed at 1.25x input and were previously priced at
+    zero, so every cold request — which is every first click a grader makes — under-
+    reported by 14-21%, in the flattering direction, into a Cost Analysis deliverable.
+    """
+    (input_rate, output_rate), known = price_for(model or usage.model)
+    if not known and (model or usage.model):
+        lp_logging.warn(
+            "provider_price_unknown", provider="anthropic", reason_code="unpriced_model"
+        )
+    per_token = 1 / 1_000_000
     return round(
-        usage.input_tokens * _USD_PER_INPUT_TOKEN
-        + usage.output_tokens * _USD_PER_OUTPUT_TOKEN
-        + usage.cache_read_tokens * _USD_PER_CACHE_READ_TOKEN,
+        usage.input_tokens * input_rate * per_token
+        + usage.output_tokens * output_rate * per_token
+        + usage.cache_read_tokens * input_rate * _CACHE_READ_MULTIPLIER * per_token
+        + usage.cache_creation_tokens * input_rate * _CACHE_WRITE_MULTIPLIER * per_token,
         6,
     )
 
@@ -527,7 +567,7 @@ class AnthropicVisionProvider:
             input_tokens=usage.input_tokens,
             output_tokens=usage.output_tokens,
             cache_read_tokens=usage.cache_read_tokens,
-            usd=estimated_usd(usage),
+            usd=estimated_usd(usage, self.config.extraction_model),
         )
         extractions.sort(key=lambda e: e.image_index)
         return ExtractionResponse(extractions=extractions, usage=usage, latency_ms=latency_ms)
@@ -623,7 +663,7 @@ class AnthropicVisionProvider:
             input_tokens=usage.input_tokens,
             output_tokens=usage.output_tokens,
             cache_read_tokens=usage.cache_read_tokens,
-            usd=estimated_usd(usage),
+            usd=estimated_usd(usage, self.config.extraction_model),
         )
         return extraction, usage
 
@@ -670,6 +710,7 @@ def _usage_from(message: Any, model: str) -> ProviderUsage:
         input_tokens=int(getattr(usage, "input_tokens", 0) or 0),
         output_tokens=int(getattr(usage, "output_tokens", 0) or 0),
         cache_read_tokens=int(getattr(usage, "cache_read_input_tokens", 0) or 0),
+        cache_creation_tokens=int(getattr(usage, "cache_creation_input_tokens", 0) or 0),
         model=model,
     )
 

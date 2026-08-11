@@ -32,6 +32,7 @@ from api.provider.anthropic_adapter import (
     describe_residency,
     estimated_usd,
     parse_extraction,
+    price_for,
 )
 from api.provider.base import (
     ExtractionProvider,
@@ -887,12 +888,72 @@ def test_tokens_are_captured_on_every_call_and_summed_across_images() -> None:
     assert response.latency_ms >= 0
 
 
-def test_cost_is_derived_from_the_pinned_list_price() -> None:
-    usage = ProviderUsage(input_tokens=1_000_000, output_tokens=0, cache_read_tokens=0)
-    assert estimated_usd(usage) == pytest.approx(5.0)
+def test_cost_is_derived_from_the_list_price_of_the_model_that_ran() -> None:
+    """A single hardcoded price table is a 5x error waiting for a config change.
 
-    cached = ProviderUsage(input_tokens=0, output_tokens=1_000_000, cache_read_tokens=1_000_000)
-    assert estimated_usd(cached) == pytest.approx(25.5)
+    Opus 5 and Haiku 4.5 differ by exactly that factor, and the cost line looks equally
+    authoritative either way — so the model has to reach the arithmetic.
+    """
+    usage = ProviderUsage(input_tokens=1_000_000)
+    assert estimated_usd(usage, "claude-opus-5") == pytest.approx(5.0)
+    assert estimated_usd(usage, "claude-sonnet-5") == pytest.approx(3.0)
+    assert estimated_usd(usage, "claude-haiku-4-5") == pytest.approx(1.0)
+
+    cached = ProviderUsage(output_tokens=1_000_000, cache_read_tokens=1_000_000)
+    assert estimated_usd(cached, "claude-opus-5") == pytest.approx(25.5)
+
+
+def test_cache_writes_are_priced_rather_than_free() -> None:
+    """They cost 1.25x input and were counted at zero (OPS-4).
+
+    Every COLD request writes the cached prefix, which is every first click a grader
+    makes — so the error ran in the flattering direction on exactly the requests a
+    reviewer sees, and fed a Cost Analysis deliverable.
+    """
+    written = ProviderUsage(cache_creation_tokens=1_000_000)
+    assert estimated_usd(written, "claude-opus-5") == pytest.approx(6.25)
+
+    # A write must never be priced as a read; that is the mistake being fixed.
+    read = ProviderUsage(cache_read_tokens=1_000_000)
+    assert estimated_usd(read, "claude-opus-5") == pytest.approx(0.5)
+
+
+def test_an_unpriced_model_costs_the_expensive_default_and_says_so(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """An unknown model must over-report, never under-report.
+
+    A surprise that shows up as a number someone questions is recoverable. One that
+    shows up as a number nobody notices is not.
+    """
+    price, known = price_for("claude-not-yet-released")
+    assert known is False
+    assert price > price_for("claude-opus-5")[0]
+
+    with caplog.at_level(logging.WARNING):
+        cost = estimated_usd(ProviderUsage(input_tokens=1_000_000), "claude-not-yet-released")
+
+    assert cost > estimated_usd(ProviderUsage(input_tokens=1_000_000), "claude-opus-5")
+    assert "provider_price_unknown" in caplog.text
+
+
+def test_the_adapter_records_cache_writes_from_the_sdk_response() -> None:
+    """The whole cost chain downstream is plumbing until this field is populated."""
+
+    @dataclass
+    class UsageWithWrites:
+        input_tokens: int = 1200
+        output_tokens: int = 300
+        cache_read_input_tokens: int = 0
+        cache_creation_input_tokens: int = 4351
+
+    provider, _ = a_provider(
+        responds_with(a_label(), usage=UsageWithWrites())  # type: ignore[arg-type]
+    )
+    usage = provider.extract(a_request()).usage
+
+    assert usage.cache_creation_tokens == 4351
+    assert estimated_usd(usage, "claude-opus-5") > 0
 
 
 def test_the_adapter_logs_nothing_that_could_carry_label_text(capsys: Any) -> None:

@@ -43,12 +43,19 @@ class ProviderUsage:
     input_tokens: int = 0
     output_tokens: int = 0
     cache_read_tokens: int = 0
+
+    #: Tokens written INTO the cache, billed at 1.25x input. Counted separately because
+    #: they are neither free nor the same price as anything else, and because omitting
+    #: them under-reports every cold request — which is every first click a grader makes.
+    cache_creation_tokens: int = 0
+
     model: str = ""
 
     def merge(self, other: ProviderUsage) -> None:
         self.input_tokens += other.input_tokens
         self.output_tokens += other.output_tokens
         self.cache_read_tokens += other.cache_read_tokens
+        self.cache_creation_tokens += other.cache_creation_tokens
         self.model = self.model or other.model
 
 
