@@ -111,6 +111,55 @@ def equal_after_normalization(left: str, right: str) -> bool:
     return normalize(left) == normalize(right)
 
 
+def contains_after_normalization(haystack: str, needle: str) -> bool:
+    """Does the label's text carry the application's value inside a longer statement?
+
+    Real labels do not print a bare producer or a bare country. They print "BOTTLED BY
+    FOUND NORTH WHISKY, CAMBRIDGE, WI" and "DISTILLED IN CANADA" — the required
+    information wrapped in the lead-in phrasing the regulation itself uses. An
+    application record holds the bare value, so demanding equality reports a mismatch on
+    every compliant import, which is what three real photographs each did.
+
+    Matched on TOKEN BOUNDARIES, not as a raw substring: "Canada" must not be found
+    inside "Canadaville", and a bare substring test would do exactly that.
+
+    This is deliberately not offered for every field. A brand name buried inside a longer
+    string is not the same claim as a brand name — see `compare_brand_name`, which does
+    not use it.
+    """
+    hay = normalize(haystack).split()
+    need = normalize(needle).split()
+    if not need or len(need) > len(hay):
+        return False
+    return any(
+        hay[start : start + len(need)] == need for start in range(len(hay) - len(need) + 1)
+    )
+
+
+def surrounding_words(
+    haystack: str, needle: str, *, matched_on: tuple[str, str] | None = None
+) -> str:
+    """What the label says around the application's value, for the agent to read.
+
+    An acceptable variation still has to show its working: the row says the label agrees
+    AND shows the extra words, so a reviewer can see it was "Bottled by" and not
+    something that changes the meaning.
+    """
+    # Locating and quoting are different jobs. `matched_on` carries the pair the
+    # caller actually matched with (possibly rewritten by a field normalizer); the
+    # words returned always come from the label's own text.
+    located_hay, located_need = matched_on or (haystack, needle)
+    hay_tokens = collapse_whitespace(haystack).split()
+    hay = normalize(located_hay).split()
+    need = normalize(located_need).split()
+    for start in range(len(hay) - len(need) + 1):
+        if hay[start : start + len(need)] == need:
+            before = " ".join(hay_tokens[:start])
+            after = " ".join(hay_tokens[start + len(need) :])
+            return " … ".join(part for part in (before, after) if part)
+    return ""
+
+
 def classify_variation(left: str, right: str) -> list[Variation]:
     """Tier 2: which classes of difference account for two strings being equal?
 

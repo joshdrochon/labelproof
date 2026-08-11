@@ -8,6 +8,7 @@ them, which is the argument for Tier B existing at all.
 from __future__ import annotations
 
 from api import canon
+from api.models import Verdict
 from api.rules import warning
 
 
@@ -58,3 +59,72 @@ def test_capitals_detection_ignores_a_fragment() -> None:
     assert warning.is_set_in_capitals(canon.CANONICAL_WARNING.upper())
     assert not warning.is_set_in_capitals("GW:")
     assert not warning.is_set_in_capitals(canon.CANONICAL_WARNING)
+
+
+# --- the label carries the value inside a longer statement -------------------------------
+
+def test_a_producer_printed_with_its_lead_in_phrase_is_not_a_mismatch() -> None:
+    """Found on a Found North bottle and a Fireball bottle, independently.
+
+    Labels do not print a bare producer. They print "PRODUCED BY SAZERAC CO., INC.,
+    FRANKFORT, KY" and "DISTILLED IN CANADA. BOTTLED BY FOUND NORTH WHISKY, CAMBRIDGE,
+    WI". The application record holds the bare value, so demanding equality reported a
+    mismatch on every compliant label of this shape.
+    """
+    from api.models import ExtractedField
+    from api.rules.compare import compare_producer
+
+    result = compare_producer(
+        ExtractedField(
+            value="DISTILLED IN CANADA. BOTTLED BY FOUND NORTH WHISKY, CAMBRIDGE, WI",
+            confidence=0.95,
+            legible=True,
+        ),
+        "Found North Whisky",
+        "Cambridge, WI",
+    )
+
+    assert result.verdict is not Verdict.MISMATCH
+    assert result.verdict is Verdict.ACCEPTABLE_VARIATION
+    # The extra words must be shown, not swallowed — an acceptable variation still has
+    # to let the agent see what else the label says.
+    assert "distilled in canada" in result.rationale.casefold()
+
+
+def test_a_country_stated_as_distilled_in_is_not_a_mismatch() -> None:
+    from api.models import ExtractedField
+    from api.rules.compare import compare_country_of_origin
+
+    result = compare_country_of_origin(
+        ExtractedField(value="DISTILLED IN CANADA.", confidence=0.95, legible=True),
+        "Canada",
+        is_import=True,
+    )
+
+    assert result.verdict is Verdict.ACCEPTABLE_VARIATION
+
+
+def test_containment_is_matched_on_word_boundaries() -> None:
+    """A raw substring test would find "Canada" inside "Canadaville"."""
+    from api.rules.normalize import contains_after_normalization
+
+    assert contains_after_normalization("DISTILLED IN CANADA", "Canada")
+    assert not contains_after_normalization("Product of Canadaville", "Canada")
+    assert not contains_after_normalization("Canada", "Distilled in Canada")
+
+
+def test_a_brand_name_does_not_get_the_surrounding_text_allowance() -> None:
+    """A brand buried in a longer string is not the same claim as the brand.
+
+    The allowance is scoped to fields whose regulated phrasing wraps the value. If it
+    ever leaks onto brand_name, a label reading "NOT OLD TOM DISTILLERY" would pass.
+    """
+    from api.models import ExtractedField
+    from api.rules.compare import compare_brand_name
+
+    result = compare_brand_name(
+        ExtractedField(value="DEFINITELY NOT OLD TOM DISTILLERY", confidence=0.9, legible=True),
+        "Old Tom Distillery",
+    )
+
+    assert result.verdict is Verdict.MISMATCH

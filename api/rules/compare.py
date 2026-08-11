@@ -36,7 +36,9 @@ from api.rules import commodity as com
 from api.rules import fills as fill_rules
 from api.rules.normalize import (
     classify_variation,
+    contains_after_normalization,
     equal_after_normalization,
+    surrounding_words,
     variation_note,
 )
 
@@ -117,8 +119,16 @@ def compare_text(
     label: str = "value",
     findings: list[Finding] | None = None,
     normalizer: Callable[[str], str] | None = None,
+    allow_surrounding_text: bool = False,
 ) -> FieldResult:
-    """Tier 1/2 comparison for a free-text field."""
+    """Tier 1/2 comparison for a free-text field.
+
+    `allow_surrounding_text` opts a field into accepting the application's value
+    carried INSIDE a longer printed statement. Off by default and deliberately so —
+    it is right for a producer or a country, whose regulated phrasing wraps the value
+    ("Bottled by …", "Distilled in …"), and wrong for a brand name, where the brand
+    buried in a longer string is not the same claim as the brand.
+    """
     findings = findings or []
     evidence = (
         # image_index is a placeholder, NOT the answer. A comparator is handed one value
@@ -157,6 +167,36 @@ def compare_text(
         )
 
     left, right = (normalizer(found), normalizer(expected)) if normalizer else (found, expected)
+
+    if (
+        allow_surrounding_text
+        and not equal_after_normalization(left, right)
+        and contains_after_normalization(left, right)
+    ):
+        # The label carries the application's value inside a longer statement — "BOTTLED
+        # BY …", "DISTILLED IN …". That is how labels are printed, and demanding equality
+        # reported a mismatch on every compliant import (found on three real
+        # photographs). Acceptable variation rather than Match, because the agent should
+        # still see the extra words and decide they are innocuous.
+        # Located on the NORMALIZED text, quoted from the ORIGINAL. The normalizer
+        # exists to make two spellings compare equal, not to be shown to anyone —
+        # `expand_state_abbreviations` rewrites "DISTILLED IN CANADA" to
+        # "distilled indiana canada", which is fine to match on and absurd to print.
+        context = surrounding_words(found, expected, matched_on=(left, right))
+        return FieldResult(
+            field=field,
+            verdict=Verdict.ACCEPTABLE_VARIATION,
+            extracted=found,
+            expected=expected,
+            confidence=extracted.confidence if extracted else 1.0,
+            rationale=(
+                f"The label states the {label} within a longer phrase"
+                + (f' — it also reads "{context}".' if context else ".")
+            ),
+            tier=2,
+            evidence=evidence,
+            findings=findings,
+        )
 
     if equal_after_normalization(left, right):
         variations = classify_variation(left, right)
@@ -225,6 +265,7 @@ def compare_producer(
         required=True,
         label="bottler or producer name and address",
         normalizer=expand_state_abbreviations,
+        allow_surrounding_text=True,
     )
 
 
@@ -239,6 +280,7 @@ def compare_country_of_origin(
         required=is_import,
         not_applicable_reason="Country of origin is required only for imported products.",
         label="country of origin",
+        allow_surrounding_text=True,
     )
 
 
