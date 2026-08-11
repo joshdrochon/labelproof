@@ -89,7 +89,12 @@ def gates_for(report: Report) -> list[Gate]:
     violations = len(report.warning_violations)
 
     missing = report.missing_required_violations
-    if report.undeclared_violations:
+    if report.misrendered_violations:
+        coverage_summary = (
+            f"fixture(s) stopped DRAWING their pinned defect: "
+            f"{'; '.join(report.misrendered_violations)}"
+        )
+    elif report.undeclared_violations:
         coverage_summary = (
             f"fixture(s) stopped DECLARING a violation: "
             f"{', '.join(report.undeclared_violations)} — the row left the gate entirely"
@@ -117,7 +122,9 @@ def gates_for(report: Report) -> list[Gate]:
         # which fixtures this run selected, so a --fixture subset must not launder it.
         status=(
             _status(report.warning_coverage_ok)
-            if report.undeclared_violations or not report.subset
+            if report.undeclared_violations
+            or report.misrendered_violations
+            or not report.subset
             else SKIP
         ),
         blocking=True,

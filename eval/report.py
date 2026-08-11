@@ -215,6 +215,18 @@ def warning_section(report: Report) -> list[str]:
             out.append(f"    {o.fixture:34s} got {verdict:22s} waiting on {o.pending}")
         out.append("  'pending' cannot hide a false pass — it is still counted above.")
 
+    if report.misrendered_violations:
+        out.append("")
+        out.append("  RENDER SHORTFALL — fixture(s) stopped drawing their pinned defect:")
+        for detail in report.misrendered_violations:
+            out.append(f"    {detail}")
+        out.append(
+            "  Pinned in WARNING_DEFECT_PINS. Swapping a hard defect for one the rules"
+        )
+        out.append(
+            "  engine already catches makes the row go green without fixing anything."
+        )
+
     if report.undeclared_violations:
         out.append("")
         out.append("  DECLARATION SHORTFALL — fixture(s) stopped declaring a violation:")

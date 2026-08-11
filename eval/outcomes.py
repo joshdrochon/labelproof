@@ -31,7 +31,9 @@ from api.provider.base import ExtractionProvider, ImageInput
 from api.provider.fake import SpecBackedProvider
 from api.verify import verify
 from fixtures.generator.catalog import (
+    MUST_DECLARE_WARNING_VIOLATION,
     REQUIRED_WARNING_VIOLATIONS,
+    misrendered_warning_fixtures,
     undeclared_warning_violations,
 )
 from fixtures.generator.spec import LabelSpec
@@ -57,6 +59,15 @@ class FieldOutcome:
     pending: str = ""
     """Ticket this outcome is waiting on. Reported, never counted as a failure."""
 
+    pinned_violation: bool = False
+    """The repository pins this fixture as a warning violation, whatever `expect` says.
+
+    Without this, deleting `expect` demoted a live false pass from exit 3 to exit 5 —
+    non-zero, so not a bypass, but "coverage shortfall" is the wrong page for "a label
+    that violates 27 CFR 16.21 was reported compliant". The pin is the authority; `expect`
+    only adds to it.
+    """
+
     @property
     def correct(self) -> bool:
         return self.expected is self.actual and not self.missing_findings
@@ -67,8 +78,10 @@ class FieldOutcome:
 
     @property
     def declares_warning_violation(self) -> bool:
-        """A warning row the golden set says must NOT pass, pending or not."""
-        return self.is_warning_row and self.expected not in PASSING
+        """A warning row that must NOT pass — by declaration or by pin, pending or not."""
+        return self.is_warning_row and (
+            self.pinned_violation or self.expected not in PASSING
+        )
 
     @property
     def is_warning_violation(self) -> bool:
@@ -135,6 +148,16 @@ class Report:
     checks quietly becoming four, with the report cheerfully reporting "0 false passes
     across 4 violation row(s)". This is the committed list the run is measured against,
     so a shrinking denominator has to shrink this list too, in a reviewable diff.
+    """
+
+    misrendered_violations: list[str] = dc_field(default_factory=list)
+    """Pinned fixtures that stopped DRAWING the defect they exist to prove is caught.
+
+    The third door, and the one that showed the others were protecting the wrong noun.
+    `pending` and `expect` are declarations about a fixture; this is the fixture. Adding
+    `warning_header_case="title"` to the prominence case made the pipeline answer
+    `mismatch` — satisfying the expectation, firing no gate — while the prominence
+    violation went on being undetected. An easy defect had quietly stood in for a hard one.
     """
 
     undeclared_violations: list[str] = dc_field(default_factory=list)
@@ -226,7 +249,7 @@ class Report:
         catalog, not of which fixtures this run happened to select, so narrowing must not
         launder it.
         """
-        if self.undeclared_violations:
+        if self.undeclared_violations or self.misrendered_violations:
             return False
         if self.subset:
             return True
@@ -286,6 +309,10 @@ def outcome_for(
         actual=actual,
         missing_findings=[c for c in wanted_codes if c not in raised_codes],
         pending=spec.pending,
+        pinned_violation=(
+            field_name is FieldName.GOVERNMENT_WARNING
+            and spec.name in MUST_DECLARE_WARNING_VIOLATION
+        ),
     )
 
 
@@ -321,10 +348,17 @@ def evaluate(
             REQUIRED_WARNING_VIOLATIONS if required_violations is None else required_violations
         ),
         undeclared_violations=undeclared_warning_violations(list(specs)),
+        misrendered_violations=misrendered_warning_fixtures(list(specs)),
     )
 
     for spec in specs:
         try:
+            # `expected_verdicts` is INSIDE the try on purpose. A typo in a fixture's
+            # `expect` — an unknown verdict, a key with a stray space — raises ValueError,
+            # and outside the try that reached the operator as a traceback and exit 1,
+            # which this harness's own table defines as "accuracy below the floor". A
+            # malformed catalog is a harness error (exit 4) and belongs on that page.
+            expected = expected_verdicts(spec)
             roles = ["front", "back"] if spec.face != "single" else ["single"]
             images = [ImageInput(index=i, data=b"", role=r) for i, r in enumerate(roles)]
             application = Application.model_validate(spec.application())
@@ -334,7 +368,6 @@ def evaluate(
             report.errors.append((spec.name, f"{type(exc).__name__}: {exc}"))
             continue
 
-        expected = expected_verdicts(spec)
         for field_result in result.fields:
             report.outcomes.append(
                 outcome_for(

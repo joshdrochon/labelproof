@@ -42,6 +42,10 @@ from fixtures.generator.catalog import (
     CATALOG,
     MUST_DECLARE_WARNING_VIOLATION,
     REQUIRED_WARNING_VIOLATIONS,
+    WARNING_DEFECT_PINS,
+    by_name,
+    misrendered_warning_fixtures,
+    warning_defects,
 )
 from fixtures.generator.spec import LabelSpec
 
@@ -194,8 +198,27 @@ def test_the_declaration_pin_fires_when_an_expectation_is_emptied() -> None:
     assert report.undeclared_violations == ["tc06_buried_warning"]
     assert not report.warning_coverage_ok
     assert not report.passed
-    assert exit_code_for(gates_for(report)) == EXIT_WARNING_COVERAGE
     assert "DECLARATION SHORTFALL" in render(report)
+    # The pin, not `expect`, is the authority on whether this row is a violation — so
+    # neutering the declaration surfaces the live fail-open as a FALSE PASS rather than
+    # demoting it to a coverage shortfall. "Coverage" is the wrong page for
+    # "a label violating 27 CFR 16.21 was reported compliant".
+    assert exit_code_for(gates_for(report)) == EXIT_WARNING_FALSE_PASS
+    assert {o.fixture for o in report.false_passes} == {"tc06_buried_warning"}
+
+
+def test_neutering_expect_on_a_pinned_fixture_that_is_caught_is_a_coverage_failure() -> None:
+    """When the pipeline does catch the defect, the shortfall is genuinely coverage."""
+    gutted = [
+        spec.with_(expect={}) if spec.name == "tc04_bold_warning_body" else spec
+        for spec in CATALOG
+    ]
+    report = evaluate(gutted)
+    assert report.undeclared_violations == ["tc04_bold_warning_body"]
+    slipped = {o.fixture for o in report.false_passes}
+    assert "tc04_bold_warning_body" not in slipped, "the pipeline still answers mismatch"
+    # tc06's separate, live fail-open is the only thing in there.
+    assert slipped <= KNOWN_LIVE_FALSE_PASSES
 
 
 def test_a_passing_expectation_is_as_bad_as_no_expectation() -> None:
@@ -207,6 +230,173 @@ def test_a_passing_expectation_is_as_bad_as_no_expectation() -> None:
     ]
     report = evaluate(gutted)
     assert "tc04_bold_warning_body" in report.undeclared_violations
+    assert not report.passed
+
+
+# --- what the fixture RENDERS, not what is declared about it -----------------------------------
+
+def test_every_pinned_fixture_draws_exactly_its_pinned_defect() -> None:
+    assert misrendered_warning_fixtures(list(CATALOG)) == []
+
+
+def test_the_pins_and_the_defect_derivation_agree_on_the_real_catalog() -> None:
+    """Reading the pins should tell you what the set covers, without opening the specs."""
+    for name, pinned in WARNING_DEFECT_PINS.items():
+        spec = by_name(name)
+        assert warning_defects(spec) == pinned, name
+
+
+@pytest.mark.parametrize(
+    ("changes", "why"),
+    [
+        ({"warning_header_case": "title"}, "adds a defect the rules engine already catches"),
+        ({"warning_body_bold": True}, "adds a catchable defect"),
+        ({"warning_header_bold": False}, "adds a catchable defect"),
+        ({"include_warning": False}, "swaps the hard case for the easiest one"),
+        ({"warning_scale": 1.0, "warning_contrast": 1.0}, "removes the defect entirely"),
+        (
+            {"warning_scale": 1.0, "warning_contrast": 1.0, "warning_header_case": "title"},
+            "the two-line retarget that reads innocent in a diff",
+        ),
+    ],
+)
+def test_tc06_cannot_be_retargeted_away_from_prominence(
+    changes: dict[str, object], why: str
+) -> None:
+    """The third door. Every pin before this one protected a declaration ABOUT tc06.
+
+    Adding any catchable defect makes the pipeline answer `mismatch`, which satisfies the
+    expectation, so nothing fired — while the 16.21 prominence violation went on being
+    completely undetected. The fixture had simply stopped isolating it.
+    """
+    retargeted = [
+        spec.with_(**changes) if spec.name == "tc06_buried_warning" else spec
+        for spec in CATALOG
+    ]
+    report = evaluate(retargeted)
+    assert report.misrendered_violations, why
+    assert "tc06_buried_warning" in report.misrendered_violations[0]
+    assert not report.passed
+    assert exit_code_for(gates_for(report)) in (
+        EXIT_WARNING_COVERAGE,
+        EXIT_WARNING_FALSE_PASS,
+    )
+    assert "RENDER SHORTFALL" in render(report)
+
+
+CLEAN_WARNING = {
+    "include_warning": True,
+    "warning_text": None,
+    "warning_header_case": "upper",
+    "warning_header_bold": True,
+    "warning_body_bold": False,
+    "warning_scale": 1.0,
+    "warning_contrast": 1.0,
+}
+
+
+@pytest.mark.parametrize("name", sorted(WARNING_DEFECT_PINS))
+def test_the_render_pin_covers_every_warning_fixture_not_just_tc06(name: str) -> None:
+    """Neutralising any pinned fixture is the same attack, and is caught the same way."""
+    neutralised = [
+        spec.with_(**CLEAN_WARNING) if spec.name == name else spec
+        for spec in CATALOG
+    ]
+    problems = misrendered_warning_fixtures(neutralised)
+    assert any(name in p for p in problems), problems
+
+
+@pytest.mark.parametrize("name", sorted(WARNING_DEFECT_PINS))
+def test_adding_a_second_defect_is_caught_on_every_pinned_fixture(name: str) -> None:
+    """Adding is as bad as removing: an easy defect standing in for a hard one."""
+    spec = by_name(name)
+    if not spec.include_warning:
+        pytest.skip("typography knobs are meaningless when the warning is absent")
+    extra = "body_bold" not in WARNING_DEFECT_PINS[name]
+    swapped = [
+        s.with_(warning_body_bold=extra, warning_header_bold=not extra)
+        if s.name == name
+        else s
+        for s in CATALOG
+    ]
+    assert any(name in p for p in misrendered_warning_fixtures(swapped))
+
+
+def test_the_defect_derivation_reads_pixels_not_intent() -> None:
+    base = by_name("tc01_old_tom_clean")
+    assert warning_defects(base) == frozenset()
+    assert warning_defects(base.with_(include_warning=False)) == frozenset({"absent"})
+    assert warning_defects(base.with_(warning_scale=0.45)) == frozenset({"prominence"})
+    assert warning_defects(base.with_(warning_contrast=0.35)) == frozenset({"prominence"})
+    # A warning that is small but still legible is not a prominence defect.
+    assert warning_defects(base.with_(warning_scale=0.9)) == frozenset()
+    assert warning_defects(
+        base.with_(warning_body_bold=True, warning_header_case="title")
+    ) == frozenset({"body_bold", "header_not_all_caps"})
+
+
+def test_a_missing_fixture_cannot_satisfy_its_render_pin() -> None:
+    """Deleting the fixture must not silently satisfy the pin by absence."""
+    without = [s for s in CATALOG if s.name != "tc06_buried_warning"]
+    assert misrendered_warning_fixtures(without) == [], (
+        "absence is caught by the existence pin, not this one"
+    )
+    names = {s.name for s in without}
+    assert not names >= MUST_DECLARE_WARNING_VIOLATION
+
+
+@pytest.mark.parametrize(
+    "bad_expect",
+    [
+        {"government_warning": "probably_fine"},
+        {"government_warning ": "mismatch"},
+        {"vintage": "match"},
+        {"government_warning": ""},
+    ],
+)
+def test_a_malformed_expectation_is_a_harness_error_not_an_accuracy_failure(
+    bad_expect: dict[str, str],
+) -> None:
+    """A typo in the catalog exited 1 — the code this harness defines as 'below floor'.
+
+    Same class as the `nan` threshold bug: a configuration mistake wearing a gate's exit
+    code. pytest caught it because pytest shows tracebacks; the harness did not.
+    """
+    broken = [
+        spec.with_(expect=bad_expect) if spec.name == "tc01_old_tom_clean" else spec
+        for spec in CATALOG
+    ]
+    report = evaluate(broken)
+    assert any("tc01_old_tom_clean" in name for name, _ in report.errors)
+    assert exit_code_for(gates_for(report)) in (
+        EXIT_HARNESS_ERROR,
+        EXIT_WARNING_FALSE_PASS,
+    )
+    assert "did not run at all" in render(report)
+
+
+def test_the_cli_survives_a_malformed_catalog(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """No traceback, and an exit code that names the right problem."""
+    import eval.run as run_module
+
+    broken = [CATALOG[0].with_(expect={"government_warning": "probably_fine"}), *CATALOG[1:]]
+    monkeypatch.setattr(run_module, "CATALOG", broken)
+    code = main(["--json"])
+    body = json.loads(capsys.readouterr().out)
+    assert code != EXIT_ACCURACY
+    assert body["errors"], "the malformed fixture must be reported, not raised"
+
+
+def test_a_subset_run_cannot_launder_a_retargeted_fixture() -> None:
+    retargeted = [
+        spec.with_(warning_scale=1.0, warning_contrast=1.0)
+        for spec in CATALOG
+        if spec.name == "tc06_buried_warning"
+    ]
+    report = evaluate(retargeted, subset=True)
+    assert report.misrendered_violations
     assert not report.passed
 
 

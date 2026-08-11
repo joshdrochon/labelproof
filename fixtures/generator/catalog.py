@@ -244,6 +244,90 @@ MUST_DECLARE_WARNING_VIOLATION: frozenset[str] = REQUIRED_WARNING_VIOLATIONS | {
 }
 
 
+# --------------------------------------------------------------------------------------
+# What a fixture RENDERS — the defect it embodies, not a declaration about it
+# --------------------------------------------------------------------------------------
+#
+# Three reviews found three doors into the zero-false-pass gate, each one line:
+# `pending` suppressed the false pass, `expect` removed the declaration, and then simply
+# drawing a *different* defect made the pipeline answer `mismatch` — which satisfied the
+# expectation, so nothing fired, while the violation the fixture existed to catch went
+# right on being undetected.
+#
+# The pattern was that every pin protected a DECLARATION ABOUT the fixture. These pin the
+# DEFECT ITSELF. A fixture whose whole job is to prove that a buried warning is caught has
+# to keep burying the warning, and has to keep doing only that: swapping the prominence
+# knobs for a title-case header turns a hard case into an easy one that the rules engine
+# already catches, and the swap reads like a routine retarget in a diff.
+
+#: Scale below which the warning counts as rendered too small to be prominent (WARN-5).
+PROMINENCE_SCALE_CEILING = 0.6
+
+#: Contrast below which the warning counts as rendered too faint (WARN-5).
+PROMINENCE_CONTRAST_CEILING = 0.5
+
+
+def warning_defects(spec: LabelSpec) -> frozenset[str]:
+    """Exactly which 27 CFR 16.21/16.22 defects this spec DRAWS.
+
+    Derived from the render parameters, so it describes pixels rather than intent. A spec
+    with no defects returns the empty set.
+    """
+    if not spec.include_warning:
+        return frozenset({"absent"})
+
+    defects: set[str] = set()
+    if spec.warning_header_case != "upper":
+        defects.add("header_not_all_caps")
+    if not spec.warning_header_bold:
+        defects.add("header_not_bold")
+    if spec.warning_body_bold:
+        defects.add("body_bold")
+    if spec.warning_text is not None:
+        defects.add("text_altered")
+    if (
+        spec.warning_scale < PROMINENCE_SCALE_CEILING
+        or spec.warning_contrast < PROMINENCE_CONTRAST_CEILING
+    ):
+        defects.add("prominence")
+    return frozenset(defects)
+
+
+#: fixture name -> the EXACT defect set it must render. Equality, not containment.
+#:
+#: Exact, because both directions are attacks. Removing the pinned defect stops the
+#: fixture testing anything; adding another one lets an easy defect stand in for a hard
+#: one, and the report still shows a green row. `tc06_buried_warning` is the case that
+#: matters most: prominence heuristics do not exist yet (LP-211), so it is the one fixture
+#: whose expectation is under discussion, and adding `warning_header_case="title"` to it
+#: made the pipeline answer `mismatch`, satisfy the expectation, and exit 0.
+WARNING_DEFECT_PINS: dict[str, frozenset[str]] = {
+    "tc03_title_case_warning": frozenset({"header_not_all_caps"}),
+    "tc04_bold_warning_body": frozenset({"body_bold"}),
+    "tc05_reworded_warning": frozenset({"text_altered"}),
+    "tc06_buried_warning": frozenset({"prominence"}),
+    "tc07_missing_warning": frozenset({"absent"}),
+}
+
+
+def misrendered_warning_fixtures(specs: list[LabelSpec]) -> list[str]:
+    """Pinned fixtures that no longer draw exactly the defect they were pinned to draw.
+
+    Reported as `name: drew {...}, pinned {...}` so the diff is legible without opening
+    the catalog.
+    """
+    present = {spec.name: spec for spec in specs}
+    wrong = []
+    for name in sorted(WARNING_DEFECT_PINS.keys() & present.keys()):
+        drew = warning_defects(present[name])
+        pinned = WARNING_DEFECT_PINS[name]
+        if drew != pinned:
+            wrong.append(
+                f"{name}: draws {sorted(drew) or 'no defect'}, pinned {sorted(pinned)}"
+            )
+    return wrong
+
+
 def declares_warning_violation(spec: LabelSpec) -> bool:
     """Does this spec's `expect` say the warning must NOT pass?"""
     expected = spec.expect.get("government_warning")
