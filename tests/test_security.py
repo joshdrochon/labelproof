@@ -197,6 +197,27 @@ def test_a_route_that_set_its_own_header_keeps_it() -> None:
     assert client.get("/export.csv").headers["cache-control"] == "private, max-age=60"
 
 
+def test_hardening_twice_does_not_halve_the_rate_limit() -> None:
+    """Two rate limiters in the stack means every request spends two tokens.
+
+    That is the failure mode of a well-intentioned second wiring line: the 30/min ceiling
+    silently becomes 15 and the first thing to break is the demo. `harden` returns the
+    policy it already installed instead.
+    """
+    app = FastAPI()
+
+    @app.post("/verify")
+    def verify() -> JSONResponse:
+        return JSONResponse({"ok": True})
+
+    first = harden(app, make_config(rate_limit_per_minute=4))
+    second = harden(app, make_config(rate_limit_per_minute=4))
+    assert second is first
+
+    client = TestClient(app)
+    assert [client.post("/verify").status_code for _ in range(4)] == [200] * 4
+
+
 def test_the_real_app_is_hardened_end_to_end() -> None:
     """Not a stand-in: `create_app` plus `harden`, exercising the shipped stack."""
     app = create_app(config=make_config())
@@ -338,28 +359,37 @@ def _uvicorn_error_logger() -> logging.Logger:
     return logger
 
 
-def _drive_a_failing_verification(*, hardened: bool) -> tuple[int | None, bool]:
-    """Run a verification whose provider raises label text. Returns (status, escaped).
+def _drive(app: FastAPI, request: Any) -> tuple[int | None, bool]:
+    """Send `request`, and hand whatever escapes to the uvicorn stand-in.
 
-    `raise_server_exceptions=True` is deliberate: it is how Starlette surfaces the
-    re-raise that `ServerErrorMiddleware` performs, which is the exact object uvicorn would
-    receive in production. Whatever escapes is handed to the uvicorn stand-in.
+    `raise_server_exceptions=True` is deliberate: it is how Starlette surfaces the re-raise
+    that `ServerErrorMiddleware` performs, which is the exact object uvicorn would receive
+    in production. Returns `(status, escaped)`.
     """
-    applog.configure()
-    app = create_app(config=make_config(), provider=ExplodingProvider())
-    if hardened:
-        harden(app, make_config())
     client = TestClient(app, raise_server_exceptions=True)
-
-    application, files = _verify_payload()
     try:
-        response = client.post(
-            "/verify", data={"application": json.dumps(application)}, files=files
-        )
+        response = request(client)
     except Exception:
         _uvicorn_error_logger().error("Exception in ASGI application", exc_info=True)
         return None, True
     return response.status_code, False
+
+
+def _drive_a_failing_verification(*, hardened: bool) -> tuple[int | None, bool]:
+    """Run a real verification whose provider raises label text."""
+    applog.configure()
+    app = create_app(config=make_config(), provider=ExplodingProvider())
+    if hardened:
+        harden(app, make_config())
+
+    application, files = _verify_payload()
+
+    def post(client: TestClient) -> Any:
+        return client.post(
+            "/verify", data={"application": json.dumps(application)}, files=files
+        )
+
+    return _drive(app, post)
 
 
 def test_the_http_traceback_leak_is_real_without_the_fix(capfd: Any) -> None:
@@ -367,14 +397,26 @@ def test_the_http_traceback_leak_is_real_without_the_fix(capfd: Any) -> None:
 
     `api/logging.py` allowlists field names and raises on anything else. That is deliberate
     and correct and nothing here weakens it — but it governs `applog.log` and nothing else.
-    A provider exception whose message carries label text escapes the app entirely,
+    An exception whose message carries label text escapes the app entirely,
     `ServerErrorMiddleware` re-raises it after the registered handler runs, and uvicorn
     formats the whole traceback to stdout. The allowlist never sees that path.
+
+    The unhardened app is built here rather than borrowed from `create_app`, on purpose:
+    once the app factory installs the posture by default, `create_app` will have no
+    unhardened form and this test would quietly stop demonstrating anything. A bare app
+    that raises exercises the identical mechanism — route raises, `ServerErrorMiddleware`
+    re-raises, the server formats it — and keeps demonstrating it forever.
     """
     security.remove_log_containment()
     _uvicorn_error_logger()
 
-    status, escaped = _drive_a_failing_verification(hardened=False)
+    bare = FastAPI()
+
+    @bare.get("/boom")
+    def boom() -> JSONResponse:
+        raise RuntimeError(LABEL_TEXT)
+
+    status, escaped = _drive(bare, lambda client: client.get("/boom"))
     leaked = capfd.readouterr().out
 
     assert escaped, "the exception should reach the server, which is the leak"

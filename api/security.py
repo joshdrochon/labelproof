@@ -335,8 +335,19 @@ def harden(app: FastAPI, config: Config | None = None) -> SecurityPolicy:
     than infer it. Everything installed here is inert until this runs, so a deployment that
     forgets the call is unhardened but never broken — which is the right failure direction
     for a wiring mistake.
+
+    **Calling it twice is a no-op, deliberately.** Middleware added a second time is not
+    harmless here: two rate limiters in the stack means every request spends two tokens, so
+    the 30/min ceiling silently becomes 15 and the first thing to break is the demo. Once
+    the app factory installs the posture, a caller that installs it again — a test, a
+    fixture, a second wiring line someone added in good faith — gets the policy back
+    unchanged rather than a quietly halved budget.
     """
     from api.middleware import install_middleware
+
+    existing: SecurityPolicy | None = getattr(app.state, "security_policy", None)
+    if existing is not None:
+        return existing
 
     policy = SecurityPolicy.from_config(config)
 
