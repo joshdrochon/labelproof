@@ -203,6 +203,15 @@ def _hardened(**policy_overrides: Any) -> tuple[FastAPI, SecurityPolicy]:
     return app, policy
 
 
+@pytest.fixture(autouse=True)
+def _restore_containment() -> Any:
+    """`harden` installs process-wide traceback containment; put it back afterwards."""
+    from api import security
+
+    yield
+    security.remove_log_containment()
+
+
 def test_a_burst_gets_429_with_a_sentence_not_a_status_line() -> None:
     app, _ = _hardened(rate_limit_per_minute=3)
     client = TestClient(app)

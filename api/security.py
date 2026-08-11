@@ -2,23 +2,36 @@
 
 `harden(app, config)` is the whole front door. One call from the app factory installs the
 rate limiter, the response headers, the strict same-origin CORS rule, the exception
-containment layer, process-wide traceback containment, and the retention sweeper. One call
-rather than six because the posture is a single thing a reviewer should be able to read end
-to end, and because every extra wiring line in `api/main.py` is another chance to merge half
-of it.
+containment layer, and process-wide traceback containment. One call rather than five because
+the posture is a single thing a reviewer should be able to read end to end, and because every
+extra wiring line in `api/main.py` is another chance to merge half of it.
 
 **Order is load-bearing.** Starlette builds the user middleware stack so the *last*
 middleware added is the *outermost*, and `harden` is called after the app factory's own
-middleware. That is what puts the security headers on every response, including the ones an
-inner middleware short-circuits — the oversize-upload 413 never reaches a route, and a
-response nobody routed is still a response an attacker can read.
+middleware. That is what makes three things true:
+
+* Security headers land on every response, including the ones an inner middleware
+  short-circuits (the oversize-upload 413 never reaches a route).
+* The rate limiter refuses a flood before any work happens.
+* The containment middleware catches an exception **before** Starlette's
+  `ServerErrorMiddleware`, which calls the registered handler and then re-raises
+  unconditionally — and that re-raise is what puts a full traceback on stdout through
+  uvicorn's default handler, carrying whatever label text the exception message holds.
+
+That last one is the reason this module exists at all. `api/logging.py` allowlists field
+names and raises on anything else, so nothing can be logged deliberately. Nothing about that
+governs a traceback, which is why traceback containment is a second, separate layer here.
 """
 
 from __future__ import annotations
 
+import logging
 import os
+import sys
+import threading
+import types
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from api import logging as applog
 
@@ -138,6 +151,9 @@ class SecurityPolicy:
     #: Emit HSTS on requests we can see are HTTPS.
     hsts: bool = True
 
+    #: Replace tracebacks with a scrubbed line everywhere in the process (SEC-4).
+    contain_tracebacks: bool = True
+
     warnings: list[str] = field(default_factory=list)
 
     @classmethod
@@ -163,7 +179,130 @@ class SecurityPolicy:
             ),
             allowed_origins=origins,
             hsts=_env_flag("LABELPROOF_HSTS", True),
+            contain_tracebacks=not _env_flag("LABELPROOF_DEBUG_TRACEBACKS", False),
         )
+
+
+# --- traceback containment ----------------------------------------------------------------
+#
+# `api/logging.py` makes it impossible to log label content on purpose. Nothing there governs
+# an *accident*: a traceback formatted by uvicorn, by `threading.excepthook`, or by asyncio's
+# default handler bypasses the allowlist entirely, and exception messages in this codebase
+# carry label text for real — a pydantic `ValidationError` renders `input_value=...`, which
+# on the extraction path is the label, and on `BatchStore.claim()` is the application's brand
+# name and producer address raised on a worker thread.
+#
+# The hook used is `logging.setLogRecordFactory`, because it is the one place every logger
+# and every handler in the process funnels through. Filters were the obvious alternative and
+# do not work here: a filter attached to a `Logger` does not run for records propagated from
+# a child, and uvicorn sets `propagate=False` on its own loggers — so a root filter would
+# have missed precisely the leak being closed.
+
+_SCRUBBED = "%s suppressed: traceback withheld (SEC-4)"
+
+_original_record_factory: Any = None
+_original_excepthook: Any = None
+_original_thread_excepthook: Any = None
+_containment_lock = threading.Lock()
+
+
+def _exception_name(exc_info: object) -> str:
+    if isinstance(exc_info, tuple) and exc_info and isinstance(exc_info[0], type):
+        return exc_info[0].__name__
+    if isinstance(exc_info, BaseException):
+        return type(exc_info).__name__
+    return "Exception"
+
+
+def install_log_containment() -> None:
+    """Strip tracebacks from every log record created anywhere in this process.
+
+    Idempotent. The record keeps its logger, level and timestamp — only the traceback and
+    the message that would have carried it are replaced, and the replacement names the
+    exception class so a developer still knows what to reproduce. Log lines with no
+    `exc_info` are untouched, which is what keeps uvicorn's startup and bind lines readable.
+    """
+    global _original_record_factory, _original_excepthook, _original_thread_excepthook
+    with _containment_lock:
+        if _original_record_factory is not None:
+            return
+
+        base = logging.getLogRecordFactory()
+        _original_record_factory = base
+
+        def factory(*args: Any, **kwargs: Any) -> logging.LogRecord:
+            # LogRecord's positional contract:
+            #   (name, level, pathname, lineno, msg, args, exc_info, func, sinfo)
+            values = list(args)
+            exc_info = values[6] if len(values) > 6 else kwargs.get("exc_info")
+            sinfo = values[8] if len(values) > 8 else kwargs.get("sinfo")
+            if exc_info or sinfo:
+                name = _exception_name(exc_info)
+                if len(values) > 4:
+                    values[4] = _SCRUBBED
+                else:
+                    kwargs["msg"] = _SCRUBBED
+                if len(values) > 5:
+                    values[5] = (name,)
+                else:
+                    kwargs["args"] = (name,)
+                if len(values) > 6:
+                    values[6] = None
+                else:
+                    kwargs["exc_info"] = None
+                if len(values) > 8:
+                    values[8] = None
+                else:
+                    kwargs["sinfo"] = None
+            record = base(*values, **kwargs)
+            record.exc_info = None
+            record.exc_text = None
+            record.stack_info = None
+            return record
+
+        logging.setLogRecordFactory(factory)
+
+        _original_excepthook = sys.excepthook
+        _original_thread_excepthook = threading.excepthook
+        sys.excepthook = _scrubbed_excepthook
+        threading.excepthook = _scrubbed_thread_excepthook
+
+
+def remove_log_containment() -> None:
+    """Put the process back exactly as it was. Used by tests and by nothing else."""
+    global _original_record_factory, _original_excepthook, _original_thread_excepthook
+    with _containment_lock:
+        if _original_record_factory is None:
+            return
+        logging.setLogRecordFactory(_original_record_factory)
+        sys.excepthook = _original_excepthook
+        threading.excepthook = _original_thread_excepthook
+        _original_record_factory = None
+        _original_excepthook = None
+        _original_thread_excepthook = None
+
+
+def containment_active() -> bool:
+    return _original_record_factory is not None
+
+
+def _scrubbed_excepthook(
+    kind: type[BaseException], value: BaseException, tb: types.TracebackType | None
+) -> None:
+    """Uncaught on the main thread. `sys.excepthook` prints straight to stderr otherwise."""
+    applog.error(
+        "unhandled_exception", kind="internal", code="internal_error", reason_code=kind.__name__
+    )
+
+
+def _scrubbed_thread_excepthook(args: threading.ExceptHookArgs) -> None:
+    """Uncaught on a worker thread — the batch pool's leak path, and stderr-direct too."""
+    applog.error(
+        "unhandled_thread_exception",
+        kind="internal",
+        code="internal_error",
+        reason_code=args.exc_type.__name__,
+    )
 
 
 # --- the front door ------------------------------------------------------------------------
@@ -180,6 +319,10 @@ def harden(app: FastAPI, config: Config | None = None) -> SecurityPolicy:
     from api.middleware import install_middleware
 
     policy = SecurityPolicy.from_config(config)
+
+    if policy.contain_tracebacks:
+        install_log_containment()
+
     install_middleware(app, policy)
 
     app.state.security_policy = policy

@@ -12,6 +12,11 @@ buffers would pass while the bytes went out anyway.
 
 from __future__ import annotations
 
+import json
+import logging
+import sys
+import threading
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -20,11 +25,32 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse, PlainTextResponse
 from fastapi.testclient import TestClient
 
+from api import logging as applog
+from api import security
 from api.config import Config
 from api.main import create_app
-from api.security import CONTENT_SECURITY_POLICY, harden
+from api.provider.base import ExtractionRequest, ExtractionResponse
+from api.security import CONTENT_SECURITY_POLICY, SecurityPolicy, harden
 
 ROOT = Path(__file__).resolve().parents[1]
+LABELS = ROOT / "fixtures" / "labels"
+SAMPLE = ROOT / "assets" / "samples" / "old_tom.json"
+
+#: A string that could only have come off a label. If this appears anywhere in captured
+#: output, something bypassed the allowlist.
+LABEL_TEXT = "STONE'S THROW KENTUCKY STRAIGHT BOURBON — GOVERNMENT WARNING: (1) According to"
+
+
+@pytest.fixture(autouse=True)
+def _containment_is_never_left_installed() -> Iterator[None]:
+    """`harden` changes the process's log record factory. Always put it back.
+
+    Without this, one test in this file would silently scrub tracebacks for every test that
+    ran after it, in any file, which is the kind of cross-test coupling that turns a real
+    failure into a mystery.
+    """
+    yield
+    security.remove_log_containment()
 
 
 def make_config(**overrides: Any) -> Config:
@@ -54,6 +80,10 @@ def hardened_app(*, routes: bool = True, **policy_env: Any) -> FastAPI:
         @app.get("/assets/index-abc123.js")
         def asset() -> PlainTextResponse:
             return PlainTextResponse("console.log(1)", media_type="text/javascript")
+
+        @app.get("/boom")
+        def boom() -> JSONResponse:
+            raise RuntimeError(LABEL_TEXT)
 
         @app.get("/export.csv")
         def export() -> PlainTextResponse:
@@ -96,8 +126,7 @@ def test_permissions_policy_denies_every_capability_the_app_does_not_use() -> No
 def test_headers_reach_the_error_paths_too() -> None:
     """A header policy with holes in the errors is a policy attackers read errors for."""
     client = TestClient(hardened_app(), raise_server_exceptions=False)
-    for response in (client.get("/nope"), client.post("/nope")):
-        assert response.status_code >= 400
+    for response in (client.get("/nope"), client.get("/boom")):
         assert response.headers["x-content-type-options"] == "nosniff"
         assert "content-security-policy" in response.headers
 
@@ -267,3 +296,251 @@ def test_cross_origin_responses_vary_so_a_shared_cache_cannot_confuse_them() -> 
     assert "Origin" in client.get("/sample", headers={"Origin": "https://x.example"}).headers[
         "vary"
     ]
+
+
+# --- traceback containment (LP-086, SEC-4) -----------------------------------------------
+
+
+class ExplodingProvider:
+    """A provider whose failure message is label text, which is the realistic case.
+
+    Extraction responses are validated on receipt, and a pydantic `ValidationError` renders
+    `input_value=...` — on that path, the label the model just read.
+    """
+
+    name = "exploding"
+
+    def extract(self, request: ExtractionRequest) -> ExtractionResponse:
+        raise RuntimeError(LABEL_TEXT)
+
+
+def _verify_payload() -> tuple[dict[str, Any], list[tuple[str, tuple[str, bytes, str]]]]:
+    raw = json.loads(SAMPLE.read_text())
+    application = {k: v for k, v in raw.items() if not k.startswith("_")}
+    name = "tc01_old_tom_clean.png"
+    files = [("images", (name, (LABELS / name).read_bytes(), "image/png"))]
+    return application, files
+
+
+def _uvicorn_error_logger() -> logging.Logger:
+    """A stand-in for what uvicorn does with an exception that escapes the ASGI app.
+
+    uvicorn's HTTP protocol wraps the call in `try/except` and answers with
+    `logger.error("Exception in ASGI application", exc_info=exc)` on `uvicorn.error`, which
+    writes the formatted traceback to stdout. TestClient is not a server and never does
+    this, so a test that only drove TestClient would pass while the deployed app leaked —
+    this reproduces the missing half honestly rather than asserting around it.
+    """
+    logger = logging.getLogger("uvicorn.error")
+    logger.handlers = [logging.StreamHandler(sys.stdout)]
+    logger.propagate = False
+    logger.setLevel(logging.ERROR)
+    return logger
+
+
+def _drive_a_failing_verification(*, hardened: bool) -> tuple[int | None, bool]:
+    """Run a verification whose provider raises label text. Returns (status, escaped).
+
+    `raise_server_exceptions=True` is deliberate: it is how Starlette surfaces the
+    re-raise that `ServerErrorMiddleware` performs, which is the exact object uvicorn would
+    receive in production. Whatever escapes is handed to the uvicorn stand-in.
+    """
+    applog.configure()
+    app = create_app(config=make_config(), provider=ExplodingProvider())
+    if hardened:
+        harden(app, make_config())
+    client = TestClient(app, raise_server_exceptions=True)
+
+    application, files = _verify_payload()
+    try:
+        response = client.post(
+            "/verify", data={"application": json.dumps(application)}, files=files
+        )
+    except Exception:
+        _uvicorn_error_logger().error("Exception in ASGI application", exc_info=True)
+        return None, True
+    return response.status_code, False
+
+
+def test_the_http_traceback_leak_is_real_without_the_fix(capfd: Any) -> None:
+    """Evidence that the finding is a finding, in the shape it actually occurs.
+
+    `api/logging.py` allowlists field names and raises on anything else. That is deliberate
+    and correct and nothing here weakens it — but it governs `applog.log` and nothing else.
+    A provider exception whose message carries label text escapes the app entirely,
+    `ServerErrorMiddleware` re-raises it after the registered handler runs, and uvicorn
+    formats the whole traceback to stdout. The allowlist never sees that path.
+    """
+    security.remove_log_containment()
+    _uvicorn_error_logger()
+
+    status, escaped = _drive_a_failing_verification(hardened=False)
+    leaked = capfd.readouterr().out
+
+    assert escaped, "the exception should reach the server, which is the leak"
+    assert status is None
+    assert "Traceback" in leaked
+    assert LABEL_TEXT in leaked, "label text on stdout — this is the SEC-4 hole"
+
+
+def test_a_traceback_carrying_label_text_never_reaches_stdout(capfd: Any) -> None:
+    """LP-086, the whole point.
+
+    Same request, same exception, with the containment layer installed. Nothing escapes to
+    the server, so uvicorn never formats anything; the agent gets the taxonomy 500 instead.
+    Captured at the file descriptors — `capfd`, not `caplog` — because bytes on stdout is
+    precisely what is being denied, and a test that read the logging framework's own
+    buffers would pass while the bytes went out anyway.
+    """
+    _uvicorn_error_logger()
+
+    status, escaped = _drive_a_failing_verification(hardened=True)
+    captured = capfd.readouterr()
+    combined = captured.out + captured.err
+
+    assert not escaped, "containment must stop the exception before the server sees it"
+    assert status == 500
+    assert "Traceback" not in combined
+    assert LABEL_TEXT not in combined
+    assert "STONE'S THROW" not in combined
+
+
+def test_containment_holds_even_if_the_exception_reaches_the_server(capfd: Any) -> None:
+    """Belt and braces: process-wide containment covers what the middleware cannot see.
+
+    The middleware only sees exceptions raised inside the ASGI app. Anything raised in the
+    server itself, in a protocol callback, or in a library that logs with `exc_info` goes
+    through `logging` — which is why containment also replaces the log record factory.
+    """
+    security.install_log_containment()
+    logger = _uvicorn_error_logger()
+
+    try:
+        raise RuntimeError(LABEL_TEXT)
+    except RuntimeError:
+        logger.error("Exception in ASGI application", exc_info=True)
+
+    captured = capfd.readouterr()
+    combined = captured.out + captured.err
+    assert LABEL_TEXT not in combined
+    assert "Traceback" not in combined
+    assert "RuntimeError suppressed" in combined
+
+
+def test_the_scrubbed_line_still_names_what_broke(capfd: Any) -> None:
+    """Containment must not cost a developer the ability to find the bug."""
+    _drive_a_failing_verification(hardened=True)
+
+    lines = [
+        json.loads(line)
+        for line in capfd.readouterr().out.splitlines()
+        if line.startswith("{")
+    ]
+    unhandled = [line for line in lines if line.get("event") == "unhandled_exception"]
+    assert unhandled, "the failure should still be observable"
+    assert unhandled[-1]["reason_code"] == "RuntimeError"
+    assert unhandled[-1]["request_id"].startswith("req_")
+    assert set(unhandled[-1]) <= applog.ALLOWED_FIELDS | {"ts"}
+
+
+def test_containment_leaves_ordinary_log_lines_alone(capfd: Any) -> None:
+    """Scrubbing everything would cost uvicorn's bind line, which is the ops signal that
+    the container came up."""
+    security.install_log_containment()
+    logger = logging.getLogger("uvicorn.error")
+    logger.handlers = [logging.StreamHandler(sys.stdout)]
+    logger.propagate = False
+    logger.setLevel(logging.INFO)
+    logger.info("Uvicorn running on http://0.0.0.0:8000")
+
+    assert "Uvicorn running on http://0.0.0.0:8000" in capfd.readouterr().out
+
+
+def test_a_worker_thread_that_dies_leaks_nothing(capfd: Any) -> None:
+    """`BatchStore.claim()` revalidates the stored application; a ValidationError there
+    carries the brand name and producer address, on a thread, straight to stderr."""
+    applog.configure()
+    security.install_log_containment()
+
+    def explode() -> None:
+        raise ValueError(LABEL_TEXT)
+
+    thread = threading.Thread(target=explode, name="labelproof-batch")
+    thread.start()
+    thread.join()
+
+    captured = capfd.readouterr()
+    combined = captured.out + captured.err
+    assert LABEL_TEXT not in combined
+    assert "Traceback" not in combined
+    assert "unhandled_thread_exception" in combined
+
+
+def test_containment_is_reversible_and_idempotent() -> None:
+    original = logging.getLogRecordFactory()
+    security.install_log_containment()
+    security.install_log_containment()
+    assert security.containment_active()
+    security.remove_log_containment()
+    assert logging.getLogRecordFactory() is original
+    assert not security.containment_active()
+
+
+def test_containment_can_be_turned_off_for_local_debugging(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LABELPROOF_DEBUG_TRACEBACKS", "1")
+    policy = SecurityPolicy.from_config(make_config())
+    assert policy.contain_tracebacks is False
+    app = FastAPI()
+    harden(app, make_config())
+    assert not security.containment_active()
+
+
+# --- the no-content log rule end to end (LP-086, LP-251) ----------------------------------
+
+
+def test_a_real_verification_writes_no_label_string_to_the_logs(capfd: Any) -> None:
+    """SEC-4 as a property of a full run, not of the logger in isolation.
+
+    Every line emitted by a successful verification is parsed and checked twice: it must be
+    JSON on the allowlist, and no value on it may contain any string from the application
+    or from the label the fixture carries.
+    """
+    applog.configure()
+    app = create_app(config=make_config())
+    harden(app, make_config())
+    client = TestClient(app)
+
+    application, files = _verify_payload()
+    response = client.post(
+        "/verify", data={"application": json.dumps(application)}, files=files
+    )
+    assert response.status_code == 200
+
+    captured = capfd.readouterr()
+    combined = captured.out + captured.err
+
+    label_strings = [
+        str(value) for value in application.values() if isinstance(value, str) and len(value) > 3
+    ]
+    label_strings += [
+        field["extracted"]
+        for field in response.json()["fields"]
+        if isinstance(field.get("extracted"), str) and len(field["extracted"]) > 3
+    ]
+    assert label_strings, "the fixture should produce extracted values to look for"
+
+    for text in label_strings:
+        assert text not in combined, f"label content reached the logs: {text!r}"
+
+    lines = [json.loads(line) for line in combined.splitlines() if line.startswith("{")]
+    assert lines, "the run should have logged something"
+    for line in lines:
+        assert set(line) <= applog.ALLOWED_FIELDS | {"ts"}
+
+
+def test_the_allowlist_still_refuses_an_unlisted_field() -> None:
+    """Nothing in this wave weakened `api/logging.py`, and this asserts it."""
+    with pytest.raises(applog.ContentInLogError):
+        applog.log("verify_complete", brand_name="Old Tom Distillery")
