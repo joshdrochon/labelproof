@@ -90,6 +90,27 @@ def new_item_id() -> str:
     return f"itm_{uuid.uuid4().hex[:16]}"
 
 
+def is_expired(expires_at: float, *, now: float | None = None) -> bool:
+    """Is this batch past its retention? One definition, imported rather than copied.
+
+    ⚠️ **MERGE NOTE — delete this and import the canonical one.** `api/retention.py` on
+    `wave/security` owns this predicate and its docstring says outright that read paths
+    must import it rather than keep a copy, because "the failure mode of two copies is
+    that the API keeps serving something the sweeper believes is gone and nobody notices
+    until a reviewer asks". That module is not on `build/phase-1` yet, so importing it here
+    would make this branch red, and committing red is not on the table. The resolution when
+    the two branches meet is two lines: delete this function and
+    `from api.retention import is_expired`. Semantics are identical by construction —
+    `expires_at <= now`, matching `purge_expired` exactly — and
+    `test_the_expiry_predicate_agrees_with_retentions` fails the moment they diverge.
+
+    `claim()` cannot call this at all: it needs the comparison inside a SQL predicate so
+    the check is part of the same `BEGIN IMMEDIATE` that picks the row. That copy is
+    flagged in its own docstring.
+    """
+    return expires_at <= (time.time() if now is None else now)
+
+
 def stored_name(supplied: str) -> str:
     """The on-disk name for an uploaded file.
 
@@ -209,28 +230,41 @@ class BatchStore:
         return ids
 
     def claim(self, *, job_id: str | None = None, now: float | None = None) -> BatchItem | None:
-        """Take the next queued item, or return None when there is nothing to do.
+        """Take the next queued item of a LIVE job, or None when there is nothing to do.
 
         The whole select-then-update runs inside `BEGIN IMMEDIATE`, which is what stops
         two workers from picking up the same application. Oldest job first, then manifest
         order, so a batch finishes roughly in the order the agent listed it and a second
         batch does not jump the first.
+
+        **Expiry is part of "there is nothing to do".** This selected on `state` alone,
+        which meant an expired job kept being *worked*: measured, three queued items of a
+        job past its TTL all completed, spending tokens and writing freshly extracted brand
+        names and label text to disk — for a job the API was, at the same moment, telling
+        the caller had been deleted. Refusing to serve it and refusing to produce more of
+        it are the same promise; stopping only the first is the API lying about the second.
+
+        The predicate is `expires_at > now`, the exact complement of `purge_expired`'s
+        `expires_at <= now`, so an item stops being claimable at the instant a sweep would
+        take its job — never a moment later. See `is_expired` below on why this comparison
+        is written twice and what to do about it.
         """
         moment = time.time() if now is None else now
+        live = "AND job_id IN (SELECT job_id FROM jobs WHERE expires_at > ?)"
         with self._write_lock, self._conn() as connection:
             connection.execute("BEGIN IMMEDIATE")
             try:
                 if job_id is None:
                     row = connection.execute(
-                        "SELECT * FROM items WHERE state = ? ORDER BY created_at, row "
-                        "LIMIT 1",
-                        (ItemState.QUEUED.value,),
+                        f"SELECT * FROM items WHERE state = ? {live} "
+                        f"ORDER BY created_at, row LIMIT 1",
+                        (ItemState.QUEUED.value, moment),
                     ).fetchone()
                 else:
                     row = connection.execute(
-                        "SELECT * FROM items WHERE state = ? AND job_id = ? "
-                        "ORDER BY row LIMIT 1",
-                        (ItemState.QUEUED.value, job_id),
+                        f"SELECT * FROM items WHERE state = ? AND job_id = ? {live} "
+                        f"ORDER BY row LIMIT 1",
+                        (ItemState.QUEUED.value, job_id, moment),
                     ).fetchone()
                 if row is None:
                     connection.execute("ROLLBACK")
@@ -380,10 +414,20 @@ class BatchStore:
             counts.total += int(row["n"])
         return counts
 
-    def has_work(self) -> bool:
+    def has_work(self, *, now: float | None = None) -> bool:
+        """Is there anything `claim` would actually hand out?
+
+        Must ask exactly the question `claim` answers, expiry included. When it did not,
+        an expired job left three items `queued` that no worker would ever take, so
+        `has_work` said yes forever and `drain` never returned — a pool that is finished
+        looking identical to one that is stuck.
+        """
+        moment = time.time() if now is None else now
         with self._conn() as connection:
             row = connection.execute(
-                "SELECT 1 FROM items WHERE state = ? LIMIT 1", (ItemState.QUEUED.value,)
+                "SELECT 1 FROM items WHERE state = ? "
+                "AND job_id IN (SELECT job_id FROM jobs WHERE expires_at > ?) LIMIT 1",
+                (ItemState.QUEUED.value, moment),
             ).fetchone()
         return row is not None
 

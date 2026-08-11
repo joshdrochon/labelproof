@@ -41,7 +41,6 @@ from __future__ import annotations
 import contextlib
 import csv
 import io
-import time
 import zipfile
 from collections.abc import Awaitable, Callable, Sequence
 from pathlib import Path
@@ -69,7 +68,7 @@ from api.batch.models import (
     summarize,
     worst_first,
 )
-from api.batch.store import BatchStore
+from api.batch.store import BatchStore, is_expired
 from api.batch.worker import ProviderBudget, WorkerPool
 from api.config import Config
 from api.models import FieldName
@@ -645,9 +644,12 @@ def _require_job(
     Expired and absent answer identically on purpose. They are the same fact from the
     agent's seat — the batch is gone and a new one is needed — and the existing message
     already says retention is why.
+
+    The predicate is imported, not written here. See `api.batch.store.is_expired`, and the
+    merge note on it about where the canonical definition will live.
     """
     job = store.get_job(job_id)
-    if job is not None and job.expires_at > (time.time() if now is None else now):
+    if job is not None and not is_expired(job.expires_at, now=now):
         return job
     raise errors.UserError(
         f"No batch with that reference is on this server. Batches and their images are "

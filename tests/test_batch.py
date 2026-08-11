@@ -34,6 +34,7 @@ from PIL import Image
 from api import logging as applog
 from api import main as main_mod
 from api.batch import manifest as manifest_mod
+from api.batch import store as store_mod
 from api.batch.models import (
     BatchItem,
     ItemFailure,
@@ -871,6 +872,56 @@ def test_an_expired_export_leaks_no_label_text(tmp_path: Path) -> None:
     body = client.get(f"/batch/{job_id}/export.csv").text
     assert "OLD TOM" not in body
     assert "Bardstown" not in body
+
+
+def test_an_expired_batch_is_not_processed_either(tmp_path: Path) -> None:
+    """Refusing to serve it and refusing to produce more of it are the same promise.
+
+    `claim()` selected on `state` alone, so past the 24-hour mark the workers carried on:
+    tokens spent, and freshly extracted brand names and label text written to disk, for a
+    job the API was simultaneously telling the caller had been deleted. Stopping only the
+    read path fixed the visible half and left the tool still manufacturing the data.
+    """
+    store = BatchStore(tmp_path)
+    config = make_config(tmp_path)
+    job = store.create_job(retention_hours=24)
+    store.save_image(job.job_id, GOOD_IMAGE, GOOD_BYTES)
+    store.add_items(
+        job.job_id,
+        [(n + 2, Application.model_validate(old_tom()), [GOOD_IMAGE]) for n in range(3)],
+    )
+    assert store.counts(job.job_id).queued == 3
+
+    with store._conn() as connection:
+        connection.execute(
+            "UPDATE jobs SET expires_at = ? WHERE job_id = ?", (time.time() - 60, job.job_id)
+        )
+
+    pool = WorkerPool(store, config, lambda names: spec_provider())
+    pool.start()
+    assert pool.drain(timeout=30)
+
+    counts = store.counts(job.job_id)
+    assert counts.queued == 3, "an expired job was still being worked"
+    assert counts.done == 0 and counts.failed == 0
+    assert all(item.result is None for item in store.items(job.job_id))
+
+
+def test_the_expiry_predicate_agrees_with_retentions(tmp_path: Path) -> None:
+    """One definition or none. Skips until `api/retention.py` lands on this branch.
+
+    `api.retention.is_expired` is the canonical predicate and its own docstring forbids
+    copies. It is not on `build/phase-1` yet, so `api.batch.store.is_expired` carries the
+    definition with a merge note. This is the tripwire: the moment both exist, a
+    disagreement fails here rather than surfacing as the API serving something the sweeper
+    thinks is gone.
+    """
+    retention = pytest.importorskip("api.retention")
+    now = time.time()
+    for offset in (-3600.0, -1.0, 0.0, 1.0, 3600.0):
+        assert store_mod.is_expired(now + offset, now=now) == retention.is_expired(
+            now + offset, now=now
+        ), f"predicates disagree at offset {offset}"
 
 
 def test_an_expired_batch_answers_the_same_way_as_one_that_never_existed(
