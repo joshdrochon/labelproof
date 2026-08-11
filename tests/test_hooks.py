@@ -106,6 +106,40 @@ def test_the_installer_lists_every_hook_it_wired(clone: Path) -> None:
         assert hook in result.stdout
 
 
+def test_the_installer_is_itself_executable() -> None:
+    """The one command README and CHANGES tell every clone to run.
+
+    `./scripts/install_hooks.sh` is how the hooks get wired at all, so it is one level
+    above everything else here: lose its executable bit and the instruction fails, nobody
+    installs hooks, and neither the secrets scan nor the main-branch protection is
+    running. The CI hooks check covers it for the same reason. Asserted against the mode
+    git records, not the working tree's, because that is what a fresh clone gets.
+    """
+    mode = subprocess.run(
+        ["git", "-C", str(REPO_ROOT), "ls-files", "-s", "scripts/install_hooks.sh"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.split()[0]
+
+    assert mode == "100755", f"install_hooks.sh is committed as {mode}, not executable"
+
+
+@pytest.mark.parametrize(
+    "hook", ["pre-commit", "pre-push", "post-commit", "commit-msg"]
+)
+def test_every_hook_is_committed_executable(hook: str) -> None:
+    """git skips a non-executable hook in complete silence. No error, no warning."""
+    mode = subprocess.run(
+        ["git", "-C", str(REPO_ROOT), "ls-files", "-s", f".githooks/{hook}"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.split()[0]
+
+    assert mode == "100755", f".githooks/{hook} is committed as {mode}, not executable"
+
+
 # --- pre-push: main stays protected ----------------------------------------------------
 #
 # This hook predates this branch. These tests exist so it cannot be broken silently by

@@ -81,11 +81,15 @@ jobs:
       - name: Check the git hooks are usable
         run: |
           status=0
-          for hook in .githooks/*; do
+          # scripts/install_hooks.sh is in this list because it is the one command the
+          # README tells every clone to run as `./scripts/install_hooks.sh`. If it loses
+          # its executable bit, that instruction fails and nobody's hooks get installed
+          # — the same silent-skip failure this step guards against, one level up.
+          for hook in .githooks/* scripts/install_hooks.sh; do
             if [ -x "$hook" ]; then
               echo "ok              $hook"
             else
-              echo "NOT EXECUTABLE  $hook — git will skip it silently" >&2
+              echo "NOT EXECUTABLE  $hook — it will be skipped silently" >&2
               status=1
             fi
           done
@@ -110,9 +114,27 @@ jobs:
 
           if [ "${EXPECT_OFFLINE:-0}" = "1" ]; then
             echo "--- proving the sandbox has no route out ---"
-            if python -c "import socket; socket.create_connection(('1.1.1.1', 443), timeout=5).close()" 2>/dev/null; then
-              echo "1.1.1.1:443 was reachable, so the offline sandbox is not working and" >&2
-              echo "a green run here would prove nothing. Failing instead." >&2
+            # The probe prints one of three words. Anything other than "unreachable"
+            # fails the step, including "probe-broken": reading *any* non-zero exit as
+            # proof would let a missing interpreter or an unrelated crash pass for
+            # evidence, which is the same mistake as trusting a green test that never ran.
+            verdict=$(python - <<'PY' || echo probe-broken
+          import socket, sys
+          try:
+              socket.create_connection(("1.1.1.1", 443), timeout=5).close()
+          except OSError as exc:
+              import errno
+              expected = {errno.ENETUNREACH, errno.EHOSTUNREACH, errno.ENETDOWN, errno.EACCES}
+              print("unreachable" if exc.errno in expected or isinstance(exc, TimeoutError)
+                    else f"unexpected-errno-{exc.errno}")
+          else:
+              print("reachable")
+          PY
+          )
+            if [ "$verdict" != "unreachable" ]; then
+              echo "offline probe said '$verdict', not 'unreachable'." >&2
+              echo "The sandbox is not doing what this step claims, so a green run here" >&2
+              echo "would prove nothing. Failing instead." >&2
               exit 1
             fi
             echo "confirmed: no route out"

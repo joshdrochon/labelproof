@@ -81,10 +81,14 @@ npm --prefix web test
 ```
 
 **The suite runs offline, and that is enforced rather than assumed.**
-`tests/conftest.py` refuses any non-loopback socket and any DNS lookup, and names the
-test that tried. CI additionally runs everything inside a network namespace after proving
-from inside it that nothing is reachable. If you need to add a test that genuinely opens a
-socket, mark it `@pytest.mark.allow_network` and justify it — there are none today.
+`tests/conftest.py` refuses every egress verb — `connect`, `connect_ex`, `sendto`,
+`sendmsg`, `getaddrinfo`, `gethostbyname`, `gethostbyname_ex`, `gethostbyaddr` — for any
+non-loopback target, and names the test that tried. It is installed at conftest import,
+before pytest collects anything, so module-level code and session-scoped fixtures are
+covered too and not just the call phase. CI additionally runs everything inside a network
+namespace after proving from inside it that nothing is reachable. If you need a test that
+genuinely opens a socket, mark it `@pytest.mark.allow_network` and justify it — there are
+none today.
 
 ### Lint and typecheck
 
@@ -98,9 +102,11 @@ value per line, which separates each constant from its CFR citation and makes th
 compliance reviewer audits by eye harder to audit. The reasoning and the one-commit path
 to turning it on are both in `pyproject.toml`.
 
-`mypy --strict` is clean over `api/` and `scripts/`. `tests/`, `eval/`, and `fixtures/`
-are **not** yet strict-clean — the count and the cause are recorded in `pyproject.toml`
-rather than hidden behind a narrower flag set.
+`mypy --strict` is clean over `api/` and over every file in `scripts/`, each of which is
+listed individually in `pyproject.toml`'s `files` so the claim can be checked. `tests/`,
+`eval/`, and `fixtures/` are **not** yet strict-clean: `mypy --strict api tests eval
+fixtures` reports **22 errors in 9 files**, broken down per file in `pyproject.toml`.
+That is a measured number with the command that produces it, not an estimate.
 
 #### Why 3.12 and 3.14 both appear
 
@@ -155,12 +161,27 @@ will silently lose. It is idempotent.
 | Hook | What it does |
 |---|---|
 | `pre-commit` | Refuses to commit a credential (SEC-6). Reads the **index**, not the working tree, because staging a key and then editing the file is the actual attack. |
+| `commit-msg` | Refuses a credential in the commit *message*. pre-commit cannot see it, and a key in a message is in history just as permanently as one in a file. |
 | `pre-push` | Refuses to push `main`. Everything ships on a branch. |
 | `post-commit` | Reprojects `TICKETS.md` from the `Closes:` trailers in history. |
 
-`git commit --no-verify` bypasses the secrets scan. It is there for a genuine false
-positive; if you use it, add the case to `scripts/scan_secrets.py` so the next person is
-not stopped by it too.
+`git commit --no-verify` bypasses both scans. It is there for a genuine false positive; if
+you use it, add the case to `scripts/scan_secrets.py` so the next person is not stopped by
+it too.
+
+The scanner announces what it could not read. Binary and oversized files cannot be split
+into lines, so they get the key-prefix rules over raw bytes instead, and every one of them
+is listed on stderr with the reason — a gap in a check that nobody is told about is
+indistinguishable from a clean result.
+
+**There is no `.pre-commit-config.yaml`, deliberately.** One shipped briefly and was
+removed: `pre-commit install` refuses outright when `core.hooksPath` is set, which
+`install_hooks.sh` sets, so following this document and then that file's instructions were
+mutually exclusive. Its `language: system` entries also resolved ruff and mypy from
+`PATH`, so its stated guarantee — that a developer's result and CI's cannot disagree —
+was enforced by nothing, and a globally-installed ruff of any version would have won. Two
+hook mechanisms that conflict are worse than one that works. Lint and typecheck are
+CI-enforced and one command away locally.
 
 CI re-runs the secrets scan over every tracked file and fails if any hook has lost its
 executable bit — a non-executable hook is skipped by git without a word, which is the
@@ -221,11 +242,24 @@ would otherwise have to discover.
   `pyproject.toml`.
 - CI runs on every push: install → lint → typecheck → tests, with everything after
   install executed with no network egress and the sandbox verified from inside itself.
-- A dependency-free secrets scan runs pre-commit and in CI. It reads the git index rather
-  than the working tree.
-- Two defects surfaced and are recorded rather than smoothed over:
-  `api/provider/fake.py` had a closure over a loop variable on the path every test takes
-  (fixed), and `test_state_expansion_is_word_bounded` was vacuous — its assertion ended
-  in `or True`, hiding that `expand_state_abbreviations("Gin or Vodka")` returns
-  `"gin oregon vodka"`. That test is now a strict xfail carrying the full explanation,
-  and the fix belongs to LP-045.
+- A dependency-free secrets scan runs pre-commit, commit-msg, and in CI. It reads the git
+  index rather than the working tree.
+- **A real false-pass class was found and fixed (LP-045).**
+  `expand_state_abbreviations()` rewrote any standalone word matching a two-letter state
+  code, so `Old Tom Distilling Co` became `old tom distilling colorado`. Because the
+  rewrite is many-to-one, distinct producers collapsed onto one string and compared as an
+  exact Tier-1 **Match** — `La Crema Winery` passed as `Louisiana Crema Winery`, and every
+  producer ending in "Co" passed as one ending in "Colorado". Expansion is now restricted
+  to address position. Symmetric normalization had been offered as the reason this was
+  harmless; it is not, because it only prevents false *mismatches*.
+- The test that should have caught it was vacuous — its assertion ended in `or True`.
+  Replacing it with a single strict xfail was worse: with the negative assertion first,
+  the positive one became unreachable, so deleting `"or": "oregon"` from the table left
+  the suite green. It is two tests now, verified by re-running that mutation.
+- `api/provider/fake.py` had a closure over a loop variable on the path every test takes.
+  Removed, but honestly: it was a latent smell, not a live defect. The closure was called
+  synchronously inside the iteration that defined it, and 135 old-vs-new combinations
+  (15 fixtures × 3 image counts × 3 illegible sets) show zero behavioural difference.
+- The offline guard shipped with two working egress paths — a UDP `sendto` needs no
+  `connect`, and `gethostbyname` does not go through `getaddrinfo`. Both leaked real
+  packets. Closed, along with the guard only existing during a test's call phase.
