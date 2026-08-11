@@ -12,27 +12,14 @@ from api.pipeline import quality
 from api.rules import thresholds as T
 from fixtures.generator import degrade
 from fixtures.generator.catalog import by_name
+from fixtures.generator.layout import BLANK_BAND as BLANK
+from fixtures.generator.layout import FIELD_BANDS as REGIONS
 from fixtures.generator.render import render
 
 
 @pytest.fixture(scope="module")
 def clean() -> np.ndarray:
     return np.array(render(by_name("tc01_old_tom_clean")))
-
-
-#: Where the generator actually puts each block on a single-face label. Measured from the
-#: render, not guessed: a box that missed its text would make every region assertion below
-#: pass for the wrong reason.
-REGIONS: dict[FieldName, BoundingBox] = {
-    FieldName.BRAND_NAME: BoundingBox(x0=0.0, y0=0.055, x1=1.0, y1=0.115),
-    FieldName.CLASS_TYPE: BoundingBox(x0=0.0, y0=0.150, x1=1.0, y1=0.190),
-    FieldName.ALCOHOL_CONTENT: BoundingBox(x0=0.0, y0=0.260, x1=1.0, y1=0.292),
-    FieldName.NET_CONTENTS: BoundingBox(x0=0.0, y0=0.290, x1=1.0, y1=0.315),
-    FieldName.PRODUCER: BoundingBox(x0=0.0, y0=0.370, x1=1.0, y1=0.398),
-    FieldName.GOVERNMENT_WARNING: BoundingBox(x0=0.0, y0=0.450, x1=1.0, y1=0.540),
-}
-
-BLANK = BoundingBox(x0=0.0, y0=0.60, x1=1.0, y1=0.75)
 
 
 # --- the clean baseline -------------------------------------------------------------

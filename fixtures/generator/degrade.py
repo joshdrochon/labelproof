@@ -15,6 +15,8 @@ from __future__ import annotations
 import cv2
 import numpy as np
 
+from fixtures.generator.layout import WARNING_BAND
+
 
 def _rng(seed: int) -> np.random.Generator:
     """Seeded so every degradation is reproducible (LP-123)."""
@@ -153,14 +155,6 @@ def glare(
     white = np.full_like(image, 255, dtype=np.float32)
     blended = image.astype(np.float32) * (1 - falloff) + white * falloff
     return np.clip(blended, 0, 255).astype(np.uint8)
-
-
-#: Where `render.py` lays the government warning out on a single-face label, as a fraction
-#: of the image height. Coupled to that layout on purpose — TC-12 is "glare obscuring the
-#: warning only", and a glare patch that happened to miss it would test nothing while
-#: looking like it passed. `test_glare_over_the_warning_actually_covers_it` fails loudly if
-#: the renderer ever moves the block.
-WARNING_BAND: tuple[float, float] = (0.45, 0.54)
 
 
 def glare_over_warning(image: np.ndarray, *, seed: int = 7) -> np.ndarray:
