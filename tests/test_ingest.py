@@ -1,6 +1,10 @@
 """Upload ingest. Every uploaded byte is hostile input (SEC-5)."""
 
+import asyncio
 import io
+import threading
+import time
+from unittest import mock
 
 import pytest
 from PIL import Image
@@ -252,3 +256,122 @@ def test_malformed_pdf_reports_a_user_error(config: Config) -> None:
 def test_pdf_output_carries_its_source_type(config: Config) -> None:
     result = ingest.ingest_one(_pdf_bytes(), config)[0]
     assert result.source_media_type is MediaType.PDF
+
+
+# --- off the event loop -------------------------------------------------------------------
+#
+# Ingest and quality scoring measured 132ms for a two-image upload. Run inline on an async
+# server that is 132ms during which every other request in the process is frozen, so two
+# agents submitting at once take 132ms and 264ms rather than 132ms each. Invisible in
+# single-user testing, which is where it would have stayed.
+
+
+def test_ingest_does_not_run_on_the_event_loop(config: Config) -> None:
+    """Asked directly: is there a running loop in the thread doing the work? If there is,
+    the work is on the loop and every other request is waiting for it."""
+    where: dict[str, bool] = {}
+    real = ingest.ingest
+
+    def spy(files: list[bytes], cfg: Config) -> list[ingest.IngestedImage]:
+        try:
+            asyncio.get_running_loop()
+            where["on_loop"] = True
+        except RuntimeError:
+            where["on_loop"] = False
+        return real(files, cfg)
+
+    with mock.patch.object(ingest, "ingest", spy):
+        asyncio.run(ingest.ingest_async([png_bytes()], config))
+
+    assert where["on_loop"] is False
+
+
+def test_quality_scoring_does_not_run_on_the_event_loop(config: Config) -> None:
+    where: dict[str, bool] = {}
+    real = ingest.assess
+
+    def spy(images: list[ingest.IngestedImage]) -> list[object]:
+        try:
+            asyncio.get_running_loop()
+            where["on_loop"] = True
+        except RuntimeError:
+            where["on_loop"] = False
+        return real(images)
+
+    with mock.patch.object(ingest, "assess", spy):
+        asyncio.run(ingest.assess_async(ingest.ingest([png_bytes()], config)))
+
+    assert where["on_loop"] is False
+
+
+def test_two_uploads_overlap_instead_of_queueing(config: Config) -> None:
+    """The claim, proved without a stopwatch.
+
+    A barrier of two only releases when two threads are inside the work at the same
+    moment. Serialized, the first call waits for a partner that cannot arrive until it
+    returns, the barrier times out, and this fails. No timing assertion, so no flake.
+    """
+    barrier = threading.Barrier(2, timeout=15)
+    real = ingest.ingest
+
+    def gated(files: list[bytes], cfg: Config) -> list[ingest.IngestedImage]:
+        barrier.wait()
+        return real(files, cfg)
+
+    async def both() -> list[list[ingest.IngestedImage]]:
+        return list(
+            await asyncio.gather(
+                ingest.ingest_async([png_bytes()], config),
+                ingest.ingest_async([png_bytes()], config),
+            )
+        )
+
+    with mock.patch.object(ingest, "ingest", gated):
+        results = asyncio.run(both())
+
+    assert len(results) == 2
+
+
+def test_the_event_loop_keeps_serving_while_ingest_runs(config: Config) -> None:
+    """The other half of the same claim: the loop is free to do work meanwhile.
+
+    Driven by a sleeping stand-in rather than a real decode, so the tick count does not
+    depend on how fast the machine is. `time.sleep` releases the GIL, which is exactly
+    what the real OpenCV and Pillow calls do.
+    """
+    ticks = 0
+
+    async def heartbeat() -> None:
+        nonlocal ticks
+        while True:
+            await asyncio.sleep(0.005)
+            ticks += 1
+
+    def slow(files: list[bytes], cfg: Config) -> list[ingest.IngestedImage]:
+        time.sleep(0.25)
+        return ingest.ingest_one(files[0], cfg)
+
+    async def main() -> None:
+        beat = asyncio.create_task(heartbeat())
+        await ingest.ingest_async([png_bytes()], config)
+        beat.cancel()
+
+    with mock.patch.object(ingest, "ingest", slow):
+        asyncio.run(main())
+
+    assert ticks >= 5
+
+
+def test_the_async_wrappers_return_what_the_sync_ones_do(config: Config) -> None:
+    """Moving work to a thread must not change the answer."""
+    data = [png_bytes(1200, 900)]
+    sync = ingest.ingest(data, config)
+    from_thread = asyncio.run(ingest.ingest_async(data, config))
+    assert [i.data for i in sync] == [i.data for i in from_thread]
+
+
+def test_errors_still_surface_through_the_wrapper(config: Config) -> None:
+    """A UserError raised on a worker thread has to arrive as a UserError, not as a
+    concurrent.futures wrapper the error taxonomy has never heard of."""
+    with pytest.raises(errors.UserError, match="empty"):
+        asyncio.run(ingest.ingest_async([b""], config))

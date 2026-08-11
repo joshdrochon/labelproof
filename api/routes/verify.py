@@ -240,14 +240,15 @@ async def verify_endpoint(
     parsed = parse_application(application)
     uploads = await _read_uploads(images, config.max_images)
 
+    # Both of these are CPU-bound and both run on a worker thread. Inline they measured
+    # 132ms of frozen event loop per upload, which does not slow one request down — it
+    # serializes every other request in the process behind it (PERF-1).
     ingest_started = time.perf_counter()
-    ingested = ingest_mod.ingest([data for _, data in uploads], config)
+    ingested = await ingest_mod.ingest_async([data for _, data in uploads], config)
     timings.ingest = int((time.perf_counter() - ingest_started) * 1000)
 
     quality_started = time.perf_counter()
-    scores: list[ImageQuality] = [
-        quality_mod.assess(ingest_mod.to_array(image)) for image in ingested
-    ]
+    scores: list[ImageQuality] = await ingest_mod.assess_async(ingested)
     timings.quality = int((time.perf_counter() - quality_started) * 1000)
 
     faces = _roles_for(len(ingested), roles)
