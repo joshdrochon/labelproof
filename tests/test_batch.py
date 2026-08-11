@@ -1523,7 +1523,7 @@ def test_one_image_named_by_two_rows_is_still_fine(tmp_path: Path) -> None:
 
 
 def test_an_oversized_archive_entry_is_refused_before_it_is_decompressed(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The load-bearing zip-bomb check: the declared size, read before any decompression.
 
@@ -1531,7 +1531,22 @@ def test_an_oversized_archive_entry_is_refused_before_it_is_decompressed(
     CPython's `ZipExtFile` never returns more than the declared `file_size`, so this
     comparison is what actually refuses one. Untested until now, which is how the wrong
     story survived in the docstring.
+
+    The assertion has to be that `unpack` was never called. Checking only the status code
+    passes with the declared-size check deleted, because the `+1` read bound then produces
+    `cap + 1` bytes and `add`'s own size check refuses that instead — same response, after
+    writing every entry to disk. Across a 4000-entry archive that is the whole difference
+    between refusing a bomb and expanding one.
     """
+    unpacked: list[str] = []
+    original = batch_routes._Landing.unpack
+
+    def spy(self: Any, archive: Any, entry: Any, limit: int) -> Path:
+        unpacked.append(entry.filename)
+        return original(self, archive, entry, limit)
+
+    monkeypatch.setattr(batch_routes._Landing, "unpack", spy)
+
     client = make_client(tmp_path, max_image_bytes=64 * 1024)
     archive = zip_of({GOOD_IMAGE: b"\x00" * (256 * 1024)})
     response = post_batch(client, [row()], images={}, archive=archive)
@@ -1541,6 +1556,7 @@ def test_an_oversized_archive_entry_is_refused_before_it_is_decompressed(
     assert error["code"] == "file_too_large"
     assert error["next_step"] == "resize"
     assert GOOD_IMAGE in error["message"]
+    assert unpacked == [], "the oversized entry was decompressed before being refused"
 
 
 def test_too_many_selected_files_says_so_and_points_at_the_zip(tmp_path: Path) -> None:
