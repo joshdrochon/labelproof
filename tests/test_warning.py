@@ -13,6 +13,7 @@ from api.models import (
     Commodity,
     FieldName,
     FieldResult,
+    Finding,
     Recommendation,
     Verdict,
     WarningTypography,
@@ -1340,6 +1341,141 @@ def test_a_rereader_that_blows_up_does_not_take_the_verification_with_it() -> No
         [_sighting(0, canon.CANONICAL_WARNING, GOOD)], rereader=Broken()
     )
     assert result.verdict is Verdict.MATCH
+
+
+@pytest.mark.parametrize(
+    ("name", "reply"),
+    [
+        ("returns nothing at all", None),
+        ("returns the wrong type", "GOVERNMENT WARNING: ..."),
+        ("returns a raw dict", {"warning_text": None, "typography": {}}),
+        (
+            "returns typography as the dict a JSON response parses into",
+            typography.WarningReread(
+                typography={"header_is_bold": True},  # type: ignore[arg-type]
+            ),
+        ),
+    ],
+)
+def test_a_rereader_that_returns_the_wrong_shape_is_not_fatal(
+    name: str, reply: object
+) -> None:
+    """The previous test raised from inside the adapter, which is the easy case and gave
+    false confidence about the claim that was actually false.
+
+    These return successfully and hand back something malformed. The merge used to sit
+    outside the guard, so both of the likeliest adapter bugs — returning None, and
+    handing back the raw dict a JSON response parses into — raised AttributeError out
+    through verify() and took the entire request with them.
+    """
+
+    class Malformed:
+        name = "malformed"
+
+        def reread_warning(
+            self, request: typography.WarningRereadRequest
+        ) -> typography.WarningReread:
+            return reply  # type: ignore[return-value]
+
+    result = warning.evaluate_across_images(
+        [_sighting(0, canon.CANONICAL_WARNING, GOOD)], rereader=Malformed()
+    )
+    assert result.verdict is Verdict.MATCH
+
+
+def test_a_malformed_rereader_cannot_clear_a_first_pass_violation() -> None:
+    """Degrading to the first pass must degrade to the first pass, not to silence."""
+
+    class Malformed:
+        name = "malformed"
+
+        def reread_warning(
+            self, request: typography.WarningRereadRequest
+        ) -> typography.WarningReread:
+            return None  # type: ignore[return-value]
+
+    result = warning.evaluate_across_images(
+        [_sighting(0, canon.CANONICAL_WARNING, _BOLD_BODY)], rereader=Malformed()
+    )
+    assert result.verdict is Verdict.MISMATCH
+
+
+# --- the net under the net ------------------------------------------------------------
+#
+# A disputed reread was stopped from being reported as Match by exactly one `if` in a
+# wrapper, and nothing tested it — deleting the condition left 1199 tests green. The
+# routing now happens inside `evaluate`, alongside every other finding, and these are the
+# tests that would notice if it stopped.
+
+
+def test_a_disputed_reread_of_the_words_is_never_reported_as_a_match() -> None:
+    """The reachable false pass. First pass reads the statement verbatim with clean
+    typography; the stronger model reads different words. Nothing is wrong with the
+    typography, `_merge_text` correctly keeps the first reading, and the row must still
+    not say Match — one of the two reads is wrong and a person has to settle it.
+    """
+    reworded = canon.CANONICAL_WARNING.replace("birth defects", "health risks")
+    stub = _Rereader(
+        typography.WarningReread(warning_text=reworded, typography=GOOD)
+    )
+    result = warning.evaluate_across_images(
+        [_sighting(0, canon.CANONICAL_WARNING, GOOD)], rereader=stub
+    )
+    assert stub.requests, "escalation did not even fire"
+    assert result.verdict is Verdict.UNREADABLE
+    assert "warning_text_disputed" in {f.code for f in result.findings}
+
+
+def test_an_escalation_finding_routes_like_every_other_finding() -> None:
+    """The structural version of the same claim: `evaluate` demotes on an unverified
+    finding wherever it came from, so there is no bolt-on `if` left to delete."""
+    disputed = Finding(
+        code="warning_text_disputed", message="two readings disagreed",
+        citation="27 CFR 16.21", severity=typography.SEVERITY_UNVERIFIED,
+    )
+    plain = warning.evaluate(canon.CANONICAL_WARNING, GOOD)
+    carried = warning.evaluate(canon.CANONICAL_WARNING, GOOD, extra_findings=[disputed])
+    assert plain.verdict is Verdict.MATCH
+    assert carried.verdict is Verdict.UNREADABLE
+
+
+def test_a_context_finding_from_escalation_does_not_demote_anything() -> None:
+    note = Finding(
+        code="warning_type_size_not_verified", message="context",
+        citation="27 CFR 16.22", severity=typography.SEVERITY_CONTEXT,
+    )
+    result = warning.evaluate(canon.CANONICAL_WARNING, GOOD, extra_findings=[note])
+    assert result.verdict is Verdict.MATCH
+
+
+def test_escalation_findings_survive_on_every_route_out_of_evaluate() -> None:
+    """Missing, Unreadable and Mismatch all have their own return, and an escalation
+    finding dropped on any of them is evidence the agent never sees."""
+    disputed = Finding(
+        code="warning_text_disputed", message="two readings disagreed",
+        citation="27 CFR 16.21", severity=typography.SEVERITY_UNVERIFIED,
+    )
+    for text, legible in (
+        (None, True),
+        (canon.CANONICAL_WARNING, False),
+        (_retitled("Government Warning:"), True),
+        (canon.CANONICAL_WARNING, True),
+    ):
+        result = warning.evaluate(
+            text, GOOD, legible=legible, extra_findings=[disputed]
+        )
+        assert "warning_text_disputed" in {f.code for f in result.findings}
+
+
+def test_a_second_look_at_a_missing_warning_targets_the_back_label() -> None:
+    """When nothing was found anywhere there is no chosen sighting to point at, and the
+    warning normally lives on the back — so aiming the second look at image 0 aims it at
+    the panel least likely to carry the thing being hunted for."""
+    stub = _Rereader(typography.WarningReread(typography=GOOD))
+    warning.evaluate_across_images(
+        [_sighting(0, None), _sighting(1, None)], rereader=stub
+    )
+    assert stub.requests[0].image_index == 1
 
 
 def test_escalation_does_not_fire_when_the_first_pass_already_found_a_violation() -> None:

@@ -781,57 +781,68 @@ def select_sighting(sightings: Sequence[WarningSighting]) -> WarningSighting | N
     return illegible[0] if illegible else None
 
 
-def _with_findings(result: WarningResult, extra: list[Finding]) -> WarningResult:
-    """Re-run routing with extra findings folded in.
-
-    Escalation can only make the picture worse or leave it alone, so a result that was
-    Match and now carries an unverified finding must stop being Match.
-    """
-    findings = [*result.findings, *extra]
-    verdict = result.verdict
-    rationale = result.rationale
-    if verdict is Verdict.MATCH and any(
-        f.severity != typography.SEVERITY_CONTEXT for f in extra
-    ):
-        verdict = Verdict.UNREADABLE
-        rationale = next(
-            f.message for f in extra if f.severity != typography.SEVERITY_CONTEXT
-        )
-    return WarningResult(
-        verdict=verdict,
-        rationale=rationale,
-        diff=result.diff,
-        findings=findings,
-        comparison=result.comparison,
-    )
-
-
 def _escalate(
     rereader: typography.WarningRereader,
     chosen: WarningSighting | None,
     signals: WarningTypography,
+    sightings: Sequence[WarningSighting],
     *,
     text: str | None,
     legible: bool,
 ) -> typography.MergedReading | None:
     """Ask a stronger model to re-read the warning region. Never fatal.
 
-    A provider that is down must degrade to the first pass's answer rather than take the
-    whole verification with it (NET-3, TC-21). The first pass already fails closed, so
-    losing the second look costs certainty, never safety.
+    A provider that is down — or one that returns something the wrong shape — must
+    degrade to the first pass's answer rather than take the whole verification with it
+    (NET-3, TC-21). The first pass already fails closed, so losing the second look costs
+    certainty, never safety.
+
+    **The merge is inside the guard, not outside it.** It used to sit after the `try`,
+    which made the two likeliest adapter bugs fatal to the entire request: returning
+    `None`, and returning a `typography` that is still the raw dict a JSON response
+    parses into. Neither is exotic — the second is the obvious shape of a
+    half-finished adapter — and both raised `AttributeError` out through `verify()`.
+
+    There is no timeout here. The whole of `verify()` runs inside the request budget the
+    route enforces (LP-079), so a hanging adapter cannot hang the request; it spends the
+    budget and the agent gets Needs review. An adapter still owes its own timeout, the
+    same as the main extraction path.
     """
     request = typography.escalation_request(
         signals,
-        image_index=chosen.image_index if chosen else 0,
+        image_index=_escalation_target(chosen, sightings),
         bbox=chosen.bbox if chosen else None,
         legible=legible,
         warning_text=text,
     )
     try:
-        reread = rereader.reread_warning(request)
+        # Typed `object` on purpose. The protocol *declares* a WarningReread, so a type
+        # checker narrows the isinstance away as dead code — and the whole point of the
+        # check is that an adapter is free to break its own annotation at runtime.
+        returned: object = rereader.reread_warning(request)
+        if not isinstance(returned, typography.WarningReread):
+            return None
+        supplied: object = returned.typography
+        if supplied is not None and not isinstance(supplied, WarningTypography):
+            return None
+        return typography.adopt_reread(signals, returned, first_text=text)
     except Exception:  # any adapter failure degrades to the first pass (NET-3)
         return None
-    return typography.adopt_reread(signals, reread, first_text=text)
+
+
+def _escalation_target(
+    chosen: WarningSighting | None, sightings: Sequence[WarningSighting]
+) -> int:
+    """Which image the second look should read.
+
+    The chosen sighting when there is one. When nothing was found anywhere, the *last*
+    image rather than image 0 — a two-image application is front then back, and the
+    warning normally lives on the back, so pointing the second look at the front is
+    pointing it at the panel least likely to carry the thing we are hunting for.
+    """
+    if chosen is not None:
+        return chosen.image_index
+    return max((s.image_index for s in sightings), default=0)
 
 
 def merge_sighting_typography(
@@ -939,7 +950,9 @@ def evaluate_across_images(
     if rereader is not None and typography.needs_escalation(
         signals, warning_text=text, legible=legible
     ):
-        merged = _escalate(rereader, chosen, signals, text=text, legible=legible)
+        merged = _escalate(
+            rereader, chosen, signals, sightings, text=text, legible=legible
+        )
         if merged is not None:
             signals = merged.typography
             text = merged.warning_text
@@ -951,9 +964,8 @@ def evaluate_across_images(
         signals,
         legible=legible,
         net_contents_ml=net_contents_ml,
+        extra_findings=escalation_findings,
     )
-    if escalation_findings:
-        result = _with_findings(result, escalation_findings)
     note = conflicting_sightings_note(sightings, chosen)
     if note is None:
         return result
@@ -1000,6 +1012,7 @@ def evaluate(
     *,
     legible: bool = True,
     net_contents_ml: float | None = None,
+    extra_findings: Sequence[Finding] = (),
 ) -> WarningResult:
     """Full warning verdict.
 
@@ -1010,9 +1023,16 @@ def evaluate(
     `net_contents_ml` only ever adds context. It selects the type-size minimum quoted to
     the agent (WARN-9) and it can never change a verdict — no container size makes a
     wrong warning right.
+
+    `extra_findings` are observations made outside this function — the escalation merge
+    is the only source today. They are routed by exactly the same rules as everything
+    else, deliberately: an earlier version demoted the verdict in a wrapper afterwards,
+    which meant one bolt-on `if` was the only thing standing between a disputed reread
+    and a reported Match, and nothing tested it. Routing has one home.
     """
     signals = signals or WarningTypography()
     honesty = [type_size_finding(net_contents_ml), required_wording_note()]
+    carried = list(extra_findings)
 
     if not legible:
         return WarningResult(
@@ -1021,7 +1041,7 @@ def evaluate(
                 "The warning statement could not be read on this image. It has not been "
                 "checked — request a clearer image."
             ),
-            findings=honesty,
+            findings=honesty + carried,
         )
 
     if found_text is None or not found_text.strip():
@@ -1040,6 +1060,7 @@ def evaluate(
                     severity=typography.SEVERITY_CRITICAL,
                 ),
                 *honesty,
+                *carried,
             ],
         )
 
@@ -1051,6 +1072,7 @@ def evaluate(
         + text_findings(comparison)
         + list(look.findings)
         + honesty
+        + carried
     )
 
     # 1. The words themselves. Everything else is secondary to "does it say the thing".
