@@ -52,6 +52,16 @@ class LabelSpec:
     warning_contrast: float = 1.0
     """1.0 is black on the label ground. Lower values bury it (TC-06)."""
 
+    warning_signals_unread: frozenset[str] = frozenset()
+    """Typography signals the extractor comes back unable to judge.
+
+    Names from `WarningTypography` — `header_is_bold`, `body_is_bold`, `contrast_ok`.
+    This describes the *reading*, not the label: the artwork still renders compliant,
+    and the extractor simply cannot tell. Without it no fixture could ever reach the
+    abstention paths, because `SpecBackedProvider` derives every signal from the spec
+    and therefore always answers. Every typography assertion in the golden set was
+    circular until this existed."""
+
     # --- layout -------------------------------------------------------------------
     face: Literal["front", "back", "single"] = "single"
     """`front`/`back` produce a two-image application; the warning lives on the back."""

@@ -1317,6 +1317,8 @@ def test_escalation_does_not_fire_when_the_first_pass_already_found_a_violation(
         ("tc05_reworded_warning", Verdict.MISMATCH, "warning_text_rewording"),
         ("tc05b_truncated_warning", Verdict.MISMATCH, "warning_text_truncated"),
         ("tc06_buried_warning", Verdict.UNREADABLE, "warning_less_prominent"),
+        ("tc06b_warning_contrast_unread", Verdict.UNREADABLE, "warning_contrast_unverified"),
+        ("tc03c_warning_bold_unread", Verdict.UNREADABLE, "warning_header_bold_unverified"),
         ("tc07_missing_warning", Verdict.MISSING, "warning_missing"),
     ],
 )
@@ -1327,6 +1329,36 @@ def test_each_warning_fixture_produces_what_the_golden_set_claims(
     assert row.verdict is verdict
     if code is not None:
         assert code in {f.code for f in row.findings}
+
+
+def test_a_fixture_can_express_a_reading_that_could_not_tell() -> None:
+    """The golden set could not reach the abstention paths at all.
+
+    SpecBackedProvider derived every typography signal from the spec, so the fake always
+    answered and no fixture could ever produce None — which made every fixture-level
+    typography assertion circular and left the entire tri-state design unexercised by
+    Tier A. `warning_signals_unread` describes the reading rather than the artwork.
+    """
+    from api.provider.base import ExtractionRequest, ImageInput
+    from api.provider.fake import SpecBackedProvider
+    from fixtures.generator.catalog import by_name
+
+    response = SpecBackedProvider(by_name("tc06b_warning_contrast_unread")).extract(
+        ExtractionRequest(commodity=Commodity.SPIRITS,
+                          images=[ImageInput(index=0, data=b"", role="single")])
+    )
+    signals = response.extractions[0].warning_typography
+    assert signals.contrast_ok is None          # the reading could not tell
+    assert signals.header_is_bold is True       # and everything else it could
+
+
+def test_the_compliant_looking_label_with_an_unread_signal_is_not_approved() -> None:
+    """The confirmed false pass, now reachable from a rendered fixture rather than only
+    from a hand-built signal object."""
+    row = _warning_row("tc06b_warning_contrast_unread")
+    assert row.extracted == canon.CANONICAL_WARNING   # nothing wrong with the artwork
+    assert row.verdict is Verdict.UNREADABLE
+    assert "warning_contrast_unverified" in {f.code for f in row.findings}
 
 
 def test_the_bold_half_of_warn_2_has_a_fixture_of_its_own() -> None:

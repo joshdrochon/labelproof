@@ -97,6 +97,37 @@ CATALOG: list[LabelSpec] = [
     ),
 
     OLD_TOM.with_(
+        name="tc06b_warning_contrast_unread",
+        warning_signals_unread=frozenset({"contrast_ok", "relative_size"}),
+        expect={"government_warning": "unreadable"},
+        expect_findings={"government_warning": ["warning_contrast_unverified"]},
+        notes=(
+            "A compliant label the extractor could not fully judge. The artwork is "
+            "clean — verbatim wording, correct capitals, correct weight — and the "
+            "reading comes back unable to say whether the statement contrasts with its "
+            "background. That combination used to reach Ready to approve, and no "
+            "fixture could produce it because the fake derived every signal from the "
+            "spec and therefore always answered."
+        ),
+    ),
+
+    OLD_TOM.with_(
+        name="tc03c_warning_bold_unread",
+        warning_signals_unread=frozenset({"header_is_bold", "body_is_bold"}),
+        expect={"government_warning": "unreadable"},
+        expect_findings={
+            "government_warning": [
+                "warning_header_bold_unverified", "warning_body_bold_unverified"
+            ]
+        },
+        notes=(
+            "The abstention the whole tri-state design was built for, finally "
+            "reachable from a fixture. Bold is the signal the weakest model is likeliest "
+            "to decline on, and the golden set could not express a decline until now."
+        ),
+    ),
+
+    OLD_TOM.with_(
         name="tc05b_truncated_warning",
         warning_text=canon.WARNING_BODY[: canon.WARNING_BODY.index("(2)")].strip(),
         expect={"government_warning": "mismatch"},

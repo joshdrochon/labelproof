@@ -208,6 +208,69 @@
       "notes": "WARN-2's other half. TC-03 covers capitals; nothing covered bold, so a checker that ignored the bold signal entirely would have passed the whole fixture set. Capitals are correct here and only the weight is wrong."
     },
     {
+      "name": "tc06b_warning_contrast_unread",
+      "commodity": "spirits",
+      "images": [
+        "tc06b_warning_contrast_unread.png"
+      ],
+      "sha256": {
+        "tc06b_warning_contrast_unread.png": "e9c1fc9fbf750eac"
+      },
+      "application": {
+        "commodity": "spirits",
+        "brand_name": "OLD TOM DISTILLERY",
+        "class_type": "Kentucky Straight Bourbon Whiskey",
+        "alcohol_content": 45.0,
+        "net_contents": "750 mL",
+        "producer_name": "Old Tom Distillery",
+        "producer_address": "Bardstown, Kentucky",
+        "country_of_origin": null,
+        "is_import": false
+      },
+      "expect": {
+        "government_warning": "unreadable"
+      },
+      "expect_findings": {
+        "government_warning": [
+          "warning_contrast_unverified"
+        ]
+      },
+      "pending": "",
+      "notes": "A compliant label the extractor could not fully judge. The artwork is clean \u2014 verbatim wording, correct capitals, correct weight \u2014 and the reading comes back unable to say whether the statement contrasts with its background. That combination used to reach Ready to approve, and no fixture could produce it because the fake derived every signal from the spec and therefore always answered."
+    },
+    {
+      "name": "tc03c_warning_bold_unread",
+      "commodity": "spirits",
+      "images": [
+        "tc03c_warning_bold_unread.png"
+      ],
+      "sha256": {
+        "tc03c_warning_bold_unread.png": "e9c1fc9fbf750eac"
+      },
+      "application": {
+        "commodity": "spirits",
+        "brand_name": "OLD TOM DISTILLERY",
+        "class_type": "Kentucky Straight Bourbon Whiskey",
+        "alcohol_content": 45.0,
+        "net_contents": "750 mL",
+        "producer_name": "Old Tom Distillery",
+        "producer_address": "Bardstown, Kentucky",
+        "country_of_origin": null,
+        "is_import": false
+      },
+      "expect": {
+        "government_warning": "unreadable"
+      },
+      "expect_findings": {
+        "government_warning": [
+          "warning_header_bold_unverified",
+          "warning_body_bold_unverified"
+        ]
+      },
+      "pending": "",
+      "notes": "The abstention the whole tri-state design was built for, finally reachable from a fixture. Bold is the signal the weakest model is likeliest to decline on, and the golden set could not express a decline until now."
+    },
+    {
       "name": "tc05b_truncated_warning",
       "commodity": "spirits",
       "images": [

@@ -22,8 +22,8 @@ from pathlib import Path
 
 from api.models import (
     BoundingBox,
-    Extraction,
     ExtractedField,
+    Extraction,
     FieldName,
     WarningTypography,
 )
@@ -47,6 +47,11 @@ _APPROX_REGIONS: dict[FieldName, BoundingBox] = {
     FieldName.PRODUCER: BoundingBox(x0=0.08, y0=0.54, x1=0.92, y1=0.62),
     FieldName.GOVERNMENT_WARNING: BoundingBox(x0=0.08, y0=0.66, x1=0.92, y1=0.88),
 }
+
+
+def _unless_unread(unread: frozenset[str], name: str, value: bool) -> bool | None:
+    """None when the fixture says the extractor could not judge this signal."""
+    return None if name in unread else value
 
 
 class SpecBackedProvider:
@@ -102,12 +107,30 @@ class SpecBackedProvider:
                     )
                 else:
                     warning_text = spec.rendered_warning()
+
+                    # A signal named in `warning_signals_unread` comes back None — the
+                    # extractor could not judge it. Deriving every signal from the spec
+                    # meant the fake always answered, so the abstention paths were
+                    # unreachable from any fixture and every golden-set typography
+                    # assertion was circular.
+                    unread = spec.warning_signals_unread
                     typography = WarningTypography(
-                        header_is_all_caps=spec.warning_header_case == "upper",
-                        header_is_bold=spec.warning_header_bold,
-                        body_is_bold=spec.warning_body_bold,
-                        relative_size=spec.warning_scale,
-                        contrast_ok=spec.warning_contrast >= 0.6,
+                        header_is_all_caps=_unless_unread(
+                            unread, "header_is_all_caps",
+                            spec.warning_header_case == "upper",
+                        ),
+                        header_is_bold=_unless_unread(
+                            unread, "header_is_bold", spec.warning_header_bold
+                        ),
+                        body_is_bold=_unless_unread(
+                            unread, "body_is_bold", spec.warning_body_bold
+                        ),
+                        relative_size=(
+                            None if "relative_size" in unread else spec.warning_scale
+                        ),
+                        contrast_ok=_unless_unread(
+                            unread, "contrast_ok", spec.warning_contrast >= 0.6
+                        ),
                     )
                     fields[FieldName.GOVERNMENT_WARNING] = ExtractedField(
                         value=warning_text, confidence=0.95, legible=True,
