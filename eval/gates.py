@@ -27,7 +27,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from eval.outcomes import ACCURACY_FLOOR, Report
+from eval.outcomes import Report
 
 EXIT_OK = 0
 EXIT_ACCURACY = 1
@@ -132,7 +132,7 @@ def gates_for(report: Report) -> list[Gate]:
             blocking=True,
             exit_code=EXIT_ACCURACY,
             summary=(
-                f"{report.accuracy:.1%} of {report.total} rows, floor {ACCURACY_FLOOR:.0%}"
+                f"{report.accuracy:.1%} of {report.total} rows, floor {report.floor:.1%}"
                 if report.total
                 else "no rows scored"
             ),

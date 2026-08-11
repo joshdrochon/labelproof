@@ -18,6 +18,14 @@ which suspends the coverage gate.
 `eval/out/` is already in `.gitignore`. Keep `report.json` as a build artifact — it is the
 run-over-run accuracy record the PRD asks for.
 
+### Threshold
+
+`--min-accuracy FLOAT` sets the field-accuracy bar; it defaults to OPS-3's `0.95`. The flag
+**ratchets one way** — a value below `0.95` is a usage error (exit `2`), not a lower bar.
+A gate whose threshold can be lowered until it passes is not a gate, and the floor is a
+PRD requirement rather than a CI argument. Raising it (`--min-accuracy 0.99`) is fine and
+is how you tighten once the number is comfortably clear.
+
 ## Exit codes
 
 Branch on these. When several gates fail, the worst one wins, in this order:

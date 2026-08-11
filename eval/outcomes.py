@@ -85,6 +85,17 @@ class Report:
     outcomes: list[FieldOutcome] = dc_field(default_factory=list)
     errors: list[tuple[str, str]] = dc_field(default_factory=list)
     fixtures: int = 0
+    provider: str = "fake:spec"
+    """Which extractor produced these outcomes.
+
+    Recorded so the CI run can prove it never touched a live model (ENG-3): the payload
+    carries this string and a test asserts the gating run reports the offline provider.
+    """
+
+    floor: float = ACCURACY_FLOOR
+    """Accuracy threshold for this run. May be raised above OPS-3's 95%, never lowered —
+    `eval.run` rejects a lower value rather than accepting a gate that cannot fail."""
+
     subset: bool = False
     """True when the operator narrowed the run with --fixture.
 
@@ -155,7 +166,7 @@ class Report:
 
     @property
     def accuracy_ok(self) -> bool:
-        return self.total > 0 and self.accuracy >= ACCURACY_FLOOR
+        return self.total > 0 and self.accuracy >= self.floor
 
     @property
     def passed(self) -> bool:
@@ -212,6 +223,8 @@ def evaluate(
     tier: str = "A",
     *,
     subset: bool = False,
+    floor: float = ACCURACY_FLOOR,
+    provider_name: str = "fake:spec",
     provider_for: ProviderFactory | None = None,
 ) -> Report:
     """Run the given specs through the real pipeline and score the result.
@@ -221,7 +234,13 @@ def evaluate(
     which is what CI uses and what makes this function safe to call with no credentials.
     """
     build_provider = provider_for or (lambda spec, images: SpecBackedProvider(spec))
-    report = Report(tier=tier, subset=subset, fixtures=len(specs))
+    report = Report(
+        tier=tier,
+        subset=subset,
+        fixtures=len(specs),
+        floor=floor,
+        provider=provider_name,
+    )
 
     for spec in specs:
         try:

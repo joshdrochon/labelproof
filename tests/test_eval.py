@@ -7,6 +7,10 @@ meaningless `0 false passes`.
 """
 
 import json
+import os
+import subprocess
+import sys
+from pathlib import Path
 
 import pytest
 
@@ -26,6 +30,8 @@ from eval.outcomes import ACCURACY_FLOOR, FieldOutcome, Report, evaluate
 from eval.report import render
 from eval.run import main, payload
 from fixtures.generator.catalog import CATALOG
+
+REPO = Path(__file__).resolve().parents[1]
 
 
 def outcome(**kw: object) -> FieldOutcome:
@@ -454,6 +460,90 @@ def test_documented_ci_command_matches_the_parser() -> None:
     for code in (EXIT_OK, EXIT_ACCURACY, EXIT_USAGE, EXIT_WARNING_FALSE_PASS,
                  EXIT_HARNESS_ERROR, EXIT_WARNING_COVERAGE):
         assert f"`{code}`" in readme
+
+
+# --- the CI run itself (LP-071) ----------------------------------------------------------------
+
+def _run(args: list[str], **env: str) -> subprocess.CompletedProcess[str]:
+    environment = dict(os.environ, PYTHONHASHSEED="0", **env)
+    return subprocess.run(
+        [sys.executable, *args],
+        cwd=str(REPO),
+        capture_output=True,
+        text=True,
+        env=environment,
+    )
+
+
+def test_the_documented_ci_command_runs_and_passes(tmp_path: Path) -> None:
+    """The exact command in eval/README.md, end to end, as CI will invoke it."""
+    artifact = tmp_path / "report.json"
+    done = _run(["-m", "eval.run", "--report-json", str(artifact)])
+    assert done.returncode == EXIT_OK, done.stdout + done.stderr
+    assert json.loads(artifact.read_text())["status"] == "pass"
+
+
+def test_the_ci_run_makes_no_live_provider_call(tmp_path: Path) -> None:
+    """ENG-3: CI is deterministic and passes with no network. Proven, not assumed.
+
+    A poisoned key would make any real call fail loudly; the stronger assertion is that
+    the Anthropic SDK is never even imported by the gating path.
+    """
+    probe = (
+        "import sys;"
+        "from eval.run import main;"
+        "code = main(['--json']);"
+        "live = sorted(m for m in sys.modules if m.startswith('anthropic'));"
+        "assert not live, live;"
+        "sys.exit(code)"
+    )
+    done = _run(["-c", probe], ANTHROPIC_API_KEY="sk-ant-not-a-real-key")
+    assert done.returncode == EXIT_OK, done.stdout + done.stderr
+
+
+def test_the_run_records_which_extractor_produced_the_number(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    main(["--json"])
+    assert json.loads(capsys.readouterr().out)["provider"] == "fake:spec"
+
+
+def test_a_seeded_regression_trips_the_threshold_gate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The point of a threshold is that a worse run exits non-zero."""
+    import eval.run as run_module
+
+    broken = [CATALOG[0].with_(expect={"brand_name": "mismatch"}), *CATALOG[1:]]
+    monkeypatch.setattr(run_module, "CATALOG", broken)
+
+    # One wrong row out of ~98 is still above the 95% floor — the default run passes.
+    assert main([]) == EXIT_OK
+    # Raise the bar and the same run is blocked.
+    assert main(["--min-accuracy", "1.0"]) == EXIT_ACCURACY
+
+
+def test_the_threshold_can_be_raised() -> None:
+    assert main(["--min-accuracy", "1.0"]) == EXIT_OK
+
+
+def test_the_threshold_cannot_be_lowered_below_the_ops3_floor() -> None:
+    """A gate whose bar can be lowered until it passes is not a gate."""
+    assert main(["--min-accuracy", "0.5"]) == EXIT_USAGE
+    assert main(["--min-accuracy", "0.0"]) == EXIT_USAGE
+
+
+def test_the_threshold_rejects_impossible_values() -> None:
+    assert main(["--min-accuracy", "1.5"]) == EXIT_USAGE
+
+
+def test_the_effective_threshold_is_reported(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    main(["--json", "--min-accuracy", "0.99"])
+    body = json.loads(capsys.readouterr().out)
+    assert body["accuracy_floor"] == 0.99
+    assert body["ops3_floor"] == ACCURACY_FLOOR
 
 
 # --- expectations are honest -----------------------------------------------------------------

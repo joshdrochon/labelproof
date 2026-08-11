@@ -72,7 +72,9 @@ def payload(report: Report) -> dict[str, Any]:
         "accuracy": round(report.accuracy, 4),
         "correct": report.correct,
         "total": report.total,
-        "accuracy_floor": ACCURACY_FLOOR,
+        "accuracy_floor": report.floor,
+        "ops3_floor": ACCURACY_FLOOR,
+        "provider": report.provider,
         "warning_rows": len(report.warning_rows),
         "warning_violations": len(report.warning_violations),
         "false_passes": len(report.false_passes),
@@ -119,6 +121,16 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="PATH",
         help="also write the machine-readable payload here, for CI to keep as an artifact",
     )
+    parser.add_argument(
+        "--min-accuracy",
+        type=float,
+        default=ACCURACY_FLOOR,
+        metavar="FLOAT",
+        help=(
+            f"field-accuracy threshold, 0..1 (default {ACCURACY_FLOOR}). May be raised "
+            f"above the OPS-3 floor, never lowered."
+        ),
+    )
     return parser
 
 
@@ -139,7 +151,18 @@ def main(argv: list[str] | None = None) -> int:
         print(f"no fixtures matched {sorted(set(args.fixture or []))}", file=sys.stderr)
         return EXIT_USAGE
 
-    report = evaluate(specs, subset=bool(args.fixture))
+    # The threshold ratchets one way. A gate whose bar can be lowered until it passes is
+    # not a gate, and OPS-3 fixes the floor at 95% — raising it is tightening, lowering
+    # it would be quietly redefining the requirement in a CI argument.
+    if args.min_accuracy > 1.0 or args.min_accuracy < ACCURACY_FLOOR:
+        print(
+            f"--min-accuracy must be between {ACCURACY_FLOOR} and 1.0. "
+            f"{ACCURACY_FLOOR:.0%} is the OPS-3 floor and this flag can only raise it.",
+            file=sys.stderr,
+        )
+        return EXIT_USAGE
+
+    report = evaluate(specs, subset=bool(args.fixture), floor=args.min_accuracy)
     body = payload(report)
 
     if args.json:

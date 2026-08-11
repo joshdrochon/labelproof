@@ -21,7 +21,7 @@ from __future__ import annotations
 
 from api.models import Verdict
 from eval.gates import FAIL, SKIP, Gate, exit_code_for, gates_for, status_line
-from eval.outcomes import ACCURACY_FLOOR, Report
+from eval.outcomes import Report
 
 RULE = "=" * 78
 THIN = "-" * 78
@@ -79,7 +79,10 @@ def header(report: Report) -> list[str]:
     out.append(RULE)
     if report.subset:
         out.append("SUBSET RUN — a --fixture filter is active. NOT A RELEASE GATE.")
-    out.append(f"Fixtures run: {report.fixtures}    Field rows scored: {report.total}")
+    out.append(
+        f"Fixtures run: {report.fixtures}    Field rows scored: {report.total}    "
+        f"Extractor: {report.provider}"
+    )
     return out
 
 
@@ -96,7 +99,7 @@ def accuracy_section(report: Report) -> list[str]:
     out = [
         "",
         f"Field accuracy: {report.correct}/{report.total} "
-        f"({report.accuracy:.1%})   floor {ACCURACY_FLOOR:.0%}"
+        f"({report.accuracy:.1%})   floor {report.floor:.1%}"
         f"   {'OK' if report.accuracy_ok else 'BELOW FLOOR'}",
     ]
 
