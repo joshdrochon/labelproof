@@ -243,6 +243,40 @@ CONDITIONS: list[Condition] = [
             "machinery. A set with only perspective cases would leave deskew untested."
         ),
     ),
+    Condition(
+        name="tc12_glare_warning",
+        tc="TC-12",
+        description="flash reflection across the government warning",
+        expectation="warning_illegible",
+        why=(
+            "The case the whole per-region design exists for. One global quality number "
+            "calls this image fine, because it is fine everywhere except the one place "
+            "that matters most. The warning must come back Unreadable and the brand two "
+            "inches above it must still be verified."
+        ),
+    ),
+    Condition(
+        name="tc12_glare_corner",
+        tc="TC-12",
+        description="specular highlight on the shoulder of the bottle, off the text",
+        expectation="readable",
+        why=(
+            "The control for TC-12. Glare that lands on bare label stock must change "
+            "nothing. Without it, a scorer that marked every image with a bright patch "
+            "as damaged would pass the glare case and look correct."
+        ),
+    ),
+    Condition(
+        name="tc12_glare_total",
+        tc="TC-12",
+        description="flash across most of the label",
+        expectation="pregated",
+        why=(
+            "Past recovery. The obligation here is a retake reason and zero model calls "
+            "— spending a token on this image buys nothing, and inpainting it would buy "
+            "something worse than nothing."
+        ),
+    ),
 ]
 
 #: Fixture name -> one-line description. Kept as a flat mapping because it is the shape
@@ -267,6 +301,10 @@ def apply_preset(image: np.ndarray, preset: str) -> np.ndarray:
             return rotate(image, 8.0)
         case "tc12_glare_warning":
             return glare_over_warning(image)
+        case "tc12_glare_corner":
+            return glare(image, centre=(0.5, 0.80), radius=0.09, aspect=2.0)
+        case "tc12_glare_total":
+            return glare(image, centre=(0.5, 0.45), radius=0.55, aspect=1.4)
         case "tc13_dim":
             return dim(image)
         case "tc14_blur_hopeless":
