@@ -189,10 +189,16 @@ def _is_truncation(expected: list[str], found: list[str]) -> bool:
         return False
     if found == expected[: len(found)]:
         return True
-    return (
-        found[:-1] == expected[: len(found) - 1]
-        and _bare(found[-1]) == _bare(expected[len(found) - 1])
-    )
+    if found[:-1] != expected[: len(found) - 1]:
+        return False
+
+    # The last surviving word is compared loosely, because a cut lands wherever the
+    # artwork ran out rather than politely between words. Two shapes count: the printer
+    # added a full stop where the text stopped, or the cut fell mid-word and left a
+    # prefix of it ("...operate mach"). Both are a statement that ends early, and the
+    # correction the applicant needs is the same one.
+    last, expected_last = _bare(found[-1]), _bare(expected[len(found) - 1])
+    return last == expected_last or (bool(last) and expected_last.startswith(last))
 
 
 @dataclass(frozen=True)
@@ -621,7 +627,9 @@ FINDING_CODES: Final[frozenset[str]] = frozenset(c.code for c in CHECK_MANIFEST)
 LIMITS: Final[tuple[Limit, ...]] = (
     Limit(
         requirement="Minimum type size in millimetres, and maximum characters per inch",
-        citation="27 CFR 16.22(b)",
+        # Two subsections, not one: 16.22(b) maps container volume to millimetres in
+        # prose, and 16.22(a)(4) carries the millimetres-to-characters-per-inch table.
+        citation="27 CFR 16.22(a)(4), (b)",
         why_not=(
             "A photograph has no scale. Without knowing the physical size of the "
             "container in the frame, millimetres cannot be recovered from pixels. The "

@@ -222,16 +222,26 @@ def check_prominence(signals: WarningTypography) -> list[Finding]:
     ratio = signals.relative_size
     if ratio is None:
         return []
+    # A ratio outside this range is not a measurement, it is a broken reading: a warning
+    # cannot be a negative size, and a hundredfold difference is not something a label
+    # does. Reporting "printed about 200% smaller" from a -1.0 would be the tool
+    # inventing a finding out of a bad input.
+    if not 0.0 < ratio < 100.0:
+        return []
     if ratio > PROMINENCE_CONCERN_RATIO:
         return []
     percent = round((1.0 - ratio) * 100)
     return [
         Finding(
             code="warning_less_prominent",
+            # Says only what the ratio supports. An earlier draft added "and set apart
+            # from the rest of the information", which is 16.21's separate-and-apart
+            # rule — a requirement `warning.LIMITS` explicitly declares unchecked. A
+            # message must not claim a check the same module disclaims.
             message=(
                 f"The warning is printed about {percent}% smaller than the other text "
-                f"on this label. It must be readily legible and set apart from the rest "
-                f"of the information — compare it against the surrounding text yourself."
+                f"on this label. It must be readily legible — compare it against the "
+                f"surrounding text yourself."
             ),
             citation=canon.CITATIONS["warning_format"],
             severity=SEVERITY_VIOLATION,

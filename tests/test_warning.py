@@ -251,6 +251,22 @@ def test_the_truncation_message_names_the_missing_clause() -> None:
     assert "second numbered part" in finding.message
 
 
+def test_a_cut_that_landed_mid_word_is_still_a_truncation() -> None:
+    """A cut lands wherever the artwork ran out, not politely between words. This used
+    to classify as a rewording, sending the applicant to look for words they never
+    changed."""
+    cut = canon.CANONICAL_WARNING[: canon.CANONICAL_WARNING.index("machinery") + 4]
+    assert cut.endswith("mach")
+    assert warning.classify(cut).kind == warning.TRUNCATED
+
+
+def test_a_prefix_of_the_last_word_is_not_confused_with_a_different_word() -> None:
+    """Loose matching applies to the final token only, and only as a prefix."""
+    tokens = warning.tokenize(canon.CANONICAL_WARNING)
+    swapped = " ".join([*tokens[:10], "zzz"])
+    assert warning.classify(swapped).kind != warning.TRUNCATED
+
+
 def test_words_dropped_from_the_middle_are_an_omission_not_a_truncation() -> None:
     """The difference matters: one label stops early, the other quietly edits."""
     edited = canon.CANONICAL_WARNING.replace("or operate machinery, ", "")
@@ -642,6 +658,29 @@ def test_buried_warning_goes_to_a_human_not_back_to_the_applicant() -> None:
     assert "warning_low_contrast" in _asserted(result)
 
 
+def test_the_prominence_message_claims_no_check_the_module_disclaims() -> None:
+    """`LIMITS` declares 16.21's separate-and-apart rule unchecked, and the message used
+    to assert it. A checker must not claim in prose what it disclaims in its manifest."""
+    signals = WarningTypography(header_is_bold=True, body_is_bold=False, relative_size=0.4,
+                                contrast_ok=True)
+    finding = next(
+        f for f in warning.evaluate(canon.CANONICAL_WARNING, signals).findings
+        if f.code == "warning_less_prominent"
+    )
+    assert "set apart" not in finding.message
+    assert "separate" not in finding.message
+
+
+@pytest.mark.parametrize("ratio", [-1.0, 0.0, 1000.0])
+def test_an_impossible_size_ratio_raises_no_finding(ratio: float) -> None:
+    """A warning cannot be a negative size. Reporting "printed about 200% smaller" from
+    a -1.0 would be inventing a finding out of a broken reading."""
+    signals = WarningTypography(header_is_bold=True, body_is_bold=False, contrast_ok=True,
+                                relative_size=ratio)
+    codes = {f.code for f in warning.evaluate(canon.CANONICAL_WARNING, signals).findings}
+    assert "warning_less_prominent" not in codes
+
+
 @pytest.mark.tc("TC-06")
 def test_prominence_rationale_describes_the_problem_not_the_verdict() -> None:
     signals = WarningTypography(header_is_bold=True, body_is_bold=False, relative_size=0.45)
@@ -998,9 +1037,11 @@ def test_the_limits_are_stated_rather_than_left_out() -> None:
         assert len(limit.why_not) > 60, f"{limit.requirement}: no reason given"
 
 
-def test_the_type_size_limit_is_cited_to_the_subsection() -> None:
+def test_the_type_size_limit_is_cited_to_both_its_subsections() -> None:
+    """16.22(b) maps container volume to millimetres in prose; 16.22(a)(4) carries the
+    millimetres-to-characters-per-inch table. An earlier pass cited (b) for both."""
     limit = next(x for x in warning.LIMITS if "millimetres" in x.requirement)
-    assert limit.citation == "27 CFR 16.22(b)"
+    assert limit.citation == "27 CFR 16.22(a)(4), (b)"
 
 
 def test_separate_and_apart_is_cited_to_16_21_not_16_22() -> None:
