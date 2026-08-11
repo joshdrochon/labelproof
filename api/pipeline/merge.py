@@ -27,6 +27,19 @@ know — that we do not actually know what the label says. A conflicted field me
 routes to Ready to approve and it never routes to Return for correction, because a reading
 we do not trust is no basis for rejecting an application either.
 
+**Typography is reconciled, never won.** The warning's five typography signals are the
+same problem one level down: two photographs of the same back panel can agree on the text
+and disagree on whether the heading is bold. Taking the signal from whichever picture read
+the text more confidently would settle a WARN-2/WARN-7 compliance question with a
+legibility score. Signals that disagree degrade to `None`, which `api.rules.warning` turns
+into a cannot-confirm finding and Needs review. Failing closed here is the whole of WARN-6.
+
+**Images that are not labels do not vote.** An `Extraction` with `is_label=False` is a
+photograph of something else — a carton, a marketing sheet, a cat (TC-15). The extractor
+may still have read text off it, and that text must not stand in for the artwork under
+review. A warning statement read off the wrong picture is a Ready to approve on a label
+that has no warning at all.
+
 **Provenance is per field, not per label.** Each winning value records the image it came
 from, so the evidence overlay points at the right photograph. On a front/back application
 the brand name and the warning legitimately come from different pictures.
@@ -149,6 +162,25 @@ class MergedField:
     readings: tuple[Reading, ...]
     conflict: Conflict | None = None
 
+    @property
+    def agreeing(self) -> tuple[Reading, ...]:
+        """Every reading that supports the established value, in image order.
+
+        More than one image can read the same statement, and each of them formed its own
+        opinion about how that statement is printed. Those opinions have to be reconciled
+        rather than inherited from whichever reading happened to win, so the merge needs
+        to know which pictures backed the winner.
+        """
+        if self.value is None:
+            return ()
+        winning = materiality_key(self.field, self.value)
+        return tuple(
+            reading
+            for reading in self.readings
+            if reading.value is not None
+            and materiality_key(self.field, reading.value) == winning
+        )
+
     def as_extracted(self) -> ExtractedField:
         """The shape `api.rules.compare` consumes. Provenance rides alongside, not inside."""
         return ExtractedField(
@@ -161,11 +193,17 @@ class MergedField:
 
 @dataclass(frozen=True)
 class MergedLabel:
-    """Everything read off the label, once every image has had its say."""
+    """Everything read off the label, once every image has had its say.
+
+    There is deliberately no separate `warning_text`. The statement is the value of the
+    `government_warning` field and nowhere else, so it arrives with a confidence, a
+    picture, and a legibility judgement like every other reading. An earlier draft kept a
+    second copy sourced from `Extraction.warning_text`, which let a provider that reported
+    the statement but omitted the field supply a warning nothing had actually read — a
+    fail-open path on the one field that must fail closed (WARN-6).
+    """
 
     fields: dict[FieldName, MergedField]
-    warning_text: str | None = None
-    warning_image_index: int | None = None
     warning_typography: WarningTypography = dataclass_field(
         default_factory=WarningTypography
     )
@@ -305,74 +343,116 @@ def merge_field(name: FieldName, readings: tuple[Reading, ...]) -> MergedField |
     # consumer that ignores the conflict metadata still fails closed rather than passing
     # the more confident of two contradictory readings.
     disputants = tuple(_best(group) for group in groups)
-    first = disputants[0]
     return MergedField(
         field=name,
         value=None,
         confidence=0.0,
         legible=False,
-        # The evidence pair stays coherent: the box belongs to the picture named beside
-        # it. Both readings are listed in the conflict, and the UI can walk them.
-        bbox=first.bbox,
-        image_index=first.image_index,
+        # No box. `Evidence` holds one image and one region, and a row that says "the
+        # pictures disagree" while boxing only the first of them is worse than a row with
+        # no box at all: the overlay filters by image, so an agent looking at picture 2
+        # would see a flagged field and nothing highlighted. Every conflicted row is now
+        # boxless, which also matches what `compare._unreadable` produces for the others.
+        # Per-reading boxes are preserved on `Conflict.readings` for a UI that can show
+        # more than one region at a time.
+        bbox=None,
+        image_index=disputants[0].image_index,
         readings=readings,
         conflict=Conflict(field=name, readings=disputants),
     )
 
 
-def _merge_warning(
-    extractions: list[Extraction], warning: MergedField | None
-) -> tuple[str | None, int | None, WarningTypography]:
-    """The statement and its typography, taken from the image the statement was read on.
+#: The tri-state typography signals. `relative_size` is a measurement and is handled
+#: separately — see `_merge_typography`.
+_TRISTATE_SIGNALS: tuple[str, ...] = (
+    "header_is_all_caps",
+    "header_is_bold",
+    "body_is_bold",
+    "contrast_ok",
+)
 
-    Typography signals describe how one photograph renders the statement. Pairing image
-    2's bold judgement with image 1's text would be a determination nobody made, so both
-    travel together from the winning image (WARN-6).
+
+def _reconcile_tristate(claims: list[bool | None]) -> bool | None:
+    """One typography signal across every picture that read the statement.
+
+    `None` is not a claim — it is "I could not tell from this photograph" — so it neither
+    wins nor blocks. Among the pictures that *did* make a determination, unanimity carries
+    it and any disagreement collapses to `None`.
+
+    That collapse is the point. `False` on `header_is_bold` is a finding; `True` is a pass;
+    picking between two pictures that say different things would decide a regulatory
+    question by whichever photograph was sharper. `None` routes to a cannot-confirm finding
+    and Needs review, which is the only honest answer when two pictures of the same panel
+    disagree about how it is printed (WARN-6).
     """
+    stated = {claim for claim in claims if claim is not None}
+    if len(stated) == 1:
+        return stated.pop()
+    return None
+
+
+def _merge_typography(
+    extractions: list[Extraction], warning: MergedField | None
+) -> WarningTypography:
+    """Reconcile the typography signals across every picture that read the statement.
+
+    Typography describes how one photograph renders the statement, so only pictures that
+    actually read it get an opinion. If the statement itself could not be established —
+    unreadable, blank, or conflicted — no typography survives: signals read off a statement
+    we could not establish are not determinations.
+    """
+    if warning is None or warning.value is None:
+        return WarningTypography()
+
     by_index = {extraction.image_index: extraction for extraction in extractions}
+    signals = [
+        by_index[reading.image_index].warning_typography
+        for reading in warning.agreeing
+        if reading.image_index in by_index
+    ]
+    if not signals:
+        return WarningTypography()
 
-    if warning is not None and warning.value is not None:
-        source = by_index.get(warning.image_index)
-        return (
-            warning.value,
-            warning.image_index,
-            source.warning_typography if source else WarningTypography(),
-        )
+    sizes = [s.relative_size for s in signals if s.relative_size is not None]
+    return WarningTypography(
+        **{
+            name: _reconcile_tristate([getattr(s, name) for s in signals])
+            for name in _TRISTATE_SIGNALS
+        },
+        # A measurement rather than a claim, and the only rule that will consume it asks
+        # whether the statement is too small (WARN-5). The smallest reading is therefore
+        # the conservative one — it is the reading most likely to raise a prominence
+        # finding, and rounding a buried warning up to the roomiest photograph of it is
+        # exactly the failure WARN-6 forbids.
+        relative_size=min(sizes) if sizes else None,
+    )
 
-    if warning is not None:
-        # Unreadable, blank, or conflicted. Typography read off a statement we could not
-        # establish is not a determination — drop it rather than let it be treated as one.
-        return None, None, WarningTypography()
 
-    # No image reported the field. A provider that supplies the statement text without
-    # the field is inconsistent, but the text is still evidence the warning exists, and
-    # dropping it would manufacture a Missing verdict. Earliest image wins.
-    for extraction in sorted(extractions, key=lambda e: e.image_index):
-        if extraction.warning_text:
-            return (
-                extraction.warning_text,
-                extraction.image_index,
-                extraction.warning_typography,
-            )
-    return None, None, WarningTypography()
+def contributing(extractions: list[Extraction]) -> list[Extraction]:
+    """The images that are actually pictures of the label under review (TC-15).
+
+    An extraction flagged `is_label=False` is a photograph of something else. Whatever the
+    extractor read off it describes a different object, and letting it supply a field would
+    verify one product against a picture of another.
+    """
+    return [extraction for extraction in extractions if extraction.is_label]
 
 
 def merge(extractions: list[Extraction]) -> MergedLabel:
     """Combine per-image extractions into one view of the label (IMG-8, TC-16)."""
+    usable = contributing(extractions)
+
     fields: dict[FieldName, MergedField] = {}
     for name in FieldName:
-        merged = merge_field(name, readings_for(extractions, name))
+        merged = merge_field(name, readings_for(usable, name))
         if merged is not None:
             fields[name] = merged
 
-    text, image_index, typography = _merge_warning(
-        extractions, fields.get(FieldName.GOVERNMENT_WARNING)
-    )
     return MergedLabel(
         fields=fields,
-        warning_text=text,
-        warning_image_index=image_index,
-        warning_typography=typography,
+        warning_typography=_merge_typography(
+            usable, fields.get(FieldName.GOVERNMENT_WARNING)
+        ),
     )
 
 
@@ -381,27 +461,61 @@ def merge(extractions: list[Extraction]) -> MergedLabel:
 # --------------------------------------------------------------------------------------
 
 
+#: Longest reading quoted inline on the row. Above this the values are named rather than
+#: reproduced — the government warning statement is fifty words, and two of them inline
+#: turn a checklist row into a wall of legalese nobody reads (UX-6).
+MAX_INLINE_VALUE = 60
+
+
+def _sentence_list(parts: list[str]) -> str:
+    """`a`, `a and b`, `a, b and c` — a plain-English list, not a chain of "and"s."""
+    if len(parts) <= 2:
+        return " and ".join(parts)
+    return f"{', '.join(parts[:-1])} and {parts[-1]}"
+
+
 def conflict_rationale(conflict: Conflict) -> str:
     """The one-line explanation shown on the field's row (MATCH-5).
 
-    Says what each picture reads and says plainly that neither was accepted. An agent who
-    reads only this line should come away knowing to look at both photographs.
+    Short values are quoted, because seeing `OLD TOM` against `OLDE TOWNE` is the fastest
+    possible way to understand the problem. Long ones are not: the full readings go in the
+    finding, which the row expands into, and the line itself stays a line.
     """
     label = _FIELD_LABELS[conflict.field]
-    quoted = " and ".join(
-        f'picture {picture_number(r.image_index)} reads "{r.value}"'
-        for r in conflict.readings
-    )
+    pictures = [f"picture {picture_number(r.image_index)}" for r in conflict.readings]
+
+    if all(len(r.value or "") <= MAX_INLINE_VALUE for r in conflict.readings):
+        detail = _sentence_list(
+            [
+                f'{picture} reads "{reading.value}"'
+                for picture, reading in zip(pictures, conflict.readings, strict=True)
+            ]
+        )
+    else:
+        detail = f"{_sentence_list(pictures)} read it differently"
+
     return (
-        f"The pictures disagree about the {label} — {quoted}. Neither reading has been "
+        f"The pictures disagree about the {label} — {detail}. Neither reading has been "
         f"accepted, so this field has not been checked. Compare the pictures yourself."
     )
 
 
 def conflict_finding(conflict: Conflict) -> Finding:
-    """The structured finding that rides alongside the verdict."""
+    """The structured finding that rides alongside the verdict.
+
+    Carries every disputed reading in full, however long. The row shows the summary; this
+    is what it expands into, and an agent resolving the disagreement needs the exact text
+    rather than a description of it.
+    """
+    readings = " ".join(
+        f'Picture {picture_number(r.image_index)} reads: "{r.value}".'
+        for r in conflict.readings
+    )
     return Finding(
         code=CONFLICT_CODE,
-        message=conflict_rationale(conflict),
+        message=(
+            f"The pictures do not agree on the "
+            f"{_FIELD_LABELS[conflict.field]}, so it has not been checked. {readings}"
+        ),
         severity="finding",
     )

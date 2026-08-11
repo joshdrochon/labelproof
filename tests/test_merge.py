@@ -32,6 +32,7 @@ from api.pipeline.merge import (
     ReadingKind,
     conflict_finding,
     conflict_rationale,
+    contributing,
     materiality_key,
     merge,
     picture_number,
@@ -73,6 +74,21 @@ def image(
         fields=fields,
         warning_text=warning_text,
         warning_typography=typography or WarningTypography(),
+    )
+
+
+def _not_a_label(
+    index: int,
+    fields: dict[FieldName, ExtractedField],
+    *,
+    warning_text: str | None = None,
+) -> Extraction:
+    """A photograph of something that is not the artwork under review (TC-15)."""
+    return Extraction(
+        image_index=index,
+        is_label=False,
+        fields=fields,
+        warning_text=warning_text,
     )
 
 
@@ -303,7 +319,13 @@ def test_an_unreadable_image_does_not_join_a_conflict() -> None:
     assert label.fields[BRAND].value == "OLD TOM"
 
 
-def test_the_conflict_evidence_box_belongs_to_the_picture_it_names() -> None:
+def test_a_conflicted_field_draws_no_evidence_box() -> None:
+    """Boxing one disputant while saying "the pictures disagree" is worse than no box.
+
+    The overlay filters regions by image, so a box on picture 1 only leaves an agent who
+    is looking at picture 2 with a flagged row and nothing highlighted. Every disputant's
+    own box is still on the conflict for a UI that can show more than one at a time.
+    """
     other = BoundingBox(x0=0.2, y0=0.5, x1=0.8, y1=0.6)
     label = merge(
         [
@@ -312,7 +334,10 @@ def test_the_conflict_evidence_box_belongs_to_the_picture_it_names() -> None:
         ]
     )
     merged = label.fields[BRAND]
-    assert (merged.image_index, merged.bbox) == (0, BOX)
+    assert merged.bbox is None
+    conflict = merged.conflict
+    assert conflict is not None
+    assert [r.bbox for r in conflict.readings] == [BOX, other]
 
 
 # --- the warning gets no leniency (WARN-6) ----------------------------------------------
@@ -369,8 +394,8 @@ def test_materiality_key_is_stricter_for_the_warning_than_for_other_fields() -> 
 # --- warning text and typography travel together ----------------------------------------
 
 
-def test_typography_comes_from_the_image_the_statement_was_read_on() -> None:
-    """Pairing one picture's text with another picture's bold judgement is a fabrication."""
+def test_only_pictures_that_read_the_statement_get_a_say_on_typography() -> None:
+    """A picture with no warning on it has no opinion about how the warning is printed."""
     front = WarningTypography(header_is_bold=False, body_is_bold=True)
     back = WarningTypography(header_is_bold=True, body_is_bold=False)
     label = merge(
@@ -379,8 +404,86 @@ def test_typography_comes_from_the_image_the_statement_was_read_on() -> None:
             image(1, {WARNING: read(CANONICAL, 0.95)}, warning_text=CANONICAL, typography=back),
         ]
     )
-    assert label.warning_image_index == 1
     assert label.warning_typography == back
+
+
+def test_disagreeing_typography_degrades_to_could_not_determine() -> None:
+    """The regression this module docstring promised not to have.
+
+    Two photographs of the same back panel, same statement, different answer on whether
+    the heading is bold. The confident picture must not win: that would settle a WARN-2
+    question with a legibility score, and it would turn the *violation* into a pass
+    whenever the compliant-looking photograph happened to be sharper.
+    """
+    label = merge(
+        [
+            image(0, {WARNING: read(CANONICAL, 0.90)},
+                  warning_text=CANONICAL,
+                  typography=WarningTypography(header_is_bold=False)),
+            image(1, {WARNING: read(CANONICAL, 0.95)},
+                  warning_text=CANONICAL,
+                  typography=WarningTypography(header_is_bold=True)),
+        ]
+    )
+    assert label.fields[WARNING].value == CANONICAL, "the text itself is not in dispute"
+    assert label.warning_typography.header_is_bold is None
+
+
+def test_disagreeing_typography_degrades_whichever_picture_is_more_confident() -> None:
+    """The mirror image, so the fix cannot be an accident of which value won."""
+    label = merge(
+        [
+            image(0, {WARNING: read(CANONICAL, 0.95)},
+                  warning_text=CANONICAL,
+                  typography=WarningTypography(body_is_bold=True)),
+            image(1, {WARNING: read(CANONICAL, 0.90)},
+                  warning_text=CANONICAL,
+                  typography=WarningTypography(body_is_bold=False)),
+        ]
+    )
+    assert label.warning_typography.body_is_bold is None
+
+
+def test_agreeing_typography_survives() -> None:
+    """Degrading everything would be its own defect — a permanent cannot-confirm finding."""
+    signals = WarningTypography(header_is_all_caps=True, header_is_bold=True, body_is_bold=False)
+    label = merge(
+        [
+            image(0, {WARNING: read(CANONICAL, 0.90)}, warning_text=CANONICAL, typography=signals),
+            image(1, {WARNING: read(CANONICAL, 0.95)}, warning_text=CANONICAL, typography=signals),
+        ]
+    )
+    assert label.warning_typography == signals
+
+
+def test_a_picture_that_could_not_tell_does_not_veto_one_that_could() -> None:
+    """`None` is not a claim, so it neither wins nor blocks — the field-value rule again."""
+    label = merge(
+        [
+            image(0, {WARNING: read(CANONICAL, 0.90)},
+                  warning_text=CANONICAL,
+                  typography=WarningTypography(header_is_bold=None)),
+            image(1, {WARNING: read(CANONICAL, 0.95)},
+                  warning_text=CANONICAL,
+                  typography=WarningTypography(header_is_bold=True)),
+        ]
+    )
+    assert label.warning_typography.header_is_bold is True
+
+
+def test_the_smallest_reported_warning_size_wins() -> None:
+    """A measurement, not a claim. WARN-5 asks whether it is too small, so round down."""
+    label = merge(
+        [
+            image(0, {WARNING: read(CANONICAL, 0.90)},
+                  warning_text=CANONICAL,
+                  typography=WarningTypography(relative_size=0.4)),
+            image(1, {WARNING: read(CANONICAL, 0.99)},
+                  warning_text=CANONICAL,
+                  typography=WarningTypography(relative_size=1.0)),
+        ]
+    )
+    assert label.warning_typography.relative_size == 0.4
 
 
 def test_a_conflicted_warning_drops_its_typography() -> None:
@@ -394,7 +497,6 @@ def test_a_conflicted_warning_drops_its_typography() -> None:
                   typography=WarningTypography(header_is_bold=False)),
         ]
     )
-    assert label.warning_text is None
     assert label.warning_typography == WarningTypography()
 
 
@@ -405,14 +507,16 @@ def test_an_unreadable_warning_drops_its_typography() -> None:
     assert label.warning_typography == WarningTypography()
 
 
-def test_warning_text_survives_a_provider_that_omits_the_field() -> None:
-    """Defensive: a hand-written recorded fixture can supply the text and not the field.
+def test_a_statement_nothing_read_is_not_a_statement() -> None:
+    """A provider reporting `warning_text` but omitting the field supplies no reading.
 
-    Dropping the text would manufacture a Missing verdict on a label that has a warning.
+    An earlier draft kept that text as a second copy of the statement, which would let a
+    warning nothing had actually read satisfy the check. The statement is the field's
+    value or it does not exist (WARN-6).
     """
     label = merge([image(0, {}, warning_text=CANONICAL)])
-    assert label.warning_text == CANONICAL
-    assert label.warning_image_index == 0
+    assert WARNING not in label.fields
+    assert label.warning_typography == WarningTypography()
 
 
 # --- provenance -------------------------------------------------------------------------
@@ -462,13 +566,125 @@ def test_the_conflict_rationale_names_both_pictures_and_both_readings() -> None:
     assert conflict_finding(conflict).code == CONFLICT_CODE
 
 
+# --- images that are not the label (TC-15 sitting next to TC-16) --------------------------
+
+
+@pytest.mark.tc("TC-15")
+def test_a_non_label_image_supplies_no_readings() -> None:
+    """Somebody uploads the carton alongside the artwork. The carton does not get a vote."""
+    label = merge(
+        [
+            image(0, {BRAND: read("OLD TOM DISTILLERY")}),
+            _not_a_label(1, {BRAND: read("SOMETHING ELSE", 0.99)}),
+        ]
+    )
+    assert label.fields[BRAND].value == "OLD TOM DISTILLERY"
+    assert [r.image_index for r in label.fields[BRAND].readings] == [0]
+
+
+@pytest.mark.tc("TC-15")
+def test_a_warning_read_off_a_non_label_image_does_not_supply_the_warning() -> None:
+    """The false pass this guard exists for.
+
+    The artwork genuinely has no warning statement printed on it. A marketing sheet in the
+    same upload does. Letting the sheet answer for the label returns Ready to approve on a
+    label with no government warning at all — the worst outcome this product can produce.
+    """
+    label = merge(
+        [
+            image(0, {BRAND: read("OLD TOM DISTILLERY")}),
+            _not_a_label(1, {WARNING: read(CANONICAL, 0.99)}, warning_text=CANONICAL),
+        ]
+    )
+    assert WARNING not in label.fields
+    assert label.warning_typography == WarningTypography()
+
+
+@pytest.mark.tc("TC-15")
+def test_a_non_label_image_cannot_manufacture_a_conflict_either() -> None:
+    """The guard cuts both ways: a wrong picture must not flag a field that is fine."""
+    label = merge(
+        [
+            image(0, {BRAND: read("OLD TOM DISTILLERY", 0.9)}),
+            _not_a_label(1, {BRAND: read("OLDE TOWNE DISTILLERY", 0.99)}),
+        ]
+    )
+    assert label.fields[BRAND].conflict is None
+    assert label.fields[BRAND].value == "OLD TOM DISTILLERY"
+
+
+def test_contributing_keeps_only_the_label_images() -> None:
+    extractions = [image(0, {}), _not_a_label(1, {}), image(2, {})]
+    assert [e.image_index for e in contributing(extractions)] == [0, 2]
+
+
+# --- the rationale is a line, not a document (UX-6) ---------------------------------------
+
+
+def test_a_conflicted_warning_does_not_inline_two_statements() -> None:
+    """Two 27 CFR 16.21 statements inline is not a one-line explanation."""
+    conflict = Conflict(
+        field=WARNING,
+        readings=(
+            Reading(image_index=0, value=CANONICAL, confidence=0.9),
+            Reading(image_index=1, value=TITLE_CASE, confidence=0.9),
+        ),
+    )
+    rationale = conflict_rationale(conflict)
+    assert len(rationale) < 250
+    assert CANONICAL not in rationale
+    assert "picture 1 and picture 2 read it differently" in rationale
+
+
+def test_the_full_readings_are_still_available_on_the_finding() -> None:
+    """Summarised on the row, complete in the thing the row expands into."""
+    conflict = Conflict(
+        field=WARNING,
+        readings=(
+            Reading(image_index=0, value=CANONICAL, confidence=0.9),
+            Reading(image_index=1, value=TITLE_CASE, confidence=0.9),
+        ),
+    )
+    message = conflict_finding(conflict).message
+    assert CANONICAL in message
+    assert TITLE_CASE in message
+
+
+def test_short_readings_are_still_quoted_on_the_row() -> None:
+    """`OLD TOM` against `OLDE TOWNE` is the fastest way to see the problem. Keep it."""
+    conflict = Conflict(
+        field=BRAND,
+        readings=(
+            Reading(image_index=0, value="OLD TOM", confidence=0.4),
+            Reading(image_index=1, value="OLDE TOWNE", confidence=0.9),
+        ),
+    )
+    assert 'picture 1 reads "OLD TOM" and picture 2 reads "OLDE TOWNE"' in conflict_rationale(
+        conflict
+    )
+
+
+def test_three_disagreeing_pictures_read_as_english() -> None:
+    """`A and B and C` is a chain, not a sentence."""
+    conflict = Conflict(
+        field=BRAND,
+        readings=tuple(
+            Reading(image_index=i, value=v, confidence=0.9)
+            for i, v in enumerate(["OLD TOM", "OLDE TOWNE", "OLD TOWN"])
+        ),
+    )
+    rationale = conflict_rationale(conflict)
+    assert 'picture 1 reads "OLD TOM", picture 2 reads "OLDE TOWNE" and ' in rationale
+    assert " and picture 2 and " not in rationale
+
+
 # --- degenerate inputs ------------------------------------------------------------------
 
 
 def test_no_images_merges_to_nothing() -> None:
     label = merge([])
     assert label.fields == {}
-    assert label.warning_text is None
+    assert label.warning_typography == WarningTypography()
 
 
 def test_one_image_is_the_ordinary_case() -> None:
@@ -487,7 +703,12 @@ _VALUES = ["OLD TOM", "Old Tom", "NEW TOM"]
 
 @st.composite
 def _extractions(draw: st.DrawFn) -> list[Extraction]:
-    """Random front/back-ish extractions over three fields and four images."""
+    """Random front/back-ish extractions over three fields and four images.
+
+    Includes images that are not labels at all and typography signals that disagree —
+    both are merge inputs in production, and a strategy that never produced them would
+    leave the two guards that matter most unexercised.
+    """
     names = [BRAND, FieldName.NET_CONTENTS, WARNING]
     count = draw(st.integers(min_value=0, max_value=4))
     out: list[Extraction] = []
@@ -507,7 +728,19 @@ def _extractions(draw: st.DrawFn) -> list[Extraction]:
                     draw(st.sampled_from([0.1, 0.5, 0.9])),
                 )
         text = draw(st.sampled_from([None, "GOVERNMENT WARNING: x"]))
-        out.append(image(index, fields, warning_text=text))
+        out.append(
+            Extraction(
+                image_index=index,
+                is_label=draw(st.booleans()),
+                fields=fields,
+                warning_text=text,
+                warning_typography=WarningTypography(
+                    header_is_bold=draw(st.sampled_from([True, False, None])),
+                    body_is_bold=draw(st.sampled_from([True, False, None])),
+                    relative_size=draw(st.sampled_from([0.4, 1.0, None])),
+                ),
+            )
+        )
     return out
 
 
@@ -536,7 +769,9 @@ def test_merge_never_invents_a_value(extractions: list[Extraction]) -> None:
         if merged.value is None:
             continue
         assert merged.value in {
-            r.value for r in readings_for(extractions, name) if r.value is not None
+            r.value
+            for r in readings_for(contributing(extractions), name)
+            if r.value is not None
         }
 
 
@@ -548,10 +783,12 @@ def test_provenance_points_at_an_image_that_reported_the_field(
     """An evidence box on a picture that never saw the field is worse than no box."""
     label = merge(extractions)
     for name, merged in label.fields.items():
-        reported = {r.image_index for r in readings_for(extractions, name)}
+        reported = {r.image_index for r in readings_for(contributing(extractions), name)}
         assert merged.image_index in reported
         if merged.value is not None:
-            source = next(e for e in extractions if e.image_index == merged.image_index)
+            source = next(
+                e for e in contributing(extractions) if e.image_index == merged.image_index
+            )
             assert source.fields[name].value == merged.value
 
 
@@ -562,7 +799,58 @@ def test_a_field_absent_from_every_image_is_absent_from_the_merge(
 ) -> None:
     label = merge(extractions)
     for name in FieldName:
-        assert (name in label.fields) == bool(readings_for(extractions, name))
+        assert (name in label.fields) == bool(readings_for(contributing(extractions), name))
+
+
+@settings(max_examples=300, deadline=None)
+@given(_extractions())
+def test_a_typography_signal_survives_only_when_the_pictures_agree(
+    extractions: list[Extraction],
+) -> None:
+    """No typography determination the contributing pictures did not unanimously make.
+
+    Stated as an invariant rather than an example, because the failure mode is silent: a
+    `True` that outvoted a `False` looks exactly like a `True` everyone agreed on, and it
+    passes a warning the regulation fails.
+    """
+    label = merge(extractions)
+    warning = label.fields.get(WARNING)
+    by_index = {e.image_index: e for e in contributing(extractions)}
+    sources = (
+        [by_index[r.image_index].warning_typography for r in warning.agreeing]
+        if warning is not None
+        else []
+    )
+
+    for signal in ("header_is_all_caps", "header_is_bold", "body_is_bold", "contrast_ok"):
+        merged = getattr(label.warning_typography, signal)
+        if merged is None:
+            continue
+        claimed = {
+            getattr(s, signal) for s in sources if getattr(s, signal) is not None
+        }
+        assert claimed == {merged}, (
+            f"{signal} came out {merged} while the pictures said {claimed}"
+        )
+
+
+@settings(max_examples=200, deadline=None)
+@given(_extractions())
+def test_no_typography_survives_a_statement_that_was_not_established(
+    extractions: list[Extraction],
+) -> None:
+    """Signals read off a statement we could not read are not determinations."""
+    label = merge(extractions)
+    warning = label.fields.get(WARNING)
+    if warning is None or warning.value is None:
+        assert label.warning_typography == WarningTypography()
+
+
+@settings(max_examples=200, deadline=None)
+@given(_extractions())
+def test_a_non_label_image_changes_nothing(extractions: list[Extraction]) -> None:
+    """Dropping the non-label images by hand first must give the same answer (TC-15)."""
+    assert merge(extractions) == merge(contributing(extractions))
 
 
 @settings(max_examples=200, deadline=None)
@@ -575,7 +863,7 @@ def test_a_value_survives_only_when_every_reading_agrees(
     for name, merged in label.fields.items():
         answers = {
             materiality_key(name, r.value)
-            for r in readings_for(extractions, name)
+            for r in readings_for(contributing(extractions), name)
             if r.value is not None
         }
         if len(answers) > 1:
