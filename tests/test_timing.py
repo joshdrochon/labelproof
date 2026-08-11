@@ -484,6 +484,191 @@ def test_a_verification_response_carries_the_commodity_it_was_asked_about() -> N
     assert json.loads(application_json())["commodity"] == Commodity.SPIRITS.value
 
 
+# --- LP-126: the check has teeth, and the screen is inside it -------------------------
+#
+# The tests further up put a stopwatch around a real request. The ones here do two
+# things those cannot:
+#
+#   1. Prove the stopwatch check *fails* when the server lies. A guard nobody has seen
+#      go red is a guard nobody knows works.
+#   2. Reach the number that is actually on the screen. The response body is not the
+#      product; the result card is.
+
+
+class ClockDisagreementError(AssertionError):
+    """The server's claim and the stopwatch do not agree (PERF-2, PRD §232)."""
+
+
+def check_stopwatch(claimed_ms: int | None, observed_ms: float, *, slack_ms: int = 5) -> None:
+    """Hold a server's reported total to a clock it does not control.
+
+    Two directions, and they fail for different reasons.
+
+    **Claimed above observed** is impossible. Time cannot have passed inside the request
+    that did not pass outside it, so the total is measuring something other than this
+    request — a wrong clock, a reused timer, or a number that was never measured.
+
+    **Claimed far below observed** means the total is real but partial: it was stopped
+    before the slow part, or started after it. The screen would then under-report, which
+    is the direction PERF-2 exists to prevent.
+    """
+    if claimed_ms is None:
+        raise ClockDisagreementError(
+            "The response carried no `timings_ms.total`. The product's headline claim is "
+            "speed; there is nothing to hold to a stopwatch."
+        )
+    if claimed_ms > observed_ms + slack_ms:
+        raise ClockDisagreementError(
+            f"The server claims {claimed_ms}ms inside a request the stopwatch measured "
+            f"at {observed_ms:.0f}ms. That cannot happen — `timings_ms.total` is not "
+            f"measuring this request (PRD §232)."
+        )
+    if claimed_ms < observed_ms * 0.5:
+        raise ClockDisagreementError(
+            f"The server claims {claimed_ms}ms against a stopwatch of {observed_ms:.0f}ms. "
+            f"More than half the request is unaccounted for, so `total` is measuring part "
+            f"of the work rather than the request (PERF-2)."
+        )
+
+
+def test_the_stopwatch_check_agrees_with_a_healthy_request() -> None:
+    client = make_client(provider=SlowProvider(0.2))
+
+    stopwatch = time.perf_counter()
+    response = post_verify(client)
+    observed_ms = (time.perf_counter() - stopwatch) * 1000
+
+    check_stopwatch(response.json()["timings_ms"]["total"], observed_ms)
+
+
+def test_a_total_that_exceeds_the_stopwatch_is_caught() -> None:
+    """The impossible direction: the server claims more time than actually passed."""
+    with pytest.raises(ClockDisagreementError, match="cannot happen"):
+        check_stopwatch(3_600_000, 2500.0)
+
+
+def test_a_total_that_omits_the_slow_part_is_caught() -> None:
+    """The plausible direction, and the dangerous one: a real measurement of the wrong
+    span. Nine tenths of the request missing still looks like a number."""
+    with pytest.raises(ClockDisagreementError, match="unaccounted for"):
+        check_stopwatch(240, 2500.0)
+
+
+def test_a_missing_total_is_caught_rather_than_treated_as_fast() -> None:
+    with pytest.raises(ClockDisagreementError, match="nothing to hold"):
+        check_stopwatch(None, 2500.0)
+
+
+def test_a_server_that_stops_its_clock_early_fails_the_check(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The regression this whole ticket exists for, driven through the real stack.
+
+    A route that computes `total` before awaiting extraction produces a small, entirely
+    plausible number. Here the timer is made to report as if the clock had been stopped
+    at the top of the request; the check must go red.
+    """
+    monkeypatch.setattr(timing.RequestTimer, "elapsed_ms", lambda self: 1)
+    client = make_client(provider=SlowProvider(0.3))
+
+    stopwatch = time.perf_counter()
+    response = post_verify(client)
+    observed_ms = (time.perf_counter() - stopwatch) * 1000
+
+    assert response.json()["timings_ms"]["total"] == 1
+    with pytest.raises(ClockDisagreementError):
+        check_stopwatch(response.json()["timings_ms"]["total"], observed_ms)
+
+
+# --- the number that is actually on the screen ----------------------------------------
+#
+# PRD §232 is about what an agent reads off a result card, not about a JSON field. The
+# web layer is not this wave's to change, so these read it and assert the invariant
+# rather than rewriting it.
+#
+# The invariant is NOT "the screen shows `timings_ms.total`". It is the opposite. The
+# server's total is always the smaller of the two — it cannot contain the upload or the
+# network — so rendering it would make the product under-report its own latency, which is
+# the exact direction PERF-2 exists to prevent. The screen shows a client wall clock
+# spanning submit to response: the stopwatch itself.
+
+
+def _web_source(relative: str) -> str:
+    path = ROOT / "web" / "src" / relative
+    if not path.exists():
+        pytest.skip(f"{relative} is not in this checkout")
+    return path.read_text()
+
+
+def test_the_elapsed_time_on_screen_is_measured_from_a_real_clock() -> None:
+    source = _web_source("routes/VerifyNow.tsx")
+    assert "elapsedMs: Date.now() - startedRef.current" in source, (
+        "The elapsed time on the result card must be a wall-clock measurement spanning "
+        "submit to response. If this moved, PERF-2 has no guard left."
+    )
+    assert source.count("startedRef.current = Date.now()") >= 2, (
+        "Every path that starts a check must start the clock — the sample button as well "
+        "as the form."
+    )
+
+
+def test_the_simulated_progress_timer_never_becomes_the_result() -> None:
+    """`waited` drives the stage animation while the request is in flight. It ticks on a
+    200ms interval and owes nothing to the actual request. If it ever reached the result
+    card, the product would be reporting an animation as a measurement."""
+    source = _web_source("routes/VerifyNow.tsx")
+    assert "elapsedMs={waited}" not in source
+    assert "elapsedMs={stage}" not in source
+    assert "elapsedMs={elapsedMs}" in source
+
+
+def test_the_screen_does_not_render_the_servers_smaller_number() -> None:
+    """Deliberate. The server's total excludes upload and network, so showing it would
+    under-report — the flattering direction, and the one PERF-2 forbids."""
+    source = _web_source("routes/VerifyNow.tsx")
+    for flattering in (
+        "elapsedMs={result.timings_ms.total}",
+        "elapsedMs={checked.result.timings_ms.total}",
+    ):
+        assert flattering not in source, (
+            "The result card must not display the server's own total. It is always "
+            "smaller than the time that actually passed (PERF-2, PRD §232)."
+        )
+
+
+def test_the_banner_renders_the_elapsed_value_it_is_given() -> None:
+    source = _web_source("components/AggregateBanner.tsx")
+    assert "formatElapsed(elapsedMs)" in source
+    assert "data-testid=\"elapsed\"" in source
+
+
+def test_the_server_total_still_reaches_the_client_for_the_breakdown() -> None:
+    """Not displayed as the headline is not the same as not sent. The breakdown is how
+    a slow run gets diagnosed, and PRD §Observability requires it surfaced."""
+    parser = _web_source("api.ts")
+    for stage in ("preprocess", "extract", "compare", "total"):
+        assert f"'{stage}'" in parser, f"the client parser drops timings_ms.{stage}"
+
+
+def test_the_client_measured_elapsed_can_never_be_below_the_server_total() -> None:
+    """The property the two clocks must satisfy, checked over the real HTTP stack.
+
+    This is the same comparison `scripts/timed_run.py` makes against a deployed URL. Here
+    there is no network, so the margin is thin — which makes it a stricter test, not a
+    weaker one.
+    """
+    client = make_client(provider=SlowProvider(0.25))
+
+    submitted = time.perf_counter()
+    response = post_verify(client)
+    on_screen_ms = round((time.perf_counter() - submitted) * 1000)
+
+    claimed_ms = response.json()["timings_ms"]["total"]
+    assert on_screen_ms >= claimed_ms, (
+        f"The screen would show {on_screen_ms}ms while the server measured {claimed_ms}ms. "
+        f"The displayed number must never be smaller than the time that passed."
+    )
+
 # --- the documented stage table matches the shipped one (LP-125) ----------------------
 
 
