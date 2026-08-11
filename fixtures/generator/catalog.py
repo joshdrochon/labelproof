@@ -71,12 +71,78 @@ CATALOG: list[LabelSpec] = [
         name="tc06_buried_warning",
         warning_scale=0.45,
         warning_contrast=0.35,
-        expect={"government_warning": "mismatch"},
-        pending="LP-211",
+        expect={"government_warning": "unreadable"},
+        expect_findings={
+            "government_warning": ["warning_less_prominent", "warning_low_contrast"]
+        },
         notes=(
             "TC-06. Warning present and verbatim but shrunk and low-contrast — the "
-            "'creative' evasion Jenny described. Prominence heuristics (LP-211) target "
-            "this; until they land the expectation may need revisiting."
+            "'creative' evasion Jenny described. The wording is right, so this is not a "
+            "correction to send back; the PRD's TC-06 row asks for Needs review with the "
+            "region shown, and Unreadable is the only verdict that drives that without "
+            "claiming the label is wrong (LP-211, LP-212). "
+            "KNOWN TAXONOMY GAP: the PRD defines Unreadable as 'image quality prevents "
+            "verification', and here the warning is read perfectly — `extracted` carries "
+            "the full statement. The aggregate now matches the PRD and the field verdict "
+            "does not. The six-value taxonomy has no verdict for 'read fine, complies as "
+            "far as we can tell, needs a human anyway'; adding a seventh is a product "
+            "decision (MATCH-1). Recorded rather than resolved."
+        ),
+    ),
+
+    OLD_TOM.with_(
+        name="tc03b_non_bold_warning_header",
+        warning_header_bold=False,
+        expect={"government_warning": "mismatch"},
+        expect_findings={"government_warning": ["warning_header_not_bold"]},
+        notes=(
+            "WARN-2's other half. TC-03 covers capitals; nothing covered bold, so a "
+            "checker that ignored the bold signal entirely would have passed the whole "
+            "fixture set. Capitals are correct here and only the weight is wrong."
+        ),
+    ),
+
+    OLD_TOM.with_(
+        name="tc06b_warning_contrast_unread",
+        warning_signals_unread=frozenset({"contrast_ok", "relative_size"}),
+        expect={"government_warning": "unreadable"},
+        expect_findings={"government_warning": ["warning_contrast_unverified"]},
+        notes=(
+            "A compliant label the extractor could not fully judge. The artwork is "
+            "clean — verbatim wording, correct capitals, correct weight — and the "
+            "reading comes back unable to say whether the statement contrasts with its "
+            "background. That combination used to reach Ready to approve, and no "
+            "fixture could produce it because the fake derived every signal from the "
+            "spec and therefore always answered."
+        ),
+    ),
+
+    OLD_TOM.with_(
+        name="tc03c_warning_bold_unread",
+        warning_signals_unread=frozenset({"header_is_bold", "body_is_bold"}),
+        expect={"government_warning": "unreadable"},
+        expect_findings={
+            "government_warning": [
+                "warning_header_bold_unverified", "warning_body_bold_unverified"
+            ]
+        },
+        notes=(
+            "The abstention the whole tri-state design was built for, finally "
+            "reachable from a fixture. Bold is the signal the weakest model is likeliest "
+            "to decline on, and the golden set could not express a decline until now."
+        ),
+    ),
+
+    OLD_TOM.with_(
+        name="tc05b_truncated_warning",
+        warning_text=canon.WARNING_BODY[: canon.WARNING_BODY.index("(2)")].strip(),
+        expect={"government_warning": "mismatch"},
+        expect_findings={"government_warning": ["warning_text_truncated"]},
+        notes=(
+            "LP-210. The commonest partial warning in the wild: clause (1) printed and "
+            "clause (2) dropped, usually because the artwork ran out of room. Distinct "
+            "from TC-05, which rewords rather than truncates, and the correction the "
+            "applicant has to make is a different one."
         ),
     ),
 

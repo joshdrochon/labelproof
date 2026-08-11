@@ -15,19 +15,19 @@ from __future__ import annotations
 import time
 import uuid
 
+from api import canon
 from api.models import (
     Aggregate,
     Application,
     Cost,
-    Extraction,
+    Evidence,
     ExtractedField,
+    Extraction,
     FieldName,
     FieldResult,
-    ImageReport,
     Recommendation,
     Timings,
     VerificationResult,
-    Verdict,
     WarningTypography,
 )
 from api.provider.base import (
@@ -54,7 +54,6 @@ def merge_extractions(
     """
     merged: dict[FieldName, ExtractedField] = {}
     provenance: dict[FieldName, int] = {}
-    warning_text: str | None = None
     warning_image: int | None = None
     typography = WarningTypography()
 
@@ -70,40 +69,76 @@ def merge_extractions(
                 merged[name] = field
                 provenance[name] = extraction.image_index
 
-        if extraction.warning_text and warning_text is None:
-            warning_text = extraction.warning_text
-            warning_image = extraction.image_index
-            typography = extraction.warning_typography
+    # The warning is chosen across every image at once rather than by taking the first
+    # one that had any (LP-217). A front label with a decorative fragment and a back
+    # label with the whole statement would otherwise be judged on the fragment.
+    sightings = warning_sightings(extractions)
+    sighting = warn.select_sighting(sightings)
+    if sighting is not None:
+        warning_image = sighting.image_index
+
+    # The typography is folded across every image, not taken off the chosen sighting.
+    # This function is public and `_warning_result` is not its only possible caller, so
+    # returning the single-sighting signals here would hand the next caller a reading
+    # that silently drops a violation another image established.
+    typography = warn.merge_sighting_typography(sightings)
 
     return merged, warning_image, typography, provenance
 
 
+def warning_sightings(extractions: list[Extraction]) -> list[warn.WarningSighting]:
+    """One reading of the warning per image, including the images that showed none.
+
+    The extractor reports the warning twice — as `warning_text` with its typography, and
+    as an ordinary field with a confidence and a region. Both are folded in here, because
+    the choice of which image to judge the application on has to be made once, on the
+    whole picture, rather than differently in two places.
+    """
+    sightings: list[warn.WarningSighting] = []
+    for extraction in extractions:
+        field = extraction.fields.get(FieldName.GOVERNMENT_WARNING)
+        sightings.append(
+            warn.WarningSighting(
+                image_index=extraction.image_index,
+                text=extraction.warning_text or (field.value if field else None),
+                legible=field.legible if field else True,
+                confidence=field.confidence if field else 0.0,
+                typography=extraction.warning_typography,
+                bbox=field.bbox if field else None,
+            )
+        )
+    return sightings
+
+
 def _warning_result(
-    merged: dict[FieldName, ExtractedField],
-    typography: WarningTypography,
+    extractions: list[Extraction],
     net_contents_ml: float | None,
 ) -> FieldResult:
-    field = merged.get(FieldName.GOVERNMENT_WARNING)
-    result = warn.evaluate(
-        field.value if field else None,
-        typography,
-        legible=field.legible if field else True,
-    )
-
-    findings = list(result.findings)
-    rationale = result.rationale
-    if result.verdict is not Verdict.MATCH:
-        rationale = f"{rationale} {warn.type_size_context(net_contents_ml)}".strip()
+    """The warning row, judged across every image before Missing is declared (LP-217)."""
+    sightings = warning_sightings(extractions)
+    result = warn.evaluate_across_images(sightings, net_contents_ml=net_contents_ml)
+    chosen = warn.select_sighting(sightings)
 
     return FieldResult(
         field=FieldName.GOVERNMENT_WARNING,
         verdict=result.verdict,
-        extracted=field.value if field else None,
-        expected="the statement required by 27 CFR 16.21",
-        confidence=field.confidence if field else 0.0,
-        rationale=rationale,
-        evidence=None,
-        findings=findings,
+        extracted=chosen.text if chosen else None,
+        # The canonical statement, not a description of it. This is the left-hand side of
+        # the diff the UI renders (WARN-8); a placeholder sentence there produces a
+        # word-level comparison between the regulation's name and its text, which is
+        # noise dressed up as evidence.
+        expected=canon.CANONICAL_WARNING,
+        confidence=chosen.confidence if chosen else 0.0,
+        rationale=result.rationale,
+        # Region and image both come off the chosen sighting. Taking the box from the
+        # merged field and the index from somewhere else drew image 0's rectangle over
+        # image 1's photograph — on the row the PRD most wants outlined.
+        evidence=(
+            Evidence(image_index=chosen.image_index, bbox=chosen.bbox)
+            if chosen is not None and chosen.bbox is not None
+            else None
+        ),
+        findings=list(result.findings),
     )
 
 
@@ -145,7 +180,9 @@ def verify(
         )
 
     compare_started = time.perf_counter()
-    merged, _warning_image, typography, _provenance = merge_extractions(response.extractions)
+    merged, _warning_image, _typography, _provenance = merge_extractions(
+        response.extractions
+    )
 
     context = LabelContext(
         is_import=application.is_import,
@@ -181,7 +218,7 @@ def verify(
             application.country_of_origin,
             is_import=application.is_import,
         ),
-        _warning_result(merged, typography, net.ml),
+        _warning_result(response.extractions, net.ml),
     ]
 
     aggregate = agg.recommend(results)

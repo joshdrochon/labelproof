@@ -147,10 +147,10 @@ def test_a_pending_fixture_that_starts_passing_is_not_reported() -> None:
     assert report.pending == []
 
 
-def test_only_tc06_is_pending_right_now() -> None:
-    """If another fixture becomes pending, that should be a deliberate act."""
-    pending = {s.name: s.pending for s in CATALOG if s.pending}
-    assert pending == {"tc06_buried_warning": "LP-211"}
+def test_nothing_is_pending_right_now() -> None:
+    """A fixture becoming pending should be a deliberate act, and TC-06 stopped being
+    one when the prominence heuristics landed (LP-211, LP-212)."""
+    assert {s.name: s.pending for s in CATALOG if s.pending} == {}
 
 
 # --- reporting -------------------------------------------------------------------------------
@@ -194,12 +194,13 @@ def test_no_fixture_expects_a_warning_violation_to_pass() -> None:
 
 
 def test_finding_expectations_reference_codes_the_code_can_raise() -> None:
+    """Warning codes come from `warning.CHECK_MANIFEST`, which is itself asserted
+    against the source (LP-218), so this list cannot fall behind the rules engine."""
+    from api.rules.warning import FINDING_CODES
+
     known = {
         "proof_abv_inconsistent", "spirits_abv_abbreviation", "non_standard_fill",
-        "warning_missing", "warning_header_not_all_caps", "warning_header_not_bold",
-        "warning_body_is_bold", "warning_header_missing",
-        "warning_header_bold_unverified", "warning_body_bold_unverified",
-    }
+    } | FINDING_CODES
     for spec in CATALOG:
         for codes in spec.expect_findings.values():
             for code in codes:
