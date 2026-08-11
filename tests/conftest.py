@@ -97,12 +97,17 @@ def _check_socket_target(sock: socket.socket, address: Any, verb: str) -> None:
 
 
 def _check_hostname(host: object, verb: str) -> None:
-    """Refuse to resolve a name.
+    """Refuse to resolve a NAME, for the forward lookups.
 
     A resolver query is a packet leaving the machine and it leaks the hostname, so this
     is egress in its own right. It also makes the failure identical whether or not the
     machine has a route out — otherwise a sandboxed CI runner raises a bare `gaierror`
     that looks nothing like the laptop's error.
+
+    The IP exemption is specific to `getaddrinfo` and `gethostbyname`: handed a literal
+    address, both answer from the argument and no query is ever sent, so refusing would
+    block work that never touches the network. It is **wrong for reverse lookups** — see
+    `_check_address`.
     """
     if _policy.allowed or not isinstance(host, str) or host in _LOOPBACK_HOSTS:
         return
@@ -110,6 +115,28 @@ def _check_hostname(host: object, verb: str) -> None:
         ipaddress.ip_address(host)
     except ValueError:
         raise _refuse(f"tried to {verb}", repr(host)) from None
+
+
+def _check_address(host: object, verb: str) -> None:
+    """Refuse a reverse lookup. No IP exemption, because the argument is always an IP.
+
+    `gethostbyaddr` took `_check_hostname` for a while, and the IP exemption there fired
+    on literally every call — the argument to a reverse lookup parses as an address by
+    definition, so the check returned clean every time and the PTR query went out. A live
+    `gethostbyaddr("8.8.8.8")` returned `dns.google` with the guard fully armed.
+
+    The exemption is right for the forward direction and catastrophic for this one, which
+    is why they are two functions rather than one with a flag: the reason they differ
+    belongs in the name.
+    """
+    if _policy.allowed or not isinstance(host, str) or host in _LOOPBACK_HOSTS:
+        return
+    try:
+        if ipaddress.ip_address(host).is_loopback:
+            return
+    except ValueError:
+        pass  # a name here is even less legitimate than an address; refuse it too
+    raise _refuse(f"tried to {verb}", repr(host))
 
 
 def _install_guard() -> None:
@@ -156,7 +183,7 @@ def _install_guard() -> None:
         return real_gethostbyname_ex(host)
 
     def gethostbyaddr(host: str) -> Any:
-        _check_hostname(host, "reverse-resolve")
+        _check_address(host, "reverse-resolve")
         return real_gethostbyaddr(host)
 
     # Assigned through setattr: patching stdlib methods is exactly what a type checker

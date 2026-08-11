@@ -130,11 +130,44 @@ def test_every_resolver_entry_point_is_refused(resolver: str, hostname: str) -> 
     assert hostname in str(caught.value)
 
 
-def test_reverse_resolution_is_refused() -> None:
+@pytest.mark.parametrize(
+    "target",
+    ["8.8.8.8", "1.1.1.1", "2606:4700:4700::1111", "one.one.one.one"],
+    ids=["ipv4", "ipv4-alt", "ipv6", "name"],
+)
+def test_reverse_resolution_is_refused(target: str) -> None:
+    """An IP argument is the normal case here, and it was the unguarded one.
+
+    `gethostbyaddr` shared the forward-lookup check, whose IP exemption exists because
+    `getaddrinfo("1.2.3.4")` answers from its argument without sending anything. A
+    reverse lookup's argument is *always* an address, so the exemption fired on every
+    call and the PTR query went out: `socket.gethostbyaddr("8.8.8.8")` returned
+    `dns.google` with the guard fully armed.
+
+    The previous version of this test passed `one.one.one.one`, a hostname — the one
+    input shape that took the refusal path. That is exactly the failure it was written to
+    prevent, one function over: probe the shape the code actually receives, not the shape
+    that happens to be handled.
+    """
     with pytest.raises(RuntimeError) as caught:
-        socket.gethostbyaddr("one.one.one.one")
+        socket.gethostbyaddr(target)
 
     assert denied(caught)
+    assert target in str(caught.value)
+
+
+def test_a_forward_lookup_of_a_literal_ip_is_still_allowed() -> None:
+    """The exemption `_check_hostname` keeps, and the reason the two checks are separate.
+
+    `getaddrinfo("127.0.0.1", 0)` sends no query — it answers from its argument — so
+    refusing it would block work that never touches the network.
+    """
+    assert socket.getaddrinfo("127.0.0.1", 0)
+
+
+def test_reverse_resolution_of_loopback_is_still_allowed() -> None:
+    """`_check_address` refuses every address except loopback, which is not egress."""
+    assert socket.gethostbyaddr("127.0.0.1")
 
 
 # --- what must keep working ------------------------------------------------------------
