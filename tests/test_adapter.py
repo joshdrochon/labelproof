@@ -29,6 +29,7 @@ from api.provider.anthropic_adapter import (
     SYSTEM_BLOCKS,
     AnthropicVisionProvider,
     build_system_blocks,
+    describe_residency,
     estimated_usd,
     parse_extraction,
 )
@@ -384,6 +385,33 @@ def test_every_call_pins_inference_to_the_united_states() -> None:
     provider.extract(a_request())
 
     assert client.calls[0]["inference_geo"] == "us"
+
+
+def test_haiku_is_not_sent_an_inference_geo_it_would_reject() -> None:
+    """Haiku 4.5 answers `inference_geo` with a 400, so pinning is a model capability.
+
+    Found by measurement, not by reading docs: every call died with
+    "'claude-haiku-4-5-20251001' does not support inference_geo."
+    """
+    provider, client = a_provider(
+        responds_with(a_label()), config=Config(extraction_model="claude-haiku-4-5")
+    )
+    provider.extract(a_request())
+
+    assert "inference_geo" not in client.calls[0]
+
+
+def test_a_model_that_cannot_be_pinned_says_so_rather_than_going_quiet() -> None:
+    """The compliance answer must reach a human, not be dropped by the request builder.
+
+    Silently omitting the parameter is exactly how a federal customer ends up told the
+    product guarantees residency it does not.
+    """
+    assert "pinned to 'us'" in describe_residency("claude-opus-5", "us")
+
+    unpinnable = describe_residency("claude-haiku-4-5", "us")
+    assert "CANNOT be guaranteed" in unpinnable
+    assert "claude-haiku-4-5" in unpinnable
 
 
 def test_a_thinking_capable_model_gets_thinking_and_effort() -> None:

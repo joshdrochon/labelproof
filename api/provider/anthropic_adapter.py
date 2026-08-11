@@ -94,6 +94,36 @@ def supports_thinking_and_effort(model: str) -> bool:
     """
     return not model.startswith(_NO_THINKING_OR_EFFORT)
 
+
+#: Models that reject `inference_geo` outright: "'claude-haiku-4-5-20251001' does not
+#: support inference_geo." Sending it is a 400, not a no-op.
+_NO_INFERENCE_GEO: Final[tuple[str, ...]] = ("claude-haiku-4-5",)
+
+
+def supports_inference_geo(model: str) -> bool:
+    """Whether this model can have its inference pinned to a geography (NET-1).
+
+    This is not a performance knob, it is a compliance one, and the answer is a property
+    of the model rather than of our configuration. A model that cannot be pinned cannot
+    be told to keep label images inside the United States — for a federal customer that
+    is a procurement question, not a preference.
+
+    `describe_residency` exists so the answer reaches a human instead of being silently
+    dropped by the request builder.
+    """
+    return not model.startswith(_NO_INFERENCE_GEO)
+
+
+def describe_residency(model: str, inference_geo: str) -> str:
+    """One sentence an operator or a grader can act on. Never silently reassuring."""
+    if supports_inference_geo(model):
+        return f"Inference for {model} is pinned to {inference_geo!r}."
+    return (
+        f"{model} does not accept an inference geography, so requests run wherever the "
+        f"workspace default sends them. US data residency CANNOT be guaranteed on this "
+        f"model — use a model that supports it if residency is required."
+    )
+
 #: Image formats the vision endpoint accepts. The preprocessor emits PNG or WebP; this
 #: guard exists so an unsupported type is a clear message rather than a raw 400.
 SUPPORTED_MEDIA_TYPES: Final[frozenset[str]] = frozenset(
@@ -536,10 +566,16 @@ class AnthropicVisionProvider:
         }
         # Data residency, asserted rather than assumed (NET-1). Without this, requests
         # follow the workspace default inference geography — `global` unless someone has
-        # configured otherwise — and the README's claim that label images never leave the
-        # United States is a claim the code does not make. For a federal customer that
-        # distinction is the whole question, and it is one parameter.
-        extra_body: dict[str, Any] = {"inference_geo": self.config.inference_geo}
+        # configured otherwise — and the claim that label images never leave the United
+        # States is one the code does not make. For a federal customer that distinction
+        # is the whole question, and it is one parameter.
+        #
+        # Not every model accepts it. Haiku 4.5 rejects it with a 400, so pinning is a
+        # capability the model either has or lacks — see `supports_inference_geo`, and
+        # `describe_residency` for the sentence that says so out loud.
+        extra_body: dict[str, Any] = {}
+        if supports_inference_geo(model):
+            extra_body["inference_geo"] = self.config.inference_geo
         extra: dict[str, Any] = {}
         if supports_thinking_and_effort(model):
             output_config["effort"] = self.config.effort
