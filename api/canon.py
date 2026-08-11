@@ -151,4 +151,5 @@ CITATIONS: Final[dict[str, str]] = {
     "wine_fill": "27 CFR 4.72",
     "wine_abv": "27 CFR 4.36",
     "malt_abv": "27 CFR 7.65",
+    "spirits_abv": "27 CFR 5.65",
 }
