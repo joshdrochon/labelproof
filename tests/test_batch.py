@@ -496,6 +496,103 @@ def test_the_wire_limit_leaves_verify_now_alone() -> None:
     assert sum(sent) < 64 * 1024 * 1024
 
 
+def longest_loop_block_ms(app: Any, path: str, body: Iterator[bytes]) -> tuple[int, float]:
+    """Drive one request and report the longest stretch the event loop went unserved.
+
+    A heartbeat coroutine does nothing but `await asyncio.sleep(0)` in a loop, which yields
+    to anything else that is ready. The largest gap between two of its ticks is, by
+    definition, the longest uninterrupted block of synchronous work in the process.
+    """
+    gaps: list[float] = []
+
+    async def drive() -> int:
+        running = True
+
+        async def heartbeat() -> None:
+            last = time.perf_counter()
+            while running:
+                await asyncio.sleep(0)
+                now = time.perf_counter()
+                gaps.append((now - last) * 1000)
+                last = now
+
+        async def receive() -> dict[str, Any]:
+            try:
+                return {"type": "http.request", "body": next(body), "more_body": True}
+            except StopIteration:
+                return {"type": "http.request", "body": b"", "more_body": False}
+
+        sent: list[dict[str, Any]] = []
+
+        async def send(message: dict[str, Any]) -> None:
+            sent.append(message)
+
+        scope = {
+            "type": "http",
+            "asgi": {"version": "3.0", "spec_version": "2.3"},
+            "http_version": "1.1",
+            "method": "POST",
+            "scheme": "http",
+            "path": path,
+            "raw_path": path.encode(),
+            "query_string": b"",
+            "root_path": "",
+            "headers": [
+                (b"host", b"testserver"),
+                (b"content-type", b"multipart/form-data; boundary=----labelproofprobe"),
+                (b"transfer-encoding", b"chunked"),
+            ],
+            "client": ("testclient", 50000),
+            "server": ("testserver", 80),
+        }
+
+        beat = asyncio.create_task(heartbeat())
+        try:
+            await app(scope, receive, send)
+        finally:
+            running = False
+            await asyncio.sleep(0)
+            beat.cancel()
+        return int(next(m["status"] for m in sent if m["type"] == "http.response.start"))
+
+    status = asyncio.run(drive())
+    return status, max(gaps)
+
+
+#: The longest the event loop may go unserved during one batch upload. Measured at 848 ms
+#: before `_assemble` moved off the loop and 54 ms after, from the same 2.8 MB request.
+#: 250 ms catches that regression with room for a contended CI box, and it is well inside
+#: what a concurrent verification can absorb.
+LOOP_BLOCK_CEILING_MS = 250
+
+
+def test_a_zip_upload_does_not_stall_the_event_loop(tmp_path: Path) -> None:
+    """PERF-5, BATCH-9 — the priority rule is worthless if the loop itself is dead.
+
+    Zip expansion, CSV parsing, renames and SQLite are all blocking, and they used to run
+    straight from `async def create_batch`. A 300-entry archive — 2.8 MB on the wire,
+    1017x amplification — blocked the loop for 848 ms in one stretch, during which a
+    concurrent `GET /health` got one sample in the whole second. `ProviderBudget` cannot
+    help with this: it rations model slots, and a dead loop is not a slot problem. So the
+    entire Verify-Now-keeps-priority invariant was defeated by a 2.8 MB upload.
+    """
+    entries = {f"f{n}.png": b"\x00" * (9 * 1024 * 1024) for n in range(200)}
+    entries["manifest.csv"] = manifest_csv([row(front=name) for name in entries]).encode()
+    archive = zip_of(entries)
+    assert len(archive) < 4 * 1024 * 1024, "the point is that a small request does this"
+
+    app = create_app(config=make_config(tmp_path), provider=spec_provider())
+    status, worst = longest_loop_block_ms(
+        app, "/batch", multipart_stream([("files", "labels.zip", archive)])
+    )
+
+    assert status in (200, 400)
+    assert worst < LOOP_BLOCK_CEILING_MS, (
+        f"the event loop went unserved for {worst:.0f} ms during a "
+        f"{len(archive) / 1e6:.1f} MB upload — blocking work is running on it"
+    )
+
+
 def test_a_refused_upload_leaves_no_artwork_behind(tmp_path: Path) -> None:
     """SEC-2 — a rejected gigabyte must not sit in staging waiting for a sweep."""
     client = make_client(tmp_path)

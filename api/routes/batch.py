@@ -50,6 +50,7 @@ from typing import Annotated, cast
 
 from fastapi import APIRouter, FastAPI, File, Request, UploadFile
 from fastapi.responses import PlainTextResponse, Response
+from starlette.concurrency import run_in_threadpool
 
 from api import errors
 from api import logging as applog
@@ -485,66 +486,88 @@ async def create_batch(
             staged.append((upload.filename or "", await landing.spool(upload)))
         manifest_path = await landing.spool(manifest) if manifest is not None else None
 
-        supplied = _expand(staged, landing, config)
-        text = _manifest_text(manifest_path, supplied, config)
-
-        try:
-            parsed = manifest_mod.parse(text)
-        except manifest_mod.ManifestError as exc:
-            raise errors.UserError(
-                str(exc), next_step="fix_manifest", code="unreadable_manifest"
-            ) from exc
-
-        if len(parsed.rows) > MAX_ROWS:
-            raise errors.UserError(
-                f"That manifest lists {len(parsed.rows)} applications and this tool takes "
-                f"{MAX_ROWS} at a time. Split it into smaller manifests and upload them "
-                f"separately.",
-                next_step="reduce",
-                code="batch_too_large",
-            )
-
-        pairing = manifest_mod.pair(parsed.rows, list(supplied))
-        row_errors: list[RowError] = sorted(
-            parsed.errors + pairing.errors, key=lambda e: (e.row, e.column or "")
-        )
-        queueable = [row for row in parsed.rows if row.row in pairing.resolved]
-
-        if not queueable:
-            raise errors.UserError(
-                _nothing_queueable_message(row_errors, pairing.unmatched),
-                next_step="fix_manifest",
-                code="no_valid_rows",
-            )
-
-        job = store.create_job(
-            row_errors=row_errors,
-            unmatched_files=pairing.unmatched,
-            retention_hours=config.retention_hours,
-        )
-
-        # Renamed, not copied: the staged file *becomes* the stored one. Files nobody's
-        # row named are never moved and go out with the staging directory.
-        referenced: set[str] = set()
-        for row in queueable:
-            for name in pairing.resolved[row.row]:
-                if name not in referenced:
-                    store.adopt_image(job.job_id, name, supplied[name])
-                    referenced.add(name)
-
-        store.add_items(
-            job.job_id,
-            [(row.row, row.application, pairing.resolved[row.row]) for row in queueable],
+        # Off the event loop. Everything past this point is blocking — zip decompression,
+        # CSV parsing, renames, SQLite — and a 300-entry archive took 848 ms of it in one
+        # uninterrupted stretch from a 2.8 MB request. During that stretch nothing else in
+        # the process runs, including `GET /health` and including the verification the
+        # 5-second gate is written for. `ProviderBudget` cannot help: it hands out model
+        # slots, and the loop being dead is not a slot problem. So a 2.8 MB upload defeated
+        # the whole PERF-5/BATCH-9 priority rule (LP-165).
+        accepted = await run_in_threadpool(
+            _assemble, store, config, landing, staged, manifest_path
         )
 
     get_pool(request).start()
 
     applog.log(
         "batch_queued",
-        job_id=job.job_id,
-        count=len(queueable),
-        status=len(row_errors),
+        job_id=accepted.job_id,
+        count=accepted.accepted,
+        status=len(accepted.row_errors),
     )
+    return accepted
+
+
+def _assemble(
+    store: BatchStore,
+    config: Config,
+    landing: _Landing,
+    staged: Sequence[tuple[str, Path]],
+    manifest_path: Path | None,
+) -> BatchAccepted:
+    """Expand, pair, and queue. Blocking from end to end — call it off the event loop."""
+    supplied = _expand(staged, landing, config)
+    text = _manifest_text(manifest_path, supplied, config)
+
+    try:
+        parsed = manifest_mod.parse(text)
+    except manifest_mod.ManifestError as exc:
+        raise errors.UserError(
+            str(exc), next_step="fix_manifest", code="unreadable_manifest"
+        ) from exc
+
+    if len(parsed.rows) > MAX_ROWS:
+        raise errors.UserError(
+            f"That manifest lists {len(parsed.rows)} applications and this tool takes "
+            f"{MAX_ROWS} at a time. Split it into smaller manifests and upload them "
+            f"separately.",
+            next_step="reduce",
+            code="batch_too_large",
+        )
+
+    pairing = manifest_mod.pair(parsed.rows, list(supplied))
+    row_errors: list[RowError] = sorted(
+        parsed.errors + pairing.errors, key=lambda e: (e.row, e.column or "")
+    )
+    queueable = [row for row in parsed.rows if row.row in pairing.resolved]
+
+    if not queueable:
+        raise errors.UserError(
+            _nothing_queueable_message(row_errors, pairing.unmatched),
+            next_step="fix_manifest",
+            code="no_valid_rows",
+        )
+
+    job = store.create_job(
+        row_errors=row_errors,
+        unmatched_files=pairing.unmatched,
+        retention_hours=config.retention_hours,
+    )
+
+    # Renamed, not copied: the staged file *becomes* the stored one. Files nobody's
+    # row named are never moved and go out with the staging directory.
+    referenced: set[str] = set()
+    for row in queueable:
+        for name in pairing.resolved[row.row]:
+            if name not in referenced:
+                store.adopt_image(job.job_id, name, supplied[name])
+                referenced.add(name)
+
+    store.add_items(
+        job.job_id,
+        [(row.row, row.application, pairing.resolved[row.row]) for row in queueable],
+    )
+
     return BatchAccepted(
         job_id=job.job_id,
         accepted=len(queueable),
