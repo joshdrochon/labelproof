@@ -82,6 +82,7 @@ lists one nothing emits.
 | `batch_queued` | INFO | A batch job was accepted. |
 | `batch_recovered` | INFO | Unfinished batch items were picked back up after a restart. |
 | `batch_retry` | INFO | Failed items in a batch were requeued. |
+| `cost_model_unknown` | WARNING | A verification ran on a model with no entry in the price list; cost was estimated at the most expensive known tier. |
 | `circuit_breaker` | WARNING | The provider circuit opened or closed. Opening is the warning; closing rides the same event. |
 | `config_incomplete` | WARNING | A required setting is missing; /ready is red. |
 | `image_scored` | INFO | Deterministic image-quality scores for one uploaded image. |
@@ -122,6 +123,7 @@ check is not a shortcut, it is a compliance failure.
 | `attempt` | Which retry this is, from 1. |
 | `blur` | Image sharpness score, 0–1, higher is better. |
 | `bytes` | Size of something in bytes. Never its contents. |
+| `cache_creation_tokens` | Prompt-cache tokens written on this call. Priced at 1.25x input. |
 | `cache_read_tokens` | Prompt-cache tokens read on this call. Priced at a tenth of input. |
 | `code` | Machine-readable error code from the taxonomy, e.g. `file_too_large`. |
 | `commodity` | `spirits`, `wine` or `malt`. |
@@ -324,18 +326,29 @@ jq -s 'map(select(.event == "verification_cost"))
 Or let the rollup do it — the **Cost** section of its report carries the total, the mean,
 the p95, mean tokens in and out, and mean cached reads.
 
-Four things to know before quoting a cost figure:
+Five things to know before quoting a cost figure:
 
-- **It is list price, computed locally.** `estimated_usd` in the provider adapter holds the
-  only copy of the price table. It is not a bill, and it does not know about discounts.
-- **Cached reads are priced separately**, at a tenth of an input token. The provider's
-  `input_tokens` excludes them, so a run with a warm prompt cache shows a low
-  `input_tokens` and a high `cache_read_tokens`. Both are on the line.
+- **It is list price, computed locally.** The price table lives in `api/timing.PRICES`,
+  keyed by model. It is not a bill, and it does not know about discounts.
+- **The price follows the configured model.** `LABELPROOF_EXTRACTION_MODEL` is an
+  environment variable, and Opus 5, Sonnet 5 and Haiku 4.5 differ by 5x. A model with no
+  entry in the table is priced at the most expensive known tier and logged as
+  `cost_model_unknown` — guessing low would put an under-stated number into a budget.
+- **Three token counters, three prices.** `input_tokens` excludes both cache counters.
+  Cached reads cost a tenth of an input token; cache writes cost 1.25x one. All three are
+  on the cost line.
 - **Sample-mode runs cost nothing** and would drag any average down. The line carries
   `provider`, the rollup names them, and it says so in the report rather than folding them
   in.
 - **Cost is per verification, not per image.** One `/verify` with a front and a back is one
   line covering both calls.
+
+**Known gap:** the Anthropic adapter reports `cache_read_input_tokens` but not
+`cache_creation_input_tokens`, so cache writes currently arrive as zero and are priced at
+zero. Everything downstream of the adapter carries and prices them correctly; only the one
+line that reads them off the API response is missing. The rollup detects the signature —
+cached reads in a window with no writes anywhere — and stamps the cost section as a lower
+bound rather than letting the figure look complete.
 
 ### The honesty check
 

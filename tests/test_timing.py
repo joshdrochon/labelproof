@@ -93,6 +93,7 @@ class CountingProvider:
             input_tokens=9840,
             output_tokens=1120,
             cache_read_tokens=4000,
+            cache_creation_tokens=1684,
             model="claude-opus-5",
         )
         return response
@@ -298,43 +299,183 @@ def test_cost_line_carries_tokens_in_out_and_dollars(logs: io.StringIO) -> None:
     assert line["model"] == "claude-opus-5"
 
 
-def test_the_price_list_is_borrowed_from_the_adapter_not_copied() -> None:
-    """One price list. `estimated_usd` is the only place the numbers live."""
+def test_the_cost_line_carries_both_cache_counters(logs: io.StringIO) -> None:
+    """Reads and writes are priced differently. One field cannot carry both."""
+    timing.cost_line(
+        Cost(input_tokens=100, output_tokens=10, cache_read_tokens=4000,
+             cache_creation_tokens=1684),
+        model="claude-opus-5",
+    )
+    line = next(x for x in lines(logs) if x["event"] == "verification_cost")
+    assert line["cache_read_tokens"] == 4000
+    assert line["cache_creation_tokens"] == 1684
+
+
+# --- the price list is keyed by model (LP-118) ---------------------------------------
+
+
+def test_every_model_the_service_can_be_configured_with_has_a_price() -> None:
+    """`LABELPROOF_EXTRACTION_MODEL` is an environment variable. A model the service can
+    run on but cannot price is a cost analysis waiting to be wrong."""
+    from api.config import MEASURED_EXTRACTION_MS
+
+    missing = [
+        model for model in MEASURED_EXTRACTION_MS if not timing.price_for(model)[1]
+    ]
+    assert not missing, f"models the service can run but cannot price: {missing}"
+
+
+@pytest.mark.parametrize(
+    ("model", "input_per_mtok", "output_per_mtok"),
+    [
+        ("claude-opus-5", 5.0, 25.0),
+        ("claude-sonnet-5", 3.0, 15.0),
+        ("claude-haiku-4-5", 1.0, 5.0),
+    ],
+)
+def test_list_prices_are_what_the_provider_charges(
+    model: str, input_per_mtok: float, output_per_mtok: float
+) -> None:
+    """Anthropic first-party list price, checked 2026-08-11."""
+    price, known = timing.price_for(model)
+    assert known
+    assert price.input_per_mtok == input_per_mtok
+    assert price.output_per_mtok == output_per_mtok
+
+
+def test_switching_the_model_switches_the_price() -> None:
+    """The defect this exists to prevent: pricing every model at Opus rates.
+
+    Haiku 4.5 is the model the 5-second gate points at, and it is a fifth of Opus. A
+    hardcoded Opus price list makes the obvious configuration change report five times
+    the real cost.
+    """
+    cost = Cost(input_tokens=1_000_000, output_tokens=0)
+    assert timing.usd_for(cost, "claude-opus-5") == pytest.approx(5.0)
+    assert timing.usd_for(cost, "claude-haiku-4-5") == pytest.approx(1.0)
+    assert timing.usd_for(cost, "claude-sonnet-5") == pytest.approx(3.0)
+
+
+def test_a_dated_model_variant_prices_the_same_as_its_base() -> None:
+    price, known = timing.price_for("claude-haiku-4-5-20251001")
+    assert known
+    assert price.input_per_mtok == 1.0
+
+
+def test_an_unknown_model_is_priced_at_the_most_expensive_tier_and_says_so(
+    logs: io.StringIO,
+) -> None:
+    """Guessing low under-reports, and under-reporting is what gets a number into a
+    budget it cannot support. Guessing zero is worse — it looks free."""
+    applog.configure(stream=logs)
+    cost = Cost(input_tokens=1_000_000, output_tokens=0)
+    assert timing.usd_for(cost, "claude-something-unreleased") == pytest.approx(5.0)
+
+    warning = next(x for x in lines(logs) if x["event"] == "cost_model_unknown")
+    assert warning["model"] == "claude-something-unreleased"
+    assert warning["reason_code"] == "no_price_list"
+
+
+def test_a_known_model_is_priced_quietly(logs: io.StringIO) -> None:
+    applog.configure(stream=logs)
+    timing.usd_for(Cost(input_tokens=100, output_tokens=10), "claude-haiku-4-5")
+    assert not [x for x in lines(logs) if x["event"] == "cost_model_unknown"]
+
+
+def test_the_default_price_is_the_dearest_in_the_table() -> None:
+    dearest = max(p.input_per_mtok for p in timing.PRICES.values())
+    assert timing.UNKNOWN_MODEL_PRICE.input_per_mtok == dearest
+
+
+def test_the_opus_row_still_agrees_with_the_adapters_own_constants() -> None:
+    """A tripwire, not a delegation.
+
+    `estimated_usd` in the provider adapter carries its own hardcoded Opus 5 rates. This
+    module is now the authority, but while both exist they must not disagree — a cost
+    quoted from one and a cost quoted from the other would both look official.
+    """
     from api.provider.anthropic_adapter import estimated_usd
 
     cost = Cost(input_tokens=9840, output_tokens=1120, cache_read_tokens=4000)
     expected = estimated_usd(
         ProviderUsage(input_tokens=9840, output_tokens=1120, cache_read_tokens=4000)
     )
-    assert timing.usd_for(cost) == expected
+    assert timing.usd_for(cost, "claude-opus-5") == pytest.approx(expected)
 
 
-def test_cached_reads_are_priced_rather_than_free() -> None:
+# --- cache tokens are priced, not free ------------------------------------------------
+
+
+def test_cached_reads_are_priced_at_a_tenth_of_an_input_token() -> None:
     """Provider `input_tokens` excludes cache reads. Dropping them under-claims cost."""
-    without = timing.usd_for(Cost(input_tokens=1000, output_tokens=100))
-    with_cache = timing.usd_for(
-        Cost(input_tokens=1000, output_tokens=100, cache_read_tokens=100_000)
-    )
-    assert with_cache > without
+    read_only = Cost(cache_read_tokens=1_000_000)
+    assert timing.usd_for(read_only, "claude-opus-5") == pytest.approx(0.5)
+
+
+def test_cache_writes_are_priced_at_1_25x_an_input_token() -> None:
+    """The larger of the two omissions, and the one that pointed the wrong way.
+
+    A cold two-image request writes the cached system prefix, and `input_tokens` excludes
+    those tokens too — so pricing only reads still leaves the write billed at zero.
+    """
+    write_only = Cost(cache_creation_tokens=1_000_000)
+    assert timing.usd_for(write_only, "claude-opus-5") == pytest.approx(6.25)
+
+
+def test_a_write_costs_more_than_a_read_of_the_same_size() -> None:
+    read = timing.usd_for(Cost(cache_read_tokens=10_000), "claude-opus-5")
+    write = timing.usd_for(Cost(cache_creation_tokens=10_000), "claude-opus-5")
+    assert write > read
 
 
 def test_a_request_that_spent_nothing_is_priced_at_zero() -> None:
     assert timing.usd_for(Cost()) == 0.0
+    assert timing.usd_for(Cost(), "claude-opus-5") == 0.0
 
 
-def test_pricing_never_fails_a_verification(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A cost line is worth showing and never worth a 500."""
+def test_pricing_needs_no_provider_sdk(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pricing a handful of integers must not depend on an HTTP client being installed —
+    a cost line is worth showing and never worth failing a verification over."""
     import builtins
 
     real_import = builtins.__import__
 
     def explode(name: str, *args: Any, **kwargs: Any) -> Any:
-        if "anthropic_adapter" in name:
+        if "anthropic" in name:
             raise ImportError("no sdk here")
         return real_import(name, *args, **kwargs)
 
     monkeypatch.setattr(builtins, "__import__", explode)
-    assert timing.usd_for(Cost(input_tokens=100, output_tokens=10)) == 0.0
+    assert timing.usd_for(
+        Cost(input_tokens=1_000_000, output_tokens=0), "claude-haiku-4-5"
+    ) == pytest.approx(1.0)
+
+
+# --- the merge note: the kwarg is load-bearing (LP-118) -------------------------------
+
+
+def test_provider_cache_tokens_reach_the_cost_block_through_the_pipeline() -> None:
+    """A pipeline-level guard, deliberately not a unit test of `usd_for`.
+
+    `api/verify.py` copies the provider's cache counters onto `Cost`. Those two keyword
+    arguments are the whole fix: drop them in a merge and the cost line silently reverts
+    to under-billing, with every `usd_for` unit test still green.
+    """
+    body = post_verify(make_client(provider=CountingProvider())).json()
+    assert body["cost"]["cache_read_tokens"] == 4000
+    assert body["cost"]["cache_creation_tokens"] == 1684
+    assert body["cost"]["usd"] > 0
+
+
+def test_the_priced_total_reflects_the_cache_tokens_the_provider_reported() -> None:
+    """Not just present in the body — actually in the number."""
+    body = post_verify(make_client(provider=CountingProvider())).json()
+    cost = body["cost"]
+    priced_without_cache = timing.usd_for(
+        Cost(input_tokens=cost["input_tokens"], output_tokens=cost["output_tokens"]),
+        "claude-opus-5",
+    )
+    assert cost["usd"] > priced_without_cache
 
 
 # --- the stages reach the agent (LP-063, PRD §Observability) --------------------------
@@ -365,6 +506,7 @@ def test_the_cost_block_reaches_the_agent() -> None:
     assert body["cost"]["input_tokens"] == 9840
     assert body["cost"]["output_tokens"] == 1120
     assert body["cost"]["cache_read_tokens"] == 4000
+    assert body["cost"]["cache_creation_tokens"] == 1684
     assert body["cost"]["usd"] > 0
 
 

@@ -198,5 +198,6 @@ def verify(
             input_tokens=response.usage.input_tokens,
             output_tokens=response.usage.output_tokens,
             cache_read_tokens=response.usage.cache_read_tokens,
+            cache_creation_tokens=response.usage.cache_creation_tokens,
         ),
     )

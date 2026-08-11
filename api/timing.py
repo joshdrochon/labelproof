@@ -37,6 +37,7 @@ from __future__ import annotations
 import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
+from dataclasses import dataclass
 
 from api import logging as applog
 from api.models import Cost, Timings
@@ -169,32 +170,115 @@ def emit(timings: Timings, *, ok: bool = True, **fields: object) -> None:
             )
 
 
-def usd_for(cost: Cost) -> float:
+@dataclass(frozen=True)
+class ModelPrice:
+    """US dollars per million tokens, at list price.
+
+    Cache multipliers are properties of the API rather than of a model: a cached read
+    costs a tenth of an input token, and writing an entry costs 1.25x (5-minute TTL).
+    They are fields rather than constants so a model that ever prices them differently
+    can say so here instead of somewhere else.
+    """
+
+    input_per_mtok: float
+    output_per_mtok: float
+    cache_read_multiplier: float = 0.1
+    cache_write_multiplier: float = 1.25
+
+    def usd(
+        self,
+        *,
+        input_tokens: int,
+        output_tokens: int,
+        cache_read_tokens: int = 0,
+        cache_creation_tokens: int = 0,
+    ) -> float:
+        per_token = 1 / 1_000_000
+        return round(
+            input_tokens * self.input_per_mtok * per_token
+            + output_tokens * self.output_per_mtok * per_token
+            + cache_read_tokens
+            * self.input_per_mtok
+            * self.cache_read_multiplier
+            * per_token
+            + cache_creation_tokens
+            * self.input_per_mtok
+            * self.cache_write_multiplier
+            * per_token,
+            6,
+        )
+
+
+#: List price per model, keyed by id prefix (OPS-4).
+#:
+#: **Keyed by model, and that is the whole point.** The provider adapter hardcodes Opus 5's
+#: rates in three module constants that `estimated_usd` applies to whatever it is handed.
+#: `LABELPROOF_EXTRACTION_MODEL` is an environment variable, and the model the 5-second
+#: gate actually points at is Haiku 4.5 — so the obvious configuration change silently
+#: made every cost line 5x too high, with nothing to catch it.
+#:
+#: Anthropic first-party list price, checked 2026-08-11. Sonnet 5 additionally carries an
+#: introductory rate of $2/$10 through 2026-08-31; the list rate is used here on purpose —
+#: a cost analysis built on a rate that expires in three weeks is a cost analysis with a
+#: short shelf life, and over-stating is the safe direction for a number someone budgets
+#: against.
+PRICES: dict[str, ModelPrice] = {
+    "claude-opus-5": ModelPrice(input_per_mtok=5.0, output_per_mtok=25.0),
+    "claude-sonnet-5": ModelPrice(input_per_mtok=3.0, output_per_mtok=15.0),
+    "claude-haiku-4-5": ModelPrice(input_per_mtok=1.0, output_per_mtok=5.0),
+}
+
+#: What an unrecognised model is priced at. Deliberately the most expensive tier known.
+#:
+#: Guessing low would under-report, and under-reporting is the direction that gets a
+#: number into a budget it cannot support. Pricing an unknown model at zero — the other
+#: obvious option — is worse still: it looks like the call was free.
+UNKNOWN_MODEL_PRICE: ModelPrice = max(
+    PRICES.values(), key=lambda price: price.input_per_mtok
+)
+
+
+def price_for(model: str) -> tuple[ModelPrice, bool]:
+    """The price list for `model`, and whether it was actually recognised.
+
+    Prefix match, because a pinned id and its dated variants are the same model at the
+    same price.
+    """
+    for known, price in PRICES.items():
+        if model.startswith(known):
+            return price, True
+    return UNKNOWN_MODEL_PRICE, False
+
+
+def usd_for(cost: Cost, model: str = "") -> float:
     """List-price cost of one verification (OPS-4).
 
-    The price list belongs to the provider adapter, so this borrows it rather than
-    copying the numbers — a second copy of a price list is a second thing to get wrong,
-    and the one that is wrong is always the copy.
-
-    Imported lazily and failure-tolerantly. The adapter pulls in the Anthropic SDK, which
-    is not needed to price a pair of integers, and a cost line is worth showing but never
-    worth failing a verification over.
+    Never raises. A cost line is worth showing and never worth failing a verification
+    over — but an unknown model is logged loudly rather than silently priced as Opus.
     """
-    if not (cost.input_tokens or cost.output_tokens or cost.cache_read_tokens):
+    tokens = (
+        cost.input_tokens,
+        cost.output_tokens,
+        cost.cache_read_tokens,
+        cost.cache_creation_tokens,
+    )
+    if not any(tokens):
         return 0.0
-    try:
-        from api.provider.anthropic_adapter import estimated_usd
-        from api.provider.base import ProviderUsage
 
-        return estimated_usd(
-            ProviderUsage(
-                input_tokens=cost.input_tokens,
-                output_tokens=cost.output_tokens,
-                cache_read_tokens=cost.cache_read_tokens,
-            )
+    price, known = price_for(model)
+    if model and not known:
+        applog.warn(
+            "cost_model_unknown",
+            model=model,
+            reason_code="no_price_list",
+            usd=0.0,
         )
-    except Exception:
-        return 0.0
+    return price.usd(
+        input_tokens=cost.input_tokens,
+        output_tokens=cost.output_tokens,
+        cache_read_tokens=cost.cache_read_tokens,
+        cache_creation_tokens=cost.cache_creation_tokens,
+    )
 
 
 def cost_line(cost: Cost, *, model: str = "", **fields: object) -> None:
@@ -204,17 +288,18 @@ def cost_line(cost: Cost, *, model: str = "", **fields: object) -> None:
     Analysis deliverable is produced by grepping one event name out of a log file and
     summing a column. Tokens and dollars are the only two things this line is for.
 
-    Cached reads are carried separately because they are priced separately — a tenth of
-    an input token. Folding them into `input_tokens` would make a warm-cache request look
-    ten times more expensive than it is; dropping them entirely, which is what happened
-    before `Cost` carried the field, made it look free.
+    Cached reads and cache writes are carried separately because they are priced
+    separately — a tenth of an input token, and 1.25x an input token respectively. The
+    provider's `input_tokens` excludes both, so folding them in would misprice a
+    warm-cache request and dropping them makes those tokens free.
     """
     applog.log(
         "verification_cost",
         input_tokens=cost.input_tokens,
         output_tokens=cost.output_tokens,
         cache_read_tokens=cost.cache_read_tokens,
-        usd=cost.usd if cost.usd else usd_for(cost),
+        cache_creation_tokens=cost.cache_creation_tokens,
+        usd=cost.usd if cost.usd else usd_for(cost, model),
         model=model,
         **fields,
     )

@@ -98,6 +98,7 @@ class Reading:
     input_tokens: list[int] = field(default_factory=list)
     output_tokens: list[int] = field(default_factory=list)
     cache_read_tokens: list[int] = field(default_factory=list)
+    cache_creation_tokens: list[int] = field(default_factory=list)
     models: set[str] = field(default_factory=set)
     providers: set[str] = field(default_factory=set)
     # --- errors (LP-124, OPS-5) ---
@@ -198,6 +199,9 @@ def read(lines: Iterable[str]) -> Reading:
             reading.input_tokens.append(int(line.get("input_tokens", 0)))
             reading.output_tokens.append(int(line.get("output_tokens", 0)))
             reading.cache_read_tokens.append(int(line.get("cache_read_tokens", 0)))
+            reading.cache_creation_tokens.append(
+                int(line.get("cache_creation_tokens", 0))
+            )
             if model := line.get("model"):
                 reading.models.add(str(model))
             if provider := line.get("provider"):
@@ -418,12 +422,29 @@ def render_cost(reading: Reading) -> list[str]:
         f"| Mean input tokens | {sum(reading.input_tokens) // n} |",
         f"| Mean output tokens | {sum(reading.output_tokens) // n} |",
         f"| Mean cached-read tokens | {sum(reading.cache_read_tokens) // n} |",
+        f"| Mean cache-write tokens | {sum(reading.cache_creation_tokens) // n} |",
     ]
     if reading.models:
         out.append(f"| Models | {', '.join(sorted(reading.models))} |")
     if reading.providers:
         out.append(f"| Providers | {', '.join(sorted(reading.providers))} |")
     out.append("")
+
+    # Cache reads with no writes anywhere in the window is the signature of a provider
+    # that reports `cache_read_input_tokens` but not `cache_creation_input_tokens`. Every
+    # cached prefix has to be written once before it can be read, so a window with reads
+    # and zero writes is not a warm cache — it is an unpriced one, and cache writes cost
+    # 1.25x an input token. Naming it is the difference between a number that is
+    # incomplete and a number that is quietly wrong.
+    if sum(reading.cache_read_tokens) and not sum(reading.cache_creation_tokens):
+        out.append(
+            "**These costs are a lower bound.** Cached reads appear in this window but "
+            "no cache writes do, which means the provider adapter is not reporting "
+            "`cache_creation_input_tokens`. Those tokens are billed at 1.25x an input "
+            "token and are priced at zero here. Treat the figures above as a floor "
+            "until the adapter reports them."
+        )
+        out.append("")
 
     simulated = {p for p in reading.providers if p.startswith("fake")}
     if simulated:
@@ -590,6 +611,7 @@ def as_json(reading: Reading) -> dict[str, Any]:
             "n": n,
             "total": round(sum(reading.usd), 6),
             "mean": round(sum(reading.usd) / n, 6),
+            "cache_writes_reported": bool(sum(reading.cache_creation_tokens)),
             "p95": round(percentile(reading.usd, 95), 6),
             "models": sorted(reading.models),
             "providers": sorted(reading.providers),

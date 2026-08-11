@@ -436,6 +436,40 @@ def test_sample_mode_runs_are_called_out_rather_than_averaged_in() -> None:
     assert "fake:spec" in report
 
 
+def test_cache_reads_with_no_writes_are_called_a_lower_bound() -> None:
+    """Every cached prefix is written once before it can be read. A window with reads and
+    zero writes is not a warm cache — it is an unpriced one, and writes cost 1.25x an
+    input token."""
+    reading = read(
+        line("verification_cost", usd=0.04, input_tokens=4900, output_tokens=560,
+             cache_read_tokens=4000, cache_creation_tokens=0, model="claude-opus-5",
+             provider="anthropic"),
+    )
+    report = rollup.render(reading, [])
+    assert "lower bound" in report
+    assert "cache_creation_input_tokens" in report
+    assert rollup.as_json(reading)["cost_usd"]["cache_writes_reported"] is False
+
+
+def test_a_window_that_reports_cache_writes_carries_no_such_warning() -> None:
+    reading = read(
+        line("verification_cost", usd=0.09, input_tokens=4900, output_tokens=560,
+             cache_read_tokens=4000, cache_creation_tokens=1684, model="claude-opus-5",
+             provider="anthropic"),
+    )
+    assert "lower bound" not in rollup.render(reading, [])
+    assert rollup.as_json(reading)["cost_usd"]["cache_writes_reported"] is True
+
+
+def test_cache_write_tokens_are_reported_alongside_reads() -> None:
+    reading = read(
+        line("verification_cost", usd=0.09, input_tokens=100, output_tokens=10,
+             cache_read_tokens=4000, cache_creation_tokens=1684, model="claude-opus-5",
+             provider="anthropic"),
+    )
+    assert "Mean cache-write tokens | 1684" in rollup.render(reading, [])
+
+
 def test_a_log_with_no_cost_lines_says_nothing_was_priced() -> None:
     assert "nothing was priced" in rollup.render(read(*requests(10)), [])
 

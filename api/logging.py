@@ -30,7 +30,8 @@ ALLOWED_FIELDS: frozenset[str] = frozenset(
         "request_id", "job_id", "item_id", "image_index", "fixture",
         # measurements
         "duration_ms", "stage", "bytes", "width", "height", "count",
-        "input_tokens", "output_tokens", "cache_read_tokens", "usd",
+        "input_tokens", "output_tokens", "cache_read_tokens",
+        "cache_creation_tokens", "usd",
         "blur", "exposure", "glare", "skew_deg", "confidence",
         # categories and outcomes
         "event", "kind", "code", "verdict", "recommendation", "field",
@@ -75,6 +76,11 @@ EVENTS: dict[str, tuple[int, str]] = {
     "verification_cost": (
         logging.INFO,
         "Tokens and dollars for one verification (OPS-4).",
+    ),
+    "cost_model_unknown": (
+        logging.WARNING,
+        "A verification ran on a model with no entry in the price list; cost was "
+        "estimated at the most expensive known tier.",
     ),
     "verify_complete": (logging.INFO, "A verification produced a recommendation."),
     "verify_pregated": (
