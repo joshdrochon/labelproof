@@ -193,7 +193,7 @@ All items required to pass:
 - [ ] Recorded LLM fixtures + fake adapter; unit and integration tests green in CI without live API calls
 - [ ] Deployed via infrastructure-as-config with `/health` and `/ready`; deploy + rollback procedure documented
 - [ ] Retention TTL live: uploads and results auto-purge; no PII collected anywhere; EXIF (including GPS) stripped on ingest
-- [ ] `README.md` with setup/run instructions; `PRD.md` + `TICKETS.md` committed; `CHANGES.md` started
+- [ ] `README.md` with setup/run instructions, approach, tools used, and assumptions; `PRD.md` committed
 - [ ] Golden set v1 (≥10 labels including Old Tom) with expected verdicts; eval harness runs in CI
 
 ## Final Requirements (Due Day 7, Noon)
