@@ -610,6 +610,177 @@ def test_a_real_hyphen_inside_a_line_is_still_a_difference() -> None:
     assert not warning.is_verbatim(altered)
 
 
+# --- LP-215: the zero-false-pass gate --------------------------------------------------
+#
+# The release gate (OPS-3) is enforced in `eval/run.py` against the golden set, which is
+# eight warning labels. Eight labels is a sample, and the claim being made is universal:
+# *no* defective warning is ever reported as a Match. So the gate is also enforced here,
+# where the corpus can be exhaustive rather than illustrative.
+#
+# Everything below asserts one property, from several directions:
+#
+#     If the warning is not exactly right, the verdict is not Match.
+#
+# There is no tolerance, no confidence floor and no threshold anywhere in the path. A
+# test in this section going red means the product's central claim is false.
+
+_TOKENS = warning.tokenize(canon.CANONICAL_WARNING)
+
+#: Named defects, each one a thing an applicant has actually tried.
+VIOLATION_CORPUS: list[tuple[str, str | None]] = [
+    ("title-case heading", _retitled("Government Warning:")),
+    ("sentence-case heading", _retitled("Government warning:")),
+    ("lower-case heading", _retitled("government warning:")),
+    ("alternating-case heading", _retitled("GoVeRnMeNt WaRnInG:")),
+    ("heading with a comma", canon.CANONICAL_WARNING.replace("WARNING:", "WARNING,", 1)),
+    ("heading with no punctuation", canon.CANONICAL_WARNING.replace("WARNING:", "WARNING", 1)),
+    ("no heading at all", canon.WARNING_BODY),
+    ("clause (1) only", canon.CANONICAL_WARNING[: canon.CANONICAL_WARNING.index("(2)")].strip()),
+    ("clause (2) dropped mid-sentence",
+     canon.CANONICAL_WARNING.replace(" and may cause health problems", "")),
+    ("numbering removed", canon.CANONICAL_WARNING.replace("(1) ", "").replace("(2) ", "")),
+    ("paraphrased clause (1)", canon.CANONICAL_WARNING.replace(
+        "women should not drink alcoholic beverages during pregnancy",
+        "pregnant women should not drink alcoholic beverages")),
+    ("softened wording", canon.CANONICAL_WARNING.replace("should not", "may wish not to")),
+    ("birth defects softened", canon.CANONICAL_WARNING.replace("birth defects", "health risks")),
+    ("machinery clause dropped", canon.CANONICAL_WARNING.replace(
+        "or operate machinery, ", "")),
+    ("marketing line appended", canon.CANONICAL_WARNING + " Please drink responsibly."),
+    ("brand name inserted", canon.CANONICAL_WARNING.replace(
+        "GOVERNMENT WARNING:", "OLD TOM GOVERNMENT WARNING:", 1)),
+    ("semicolon for colon", canon.CANONICAL_WARNING.replace(":", ";", 1)),
+    ("Surgeon General lower-cased", canon.CANONICAL_WARNING.replace(
+        "Surgeon General", "surgeon general")),
+    ("words reordered", " ".join(reversed(_TOKENS))),
+    ("absent", None),
+    ("blank", "   "),
+    ("unrelated text", "Bottled and distilled in Bardstown, Kentucky."),
+]
+
+
+@pytest.mark.parametrize(
+    ("name", "text"), VIOLATION_CORPUS, ids=[n for n, _ in VIOLATION_CORPUS]
+)
+def test_no_defective_warning_is_ever_a_match(name: str, text: str | None) -> None:
+    """The release gate, one label at a time, with typography that is beyond reproach."""
+    assert warning.evaluate(text, GOOD).verdict is not Verdict.MATCH
+
+
+@pytest.mark.parametrize(
+    ("name", "text"), VIOLATION_CORPUS, ids=[n for n, _ in VIOLATION_CORPUS]
+)
+def test_no_defective_warning_survives_an_uncertain_reading(
+    name: str, text: str | None
+) -> None:
+    """The same corpus with every typography signal abstaining — the realistic case."""
+    assert warning.evaluate(text, WarningTypography()).verdict is not Verdict.MATCH
+
+
+@pytest.mark.parametrize("cut", range(1, len(_TOKENS)))
+def test_no_truncation_at_any_word_boundary_is_a_match(cut: int) -> None:
+    """Exhaustive over every place the statement could stop early."""
+    partial = " ".join(_TOKENS[:cut])
+    assert warning.evaluate(partial, GOOD).verdict is not Verdict.MATCH
+
+
+@pytest.mark.parametrize("index", range(len(_TOKENS)))
+def test_dropping_any_single_word_is_never_a_match(index: int) -> None:
+    """Exhaustive over every word in the statement."""
+    mutilated = " ".join(_TOKENS[:index] + _TOKENS[index + 1 :])
+    assert warning.evaluate(mutilated, GOOD).verdict is not Verdict.MATCH
+
+
+@pytest.mark.parametrize("index", range(len(_TOKENS)))
+def test_altering_any_single_word_is_never_a_match(index: int) -> None:
+    swapped = [*_TOKENS]
+    swapped[index] = "SOMETHINGELSE"
+    assert warning.evaluate(" ".join(swapped), GOOD).verdict is not Verdict.MATCH
+
+
+@pytest.mark.parametrize(
+    "signals",
+    [
+        WarningTypography(header_is_bold=h, body_is_bold=b, contrast_ok=c, relative_size=r)
+        for h in (True, False, None)
+        for b in (True, False, None)
+        for c in (True, False, None)
+        for r in (None, 0.3, 0.8, 1.0)
+    ],
+)
+def test_only_one_typography_combination_can_reach_match(
+    signals: WarningTypography,
+) -> None:
+    """Exhaustive over the whole signal space, against a verbatim statement.
+
+    Match requires the heading bold, the body not bold, and no prominence problem that
+    was actually detected. Everything else — including every abstention — lands
+    somewhere an agent has to look.
+    """
+    verdict = warning.evaluate(canon.CANONICAL_WARNING, signals).verdict
+    prominence_ok = (
+        signals.contrast_ok is not False
+        and (signals.relative_size is None
+             or signals.relative_size > typography.PROMINENCE_CONCERN_RATIO)
+    )
+    can_match = (
+        signals.header_is_bold is True
+        and signals.body_is_bold is False
+        and prominence_ok
+    )
+    assert (verdict is Verdict.MATCH) is can_match
+
+
+def test_match_is_the_only_verdict_that_reads_as_a_pass() -> None:
+    """The eval's gate treats Match and Not applicable as passes. This module can never
+    return Not applicable — the warning is required on every alcohol label — so Match is
+    the entire pass surface, and every test above is aimed at it."""
+    reachable = {
+        warning.evaluate(text, signals).verdict
+        for text in (None, "", canon.CANONICAL_WARNING, _retitled("Government Warning:"))
+        for signals in (GOOD, WarningTypography(), WarningTypography(body_is_bold=True))
+    }
+    assert Verdict.NOT_APPLICABLE not in reachable
+    assert Verdict.ACCEPTABLE_VARIATION not in reachable
+
+
+def test_an_illegible_reading_is_never_a_match_whatever_the_text_says() -> None:
+    for text in (None, canon.CANONICAL_WARNING, _retitled("Government Warning:")):
+        assert warning.evaluate(text, GOOD, legible=False).verdict is Verdict.UNREADABLE
+
+
+def test_no_container_size_and_no_signal_combination_rescues_a_bad_warning() -> None:
+    """The last door a false pass could come through: some other input relaxing the
+    text check. Nothing in the signature is allowed to do that."""
+    bad = _retitled("Government Warning:")
+    for ml in (None, 50.0, 750.0, 5000.0):
+        for signals in (GOOD, WarningTypography(), WarningTypography(relative_size=2.0)):
+            assert warning.evaluate(bad, signals, net_contents_ml=ml).verdict is not (
+                Verdict.MATCH
+            )
+
+
+def test_the_warning_path_consults_no_threshold() -> None:
+    """WARN-6. If a knob ever appears in this path, this test names it.
+
+    The check is structural rather than behavioural on purpose: a behavioural test can
+    only cover the thresholds that exist today.
+    """
+    import ast
+    from pathlib import Path
+
+    root = Path(warning.__file__).parent
+    for module in ("warning.py", "typography.py"):
+        tree = ast.parse((root / module).read_text())
+        imported = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Import | ast.ImportFrom)
+            and "thresholds" in ast.dump(node)
+        ]
+        assert imported == [], f"{module} imports a threshold module"
+
+
 # --- casefolding trap -----------------------------------------------------------------
 
 def test_warning_comparison_is_case_sensitive() -> None:
