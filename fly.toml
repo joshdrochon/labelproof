@@ -204,25 +204,30 @@ kill_timeout = "15s"
 # --------------------------------------------------------------------------------------
 # Machine (LP-134)
 # --------------------------------------------------------------------------------------
-# Dedicated CPU, two cores, 4 GB.
+# Shared CPU, two vCPU, 2 GB. ~$8/month.
 #
-# Sizing follows the budget rather than the price list. A measured two-image extraction on
-# the adopted model runs ~4.7s of a 5.0s allowance, which leaves roughly 300 ms for
-# everything this machine does itself: decode, EXIF strip, deskew, perspective correction,
-# contrast normalisation and re-encode on two ~2576px images, then the rules engine.
-# OpenCV work is genuinely CPU-bound, the two images are preprocessed concurrently — hence
-# two cores — and shared-CPU steal is measured in exactly the tens of milliseconds that
-# have to come out of that 300 ms. Paying for dedicated cores is the cheapest way to stop
-# the p95 depending on a noisy neighbour.
+# This was `performance-2x` at ~$62/month, argued from a 300 ms non-provider allowance
+# inside a 5s budget. The argument had the right shape and the wrong magnitude, and the
+# measurement settles it: the app's own `timings_ms` shows roughly 130 ms of CPU work
+# against a 9.4-10.4s provider call. Shared-CPU steal is tens of milliseconds. A term
+# three orders of magnitude smaller than the provider call cannot be what decides the
+# p95, and buying dedicated cores to protect it was paying 8x to defend a rounding error.
 #
-# 4 GB is headroom, not need: numpy, OpenCV and Pillow holding several full-resolution
-# frames while a batch job runs its worker pool in the same process.
+# Two vCPU rather than one still earns its place, modestly and for one specific reason:
+# the two images are preprocessed concurrently and OpenCV releases the GIL, so the second
+# core saves most of one image's preprocessing — at most ~130 ms, once.
 #
-# If the accuracy sweep lands on a model fast enough to widen the budget, `shared-cpu-2x`
-# with 2 GB is a one-line change and roughly an eighth of the cost.
+# 2 GB carries numpy, OpenCV and Pillow holding a few full-resolution frames while a batch
+# job runs its worker pool in the same process. Raise it if the batch pool OOMs; that is a
+# memory decision with evidence behind it, unlike the CPU one it replaces.
+#
+# To revisit this properly rather than by argument: run the 20-sample p95 against both
+# sizes and compare `timings_ms.total - timings_ms.extract`. If the non-provider p95
+# differs by less than ~100 ms, the cheap option is correct. Record the numbers in
+# CHANGES.md either way.
 [[vm]]
-  size = "performance-2x"
-  memory = "4gb"
+  size = "shared-cpu-2x"
+  memory = "2gb"
 
 # No `[mounts]`, deliberately. Uploads and results are ephemeral by policy — auto-purged
 # on a 24h TTL (SEC-2) — and a volume would be a durable home for exactly the data the
