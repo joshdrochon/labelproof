@@ -167,9 +167,127 @@ def test_deleting_alone_would_not_have_been_enough(tmp_path: Path) -> None:
     store.purge_expired(now=created + 25 * HOUR)
 
     assert BRAND.encode() in every_byte_under(store_root), (
-        "if this ever stops being true, secure_delete was turned on upstream and the "
-        "VACUUM in api/retention.py can be dropped — the property test above still holds"
+        "if this stops being true, `PRAGMA secure_delete=ON` landed in api/batch/store.py. "
+        "Update this precondition — and do NOT drop the VACUUM: secure_delete governs "
+        "future deletes only, and does nothing about free pages or WAL frames written "
+        "before it was enabled"
     )
+
+
+def test_a_purge_by_something_other_than_the_sweep_is_still_cleaned_up(
+    tmp_path: Path,
+) -> None:
+    """`api/routes/batch.py` purges on its way into `POST /batch` and marks nothing.
+
+    This was a live leak with no attacker, no crash and no contention: an agent submits a
+    small batch, it expires, a later `POST /batch` deletes the rows, and the sweep that
+    follows reported `compacted=True` over a database from which `strings` still yielded
+    every brand name and producer address. Permanently — `freelist_count` reads 0 for a
+    small purge, so nothing downstream could tell.
+
+    The fix is to stop asking who did the deleting. A delete cannot avoid writing to the
+    database, so the sweep compares the file against the one it last verified clean.
+    """
+    store = BatchStore(tmp_path)
+    created = time.time()
+    seed_job(store, created=created)
+
+    # Establish a known-clean baseline, as a sweep on a quiet server would.
+    sweep(policy_for(tmp_path), now=created, store=store)
+    assert not retention.compaction_owed(store.db_path)
+
+    # Now somebody else deletes the rows. This is `api/routes/batch.py:314` exactly:
+    # `purge_expired` and nothing more.
+    assert store.purge_expired(now=created + 25 * HOUR)
+    assert BRAND.encode() in every_byte_under(tmp_path), "residue is there, unannounced"
+
+    assert retention.compaction_owed(store.db_path), (
+        "the sweep must notice a delete it did not perform"
+    )
+    report = sweep(policy_for(tmp_path), now=created + 26 * HOUR, store=store)
+
+    assert report.jobs_purged == 0, "nothing left for the sweep itself to purge"
+    assert report.compacted
+    assert BRAND.encode() not in every_byte_under(tmp_path)
+    assert ADDRESS.encode() not in every_byte_under(tmp_path)
+
+
+def test_the_obligation_does_not_depend_on_a_marker_write_landing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Recording the obligation used to happen after the DELETE, and fail silently.
+
+    ENOSPC is the case that matters — retention runs precisely when the disk is full — and
+    the measured result was `purged=1 compacted=True freelist=0 marker=False` with the data
+    still recoverable. Two changes: the obligation is declared *before* the delete, and it
+    is derived from the file, so a failed write cannot lose it.
+    """
+    store = BatchStore(tmp_path)
+    created = time.time()
+    seed_job(store, created=created)
+    sweep(policy_for(tmp_path), now=created, store=store)
+
+    def full_disk(*_: Any, **__: Any) -> None:
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(Path, "write_text", full_disk)
+    store.purge_expired(now=created + 25 * HOUR)
+    assert retention.compaction_owed(store.db_path), "must survive an unwritable marker"
+    monkeypatch.undo()
+
+    report = sweep(policy_for(tmp_path), now=created + 26 * HOUR, store=store)
+    assert report.compacted
+    assert BRAND.encode() not in every_byte_under(tmp_path)
+
+
+def test_an_unwritable_state_file_is_reported_not_swallowed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capfd: Any
+) -> None:
+    """`contextlib.suppress(OSError)` meant a full disk broke this in silence."""
+    from api import logging as applog
+
+    applog.configure()
+    store = BatchStore(tmp_path)
+    seed_job(store, created=time.time())
+
+    def full_disk(*_: Any, **__: Any) -> None:
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(Path, "write_text", full_disk)
+    retention.note_compaction_owed(store.db_path)
+
+    lines = [
+        json.loads(line) for line in capfd.readouterr().out.splitlines() if line.startswith("{")
+    ]
+    assert [line for line in lines if line.get("event") == "retention_state_unwritable"]
+
+
+def test_the_obligation_is_declared_before_the_delete(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Write-ahead, so a kill between the commit and the record cannot lose it."""
+    store = BatchStore(tmp_path)
+    created = time.time()
+    seed_job(store, created=created)
+    sweep(policy_for(tmp_path), now=created, store=store)
+
+    order: list[str] = []
+    real_purge = store.purge_expired
+    real_note = retention.note_compaction_owed
+
+    def watched_purge(**kwargs: Any) -> Any:
+        order.append("delete")
+        return real_purge(**kwargs)
+
+    def watched_note(db_path: Path) -> None:
+        order.append("declare")
+        real_note(db_path)
+
+    monkeypatch.setattr(store, "purge_expired", watched_purge)
+    monkeypatch.setattr(retention, "note_compaction_owed", watched_note)
+
+    sweep(policy_for(tmp_path), now=created + 25 * HOUR, store=store)
+    assert order[:2] == ["declare", "delete"], f"obligation recorded too late: {order}"
 
 
 def test_a_missed_compaction_is_retried_on_a_later_sweep(tmp_path: Path) -> None:
@@ -189,7 +307,6 @@ def test_a_missed_compaction_is_retried_on_a_later_sweep(tmp_path: Path) -> None
     # lock. `purge_expired` is called first and succeeds, so the lock is taken afterwards —
     # which is the real sequence, since a worker can claim an item at any moment.
     store.purge_expired(now=created + 25 * HOUR)
-    retention.note_compaction_owed(store.db_path)
 
     blocker = sqlite3.connect(store.db_path, timeout=0.1, isolation_level=None)
     blocker.execute("PRAGMA busy_timeout=0")
@@ -259,10 +376,9 @@ def test_compaction_reports_failure_rather_than_claiming_success(tmp_path: Path)
     created = time.time()
     seed_job(store, created=created)
 
-    # Delete the rows the way the sweep does, then record the obligation, then take the
-    # write lock away — which is what a running batch does to a 15-minute timer.
+    # Delete the rows the way the sweep does, then take the write lock away — which is
+    # what a running batch does to a fifteen-minute timer.
     store.purge_expired(now=created + 25 * HOUR)
-    retention.note_compaction_owed(store.db_path)
     assert BRAND.encode() in every_byte_under(tmp_path)
 
     blocker = sqlite3.connect(store.db_path, timeout=0.1, isolation_level=None)
@@ -285,14 +401,13 @@ def test_compaction_reports_failure_rather_than_claiming_success(tmp_path: Path)
 def test_the_obligation_survives_a_restart(tmp_path: Path) -> None:
     """A container that restarts between the DELETE and the VACUUM must not forget.
 
-    The marker is a file for exactly this reason — an in-memory flag would have lost the
-    obligation on the restart that a crashed compaction makes likely.
+    The clean-state record is a file for exactly this reason — an in-memory flag would have
+    lost the obligation on the restart that a crashed compaction makes likely.
     """
     store = BatchStore(tmp_path)
     created = time.time()
     seed_job(store, created=created)
     store.purge_expired(now=created + 25 * HOUR)
-    retention.note_compaction_owed(store.db_path)
 
     # Nothing in memory carries over; a fresh sweep is all a restarted process has.
     reopened = BatchStore(tmp_path)

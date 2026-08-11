@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import shutil
 import sqlite3
 import time
@@ -59,7 +60,7 @@ MANAGED_SUBDIRS: tuple[str, ...] = ("batches", "uploads", "results")
 
 #: Never removed, whatever their age. The database is state, not an artefact.
 PROTECTED_NAMES: frozenset[str] = frozenset(
-    {"jobs.db", "jobs.db-wal", "jobs.db-shm", "jobs.db-journal", ".compaction-owed"}
+    {"jobs.db", "jobs.db-wal", "jobs.db-shm", "jobs.db-journal", ".compaction-state"}
 )
 
 #: How old an unreferenced `batches/<job_id>/` directory must be before it is treated as
@@ -154,6 +155,13 @@ def sweep(
 
     resolved = _store_for(policy, store)
     if resolved is not None:
+        # WRITE AHEAD. The obligation is recorded *before* the DELETE, not after it.
+        # Recording it afterwards left a window — measured — in which the rows were gone and
+        # nothing remembered they had been: ENOSPC (and retention runs precisely when the
+        # disk is full), a read-only remount, or a SIGKILL between the commit and the marker
+        # all ended with `compacted=True` over a database still full of brand names.
+        note_compaction_owed(resolved.db_path)
+
         # A purge that loses the write lock to a batch worker raises
         # `sqlite3.OperationalError: database is locked`. Letting that propagate aborted the
         # WHOLE sweep — orphan directories and loose files included — so a running batch
@@ -161,14 +169,8 @@ def sweep(
         try:
             purged = resolved.purge_expired(now=moment)
             report.jobs_purged = len(purged)
-            if purged:
-                note_compaction_owed(resolved.db_path)
         except sqlite3.Error as exc:
             report.purge_failed = True
-            # Marked owed even on failure: `purge_expired` deletes items and jobs in two
-            # statements, so a lock lost between them leaves rows deleted and the obligation
-            # real. Compacting a database that turns out to be clean is free.
-            note_compaction_owed(resolved.db_path)
             applog.warn(
                 "retention_purge_failed",
                 code="sqlite_busy",
@@ -179,8 +181,8 @@ def sweep(
         # Gating it on `if purged:` was a hole with a permanent consequence: a compaction
         # that lost the lock left the brand names in freed pages, and by the next sweep
         # there was nothing left to purge, so it never retried and the data survived for the
-        # life of the container. `_compact` is a no-op when nothing is owed, so the
-        # unconditional call costs one `PRAGMA freelist_count`.
+        # life of the container. `_compact` is a no-op when the file is already known clean,
+        # so the unconditional call costs two `stat` calls.
         report.compacted = _compact(resolved.db_path)
 
     _sweep_orphans(policy, resolved, moment, report)
@@ -204,11 +206,9 @@ def _store_for(policy: RetentionPolicy, store: BatchStore | None) -> BatchStore 
     return _BatchStore(policy.storage_dir)
 
 
-#: Written next to the database the moment a purge deletes anything, and removed only when
-#: a compaction has verifiably finished. It is a file rather than a variable because the
-#: obligation has to outlive the process: a container that restarts between the DELETE and
-#: the VACUUM would otherwise forget that the brand names are still in there.
-COMPACTION_MARKER = ".compaction-owed"
+#: Where the last verified-clean state of the database is recorded. A file rather than a
+#: variable because the obligation has to outlive the process.
+COMPACTION_STATE = ".compaction-state"
 
 #: Seconds the compaction will wait for the database lock before giving up and warning.
 #: Deliberately short: this runs on a timer, so a contended sweep should stand aside for the
@@ -216,41 +216,94 @@ COMPACTION_MARKER = ".compaction-owed"
 COMPACTION_LOCK_WAIT = 2.0
 
 
-def _marker_path(db_path: Path) -> Path:
-    return db_path.with_name(COMPACTION_MARKER)
+def _state_path(db_path: Path) -> Path:
+    return db_path.with_name(COMPACTION_STATE)
+
+
+def _fingerprint(db_path: Path) -> list[int]:
+    """Size and mtime of the database and its sidecars.
+
+    **This is what makes the obligation independent of whoever did the deleting**, which is
+    the whole reason it exists. The previous design recorded the obligation at delete time,
+    which is only sound if every delete path remembers to — and one did not:
+    `api/routes/batch.py` calls `purge_expired()` directly on its way into `POST /batch`,
+    wrote no marker, and the sweep that followed reported `compacted=True` over a database
+    from which `strings` still yielded every brand name and producer address. Permanently,
+    with no attacker, no crash and no contention.
+
+    A delete cannot avoid writing to the database or its write-ahead log, so a fingerprint
+    that differs from the last verified-clean one means *something* changed and the file is
+    not known clean. Inserts move it too, so this compacts more often than strictly
+    necessary — which is the correct direction to be wrong in, and costs a VACUUM of a
+    prototype-sized database on a fifteen-minute timer.
+    """
+    values: list[int] = []
+    for suffix in ("", "-wal", "-shm"):
+        path = db_path if not suffix else db_path.with_name(db_path.name + suffix)
+        try:
+            stat = path.stat()
+            values.extend((stat.st_size, stat.st_mtime_ns))
+        except OSError:
+            values.extend((-1, -1))
+    return values
+
+
+def _read_clean_fingerprint(db_path: Path) -> list[int] | None:
+    try:
+        raw = json.loads(_state_path(db_path).read_text())
+    except (OSError, ValueError):
+        return None
+    fingerprint = raw.get("clean_fingerprint") if isinstance(raw, dict) else None
+    if isinstance(fingerprint, list) and all(isinstance(v, int) for v in fingerprint):
+        return fingerprint
+    return None
+
+
+def _write_clean_fingerprint(db_path: Path, fingerprint: list[int] | None) -> bool:
+    """Record (or clear) the last verified-clean state. Returns whether the write landed."""
+    try:
+        payload = json.dumps({"clean_fingerprint": fingerprint})
+        _state_path(db_path).write_text(payload)
+        return True
+    except OSError:
+        return False
 
 
 def note_compaction_owed(db_path: Path) -> None:
-    """Record that rows were deleted and their bytes have not been rebuilt away yet."""
-    with contextlib.suppress(OSError):
-        _marker_path(db_path).write_text("")
+    """Declare, before deleting anything, that the file is about to stop being clean.
+
+    Call this **ahead of** the DELETE. It is belt to the fingerprint's braces: the
+    fingerprint alone would catch the change afterwards, but a caller that knows it is about
+    to delete should say so, so that a compaction which then fails is reported as a failure
+    rather than as a routine miss.
+
+    A failed write is logged, not swallowed. The previous version wrapped this in
+    `contextlib.suppress(OSError)`, which meant the one condition most likely to break it —
+    a full disk, which is exactly when retention runs — broke it in silence.
+    """
+    if not _write_clean_fingerprint(db_path, None):
+        applog.warn("retention_state_unwritable", code="io_error", stage="retention")
 
 
 def compaction_owed(db_path: Path) -> bool:
-    """Is there deleted content still sitting in this database file?
+    """Might this database hold deleted content in pages nobody is using?
 
-    **This is a recorded obligation, not an inference.** The first attempt inferred it from
-    `PRAGMA freelist_count > 0`, which is wrong in the most common case: `freelist_count`
-    counts *wholly freed pages*, and a small batch's deleted rows sit inside pages that are
-    still in use, so the count reads 0 while the brand names are plainly still there. The
-    only reliable statement is the one made at delete time.
+    True unless the file is byte-for-byte the one a compaction last verified clean. Two
+    earlier answers to this question were both wrong:
 
-    `freelist_count` is still consulted as a second opinion — it catches a database that
-    was purged by something other than this module.
+    * `PRAGMA freelist_count > 0` — counts *wholly freed pages*, so a small batch's deleted
+      rows sit inside pages still in use and it reads 0 while the brand names are there.
+      Measured 0 at n=2 and n=5.
+    * a marker written by the deleter — sound only if every delete path remembers, and
+      `api/routes/batch.py` does not.
+
+    Deriving it from the file removes both failure modes: there is no delete path, present
+    or future, that can change this database without changing its fingerprint.
     """
-    if _marker_path(db_path).exists():
-        return True
-    try:
-        connection = sqlite3.connect(db_path, timeout=5.0, isolation_level=None)
-    except sqlite3.Error:
+    if not db_path.exists():
         return False
-    try:
-        row = connection.execute("PRAGMA freelist_count").fetchone()
-        return bool(row) and int(row[0]) > 0
-    except sqlite3.Error:
-        return False
-    finally:
-        connection.close()
+    clean = _read_clean_fingerprint(db_path)
+    return clean is None or clean != _fingerprint(db_path)
 
 
 def _wal_bytes(db_path: Path) -> int:
@@ -273,11 +326,11 @@ def _compact(db_path: Path) -> bool:
     the thing while not doing it is worse than no control, because it ends the
     investigation. The `busy` flag is now read and believed.
 
-    It does not clear the obligation on hope. The marker is removed only when the VACUUM
-    did not raise, the checkpoint reported not-busy, and the WAL is measurably empty. If a
-    batch worker holds the write lock, none of that happens, the marker stays, and the next
-    sweep retries — which is the retry the old `if purged:` gate could never reach, because
-    by then there was nothing left to purge.
+    It does not clear the obligation on hope. The clean fingerprint is recorded only when
+    the VACUUM did not raise, the checkpoint reported not-busy, and the WAL is measurably
+    empty. If a batch worker holds the write lock, none of that happens, the file stays
+    un-clean, and the next sweep retries — which is the retry the old `if purged:` gate
+    could never reach, because by then there was nothing left to purge.
     """
     if not compaction_owed(db_path):
         return True
@@ -309,9 +362,14 @@ def _compact(db_path: Path) -> bool:
         connection.close()
 
     if vacuumed and checkpointed and _wal_bytes(db_path) == 0:
-        with contextlib.suppress(OSError):
-            _marker_path(db_path).unlink()
-        return True
+        # Fingerprinted *after* the rebuild, because the rebuild is what changed the file.
+        if _write_clean_fingerprint(db_path, _fingerprint(db_path)):
+            return True
+        # The database is clean; we simply cannot record that it is. Say so rather than
+        # claiming success, and the next sweep will compact a clean file, which is wasteful
+        # and harmless — the failure this whole mechanism exists to avoid is the other one.
+        applog.warn("retention_state_unwritable", code="io_error", stage="retention")
+        return False
 
     applog.warn("retention_compaction_incomplete", code="sqlite_busy", stage="retention")
     return False
