@@ -117,18 +117,26 @@ def test_a_batch_job_status_url_is_reachable_on_the_shipped_app(
     assert response.json()["error"]["code"] != "not_found"
 
 
-def test_the_batch_test_suite_mounts_the_router_itself() -> None:
+def test_the_shipped_app_exposes_no_batch_route_at_all() -> None:
     """Why 624 tests stayed green while the endpoint did not exist.
 
-    `tests/test_batch.py` calls `app.include_router(batch_routes.router)` after
-    `create_app`. Every batch test therefore exercises a differently-assembled app than
-    the one that ships. Pinned so that when the mount lands in `create_app`, the
-    now-redundant line in the test file is findable rather than left to drift.
+    The batch tests mount the router themselves after calling `create_app`, so they
+    exercise a differently-assembled app than the one that ships. This asserts the
+    difference at its source — the shipped app's routing table — rather than by
+    grepping another branch's test file for a literal, which is what it used to do.
+    That grep asserted how somebody else's test was *written*, would have broken on a
+    rename, and told us nothing about the product.
     """
-    from pathlib import Path
-
-    source = (Path(__file__).resolve().parents[1] / "test_batch.py").read_text()
-    assert "include_router(batch_routes.router)" in source
+    app = create_app(config=Config(use_fake_provider=True), provider=None)
+    batch_routes = [
+        route
+        for route in app.router.routes
+        if str(getattr(route, "path", "")).startswith("/batch")
+    ]
+    assert batch_routes == [], (
+        "batch is mounted now — remove the xfails above and the self-mounting helper "
+        "in tests/e2e/test_batch_flow.py"
+    )
 
 
 # --------------------------------------------------------------------------------------

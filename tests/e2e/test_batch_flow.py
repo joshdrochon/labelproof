@@ -23,6 +23,7 @@ from __future__ import annotations
 import csv
 import io
 import json
+import re
 import time
 from pathlib import Path
 from typing import Any
@@ -289,14 +290,45 @@ def test_a_malformed_row_is_reported_with_its_row_number(tmp_path: Path) -> None
     """"Something is wrong with your manifest" is unactionable on 300 rows.
 
     The row number is what turns a rejection into a five-second fix.
+
+    Asserted as *the specific number* rather than as the substring "row". The earlier
+    version was `assert "row" in body.lower()`, which matches "rows", "row_count", and
+    the word "narrow" — and passed for a manifest with nothing wrong with it at all.
     """
     client = _client(tmp_path, SpecBackedProvider("tc01_old_tom_clean"))
     accepted = _submit(
         client,
-        [_row("good.png"), _row("bad.png", commodity="cider")],
+        [
+            _row("good_0.png"),
+            _row("good_1.png"),
+            _row("bad.png", commodity="cider"),  # data row 3 -> CSV line 4
+        ],
     )
     body = json.dumps(accepted)
-    assert "row" in body.lower()
+
+    # The offending row is the third data row; the manifest has a header, so callers
+    # counting lines in Excel see line 4. Either convention is defensible; what is not
+    # is a message with no number in it.
+    assert re.search(r"\brow 4\b", body) or re.search(r"\brow 3\b", body), body
+    assert "cider" in body or "commodity" in body, (
+        "the message names neither the bad value nor the column it was in"
+    )
+
+
+@pytest.mark.tc("TC-20")
+def test_a_manifest_with_nothing_wrong_reports_no_row_problems(tmp_path: Path) -> None:
+    """The control the previous version of the test above did not have.
+
+    `assert "row" in body` passed on a perfectly valid manifest, so it could not
+    distinguish "the error names its row" from "the response happens to mention rows".
+    This pins the other side: a clean submission carries no row-level complaint.
+    """
+    client = _client(tmp_path, SpecBackedProvider("tc01_old_tom_clean"))
+    accepted = _submit(client, [_row("good_0.png"), _row("good_1.png")])
+    body = json.dumps(accepted)
+
+    assert not re.search(r"\brow \d+\b", body), body
+    assert accepted["job_id"]
 
 
 @pytest.mark.tc("TC-21")

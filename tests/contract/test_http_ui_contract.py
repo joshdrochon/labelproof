@@ -59,8 +59,23 @@ TYPES_TS = Path(__file__).resolve().parents[2] / "web" / "src" / "types.ts"
 
 
 def _source() -> str:
+    """The TypeScript wire contract, or a hard failure.
+
+    `pytest.fail`, not `pytest.skip`. Skipping evaporated the entire layer: delete
+    `web/src/types.ts` and all 67 tests here reported SKIPPED and the run went green —
+    so a slim checkout, or a Docker build that excludes `web/`, silently ran with no
+    HTTP-UI contract at all. Another agent's UI tests already vanished exactly this way
+    on this project.
+
+    A missing contract file is not a reason to check less; it is the loudest possible
+    signal that something is wrong with the checkout. `test_golden_set_contract.py`
+    already fails rather than skips on its missing input, and this now matches it.
+    """
     if not TYPES_TS.exists():  # pragma: no cover - the file is committed
-        pytest.skip("web/src/types.ts is not present in this checkout")
+        pytest.fail(
+            "web/src/types.ts is missing, so the HTTP/UI wire contract is unchecked. "
+            "This is a failure rather than a skip on purpose — see the docstring."
+        )
     return TYPES_TS.read_text()
 
 
@@ -87,6 +102,23 @@ def _interface_fields(name: str) -> dict[str, str]:
         key, _, declared = line.partition(":")
         fields[key.strip().rstrip("?")] = declared.strip()
     return fields
+
+
+def _optional_fields(name: str) -> set[str]:
+    """The `name?:` fields of ONE interface.
+
+    Scoped per interface deliberately. The first version scanned the whole file for
+    `(\\w+)\\?:` and exempted those names in *every* interface — so because
+    `ImageReport.url?` exists, adding a required `url: string;` to `Aggregate` passed
+    clean even though the server never sends one. Same for `next_step`. The docstring
+    below calls that "the more dangerous direction", and it was the one direction the
+    check was holed in.
+    """
+    match = re.search(rf"export interface {name} \{{(.*?)\n\}}", _source(), re.S)
+    assert match, f"no `export interface {name}` in types.ts"
+    body = re.sub(r"/\*\*.*?\*/", "", match.group(1), flags=re.S)
+    body = re.sub(r"//[^\n]*", "", body)
+    return set(re.findall(r"(\w+)\?:", body))
 
 
 def _union_members(name: str) -> set[str]:
@@ -173,11 +205,30 @@ def test_typescript_declares_no_field_the_server_does_not_send(
     It arrives as `undefined`, renders as empty, and looks like an answer. `ImageReport.url`
     is the one known exception — it is declared optional precisely because the server does
     not send it yet, and the component says so.
+
+    The exemption is per interface. Reading optionals from the whole file made
+    `ImageReport.url?` exempt `url` everywhere, so a required `url: string;` added to
+    `Aggregate` — which the server never sends — passed clean.
     """
     declared = set(_interface_fields(interface))
-    optional = set(re.findall(r"(\w+)\?:", _source()))
-    extra = sorted(declared - set(model.model_fields) - optional)
+    extra = sorted(declared - set(model.model_fields) - _optional_fields(interface))
     assert extra == [], f"{interface} declares fields the server never sends: {extra}"
+
+
+def test_only_the_known_gap_is_declared_optional() -> None:
+    """Optionality is the escape hatch, so the list of users of it is worth pinning.
+
+    `ImageReport.url` is optional because the server does not send the preprocessed
+    image URL yet and the component falls back to the local upload. That is a documented
+    contract gap. A second optional field appearing is either another gap that needs
+    documenting or somebody silencing this file.
+    """
+    optional = {
+        f"{interface}.{field}"
+        for _, interface in MODEL_PAIRS
+        for field in _optional_fields(interface)
+    }
+    assert optional == {"ImageReport.url"}, sorted(optional)
 
 
 @pytest.mark.parametrize(("model", "interface"), MODEL_PAIRS, ids=[i for _, i in MODEL_PAIRS])

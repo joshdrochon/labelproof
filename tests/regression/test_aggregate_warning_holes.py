@@ -40,11 +40,26 @@ which is the signal to widen `WARNING_VERDICTS` in the property file.
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 
-from api.models import FieldName, FieldResult, Recommendation, Verdict
+from api import canon
+from api.models import (
+    Application,
+    FieldName,
+    FieldResult,
+    Recommendation,
+    Verdict,
+    WarningTypography,
+)
+from api.provider.base import ImageInput
+from api.provider.fake import SpecBackedProvider
 from api.rules import aggregate as agg
+from api.rules import warning as warn
 from api.rules.commodity import REQUIREMENTS, Requirement
+from api.verify import verify
+from fixtures.generator.catalog import CATALOG
 
 pytestmark = pytest.mark.regression
 
@@ -58,6 +73,17 @@ def _row(field: FieldName, verdict: Verdict) -> FieldResult:
         confidence=1.0,
         rationale="",
     )
+
+
+#: Typography signals that are unambiguously compliant, so a Match verdict in the probe
+#: below turns on the text rather than on an unverifiable formatting signal.
+_COMPLIANT = WarningTypography(
+    header_is_all_caps=True,
+    header_is_bold=True,
+    body_is_bold=False,
+    relative_size=1.0,
+    contrast_ok=True,
+)
 
 
 def _clean_except_warning() -> list[FieldResult]:
@@ -209,30 +235,79 @@ def test_a_warning_mismatch_drives_the_verdict_whatever_its_position() -> None:
 # --------------------------------------------------------------------------------------
 
 
-def test_the_verification_pipeline_always_produces_exactly_one_warning_row() -> None:
+#: Every fixture in the golden set, so the reachability claim is made against the whole
+#: range of labels the pipeline is expected to handle rather than against one happy path.
+_ALL_SPECS = list(CATALOG)
+
+
+@pytest.mark.parametrize("spec", _ALL_SPECS, ids=lambda s: s.name)
+def test_the_verification_pipeline_always_produces_exactly_one_warning_row(
+    spec: Any,
+) -> None:
     """Why none of the above is reachable through `POST /verify` today.
 
-    `verify()` assembles the seven rows itself, in order, once each. This test is the
-    reason the defects are latent — and the reason they stop being latent the moment
-    somebody assembles a checklist anywhere else.
+    **Asserted by running the pipeline, not by reading its source.** The earlier version
+    was `inspect.getsource(verify).count("_warning_result(") == 1`, which is a claim
+    about how the function is *written*: refactor `verify()` to build its rows in a loop
+    and the count goes to zero, the test passes, and the reachability claim it is
+    supporting goes false at the same moment. That is the load-bearing evidence for
+    "the aggregate holes are latent", so it has to be evidence about behaviour.
+
+    Run across every fixture, because "exactly one warning row" has to hold for the
+    missing-warning case and the two-image case as well as the clean one.
     """
-    import inspect
+    application = Application.model_validate(spec.application())
+    roles = ["front", "back"] if spec.face != "single" else ["single"]
+    images = [ImageInput(index=i, data=b"", role=r) for i, r in enumerate(roles)]
 
-    from api import verify as verify_module
+    result = verify(application, images, SpecBackedProvider(spec))
 
-    source = inspect.getsource(verify_module.verify)
-    assert source.count("_warning_result(") == 1
+    warning_rows = [
+        row for row in result.fields if row.field is FieldName.GOVERNMENT_WARNING
+    ]
+    assert len(warning_rows) == 1, [row.verdict for row in warning_rows]
+    assert {row.field for row in result.fields} == set(FieldName)
 
 
-def test_the_warning_evaluator_never_returns_not_applicable() -> None:
-    """The other half of why defect 1 is latent.
+@pytest.mark.parametrize("spec", _ALL_SPECS, ids=lambda s: s.name)
+def test_the_pipeline_never_gives_the_warning_a_not_applicable_verdict(
+    spec: Any,
+) -> None:
+    """The other half of why defect 1 is latent, also asserted by running the code.
 
-    `warning.evaluate` has five return paths and none of them is Not applicable. If a
-    sixth ever appears, defect 1 becomes live the same day.
+    The earlier version grepped `warning.evaluate`'s source for the string
+    `NOT_APPLICABLE`. That passes if the module starts importing the verdict under an
+    alias, or returns it from a helper, or builds it from `Verdict(name)` — none of
+    which is far-fetched, and any of which makes defect 1 live while the test stays
+    green.
     """
-    import inspect
+    application = Application.model_validate(spec.application())
+    roles = ["front", "back"] if spec.face != "single" else ["single"]
+    images = [ImageInput(index=i, data=b"", role=r) for i, r in enumerate(roles)]
 
-    from api.rules import warning as warning_module
+    result = verify(application, images, SpecBackedProvider(spec))
+    warning = next(r for r in result.fields if r.field is FieldName.GOVERNMENT_WARNING)
+    assert warning.verdict is not Verdict.NOT_APPLICABLE
 
-    source = inspect.getsource(warning_module.evaluate)
-    assert "NOT_APPLICABLE" not in source
+
+def test_the_warning_evaluator_reaches_only_the_five_verdicts_it_documents() -> None:
+    """`evaluate` has five outcomes and Not applicable is not among them.
+
+    Driven through the evaluator with the inputs that produce each one, rather than by
+    searching its text. If a sixth outcome appears, this fails by naming it.
+    """
+    reachable = {
+        warn.evaluate(None, WarningTypography()).verdict,
+        warn.evaluate("x", WarningTypography(), legible=False).verdict,
+        warn.evaluate("not the statement", _COMPLIANT).verdict,
+        warn.evaluate(canon.CANONICAL_WARNING, WarningTypography()).verdict,
+        warn.evaluate(canon.CANONICAL_WARNING, _COMPLIANT).verdict,
+    }
+    assert reachable == {
+        Verdict.MISSING,
+        Verdict.UNREADABLE,
+        Verdict.MISMATCH,
+        Verdict.ACCEPTABLE_VARIATION,
+        Verdict.MATCH,
+    }
+    assert Verdict.NOT_APPLICABLE not in reachable

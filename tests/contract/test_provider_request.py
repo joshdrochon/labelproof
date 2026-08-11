@@ -25,7 +25,7 @@ from typing import Any
 import pytest
 
 from api.config import Config
-from api.models import Commodity
+from api.models import Commodity, FieldName
 from api.provider import anthropic_adapter as adapter
 from api.provider.base import ExtractionRequest, ImageInput
 
@@ -241,21 +241,103 @@ def test_the_schema_that_is_sent_is_the_schema_that_is_tested(
     )
 
 
+# --------------------------------------------------------------------------------------
+# The three documented schema ceilings, measured on the outgoing payload
+# --------------------------------------------------------------------------------------
+#
+# Shared with tests/regression/test_extraction_schema_overflow.py, which asserts the same
+# three against the module constant. Both matter: the regression file pins the shape that
+# shipped, this file pins what actually leaves the process.
+
+#: A conservative stand-in for the API's compiled-grammar ceiling, in serialized bytes.
+#: The real limit is on the compiled grammar and is not published as a byte count, so
+#: this is set well below the size that failed and comfortably above the size that works.
+GRAMMAR_SIZE_BUDGET_BYTES = 4096
+
+#: Nested-object levels. The shipped schema was four deep (root -> fields -> field ->
+#: bbox); flattening the box to a string made it three.
+MAX_OBJECT_NESTING = 3
+
+
+def _count_unions(node: Any) -> int:
+    """Every parameter whose type is a union — what the 16-parameter ceiling counts."""
+    if isinstance(node, dict):
+        here = 1 if "anyOf" in node or isinstance(node.get("type"), list) else 0
+        return here + sum(_count_unions(child) for child in node.values())
+    if isinstance(node, list):
+        return sum(_count_unions(child) for child in node)
+    return 0
+
+
+def _object_nesting(node: Any) -> int:
+    """How many `type: object` levels deep the schema goes."""
+    if isinstance(node, dict):
+        here = 1 if node.get("type") == "object" else 0
+        return here + max((_object_nesting(c) for c in node.values()), default=0)
+    if isinstance(node, list):
+        return max((_object_nesting(c) for c in node), default=0)
+    return 0
+
+
+
+def _wire_schema(captured: _RecordedCall) -> Any:
+    return captured.kwargs["output_config"]["format"]["schema"]
+
+
 def test_the_schema_on_the_wire_is_within_the_union_ceiling(
     captured: _RecordedCall,
 ) -> None:
     """The incident's first ceiling, asserted on the outgoing payload itself."""
+    assert _count_unions(_wire_schema(captured)) <= adapter.MAX_UNION_PARAMETERS
 
-    def count(node: Any) -> int:
-        if isinstance(node, dict):
-            here = 1 if "anyOf" in node or isinstance(node.get("type"), list) else 0
-            return here + sum(count(child) for child in node.values())
-        if isinstance(node, list):
-            return sum(count(child) for child in node)
-        return 0
 
-    schema = captured.kwargs["output_config"]["format"]["schema"]
-    assert count(schema) <= adapter.MAX_UNION_PARAMETERS
+def test_the_schema_on_the_wire_is_within_the_grammar_size_budget(
+    captured: _RecordedCall,
+) -> None:
+    """The incident's *second* ceiling, on the payload rather than on the constant.
+
+    All three ceilings were being checked against `EXTRACTION_SCHEMA` in
+    tests/regression/, bridged to the wire by a single `is` assertion. That is one
+    identity holding three claims up: replace `_bbox_schema` with a nested object of
+    plain (non-nullable) numbers and the union count stays legal while the grammar
+    overruns — the regression file caught it and the *wire* contract did not, because
+    the wire contract only counted unions.
+
+    Grammar size and nesting now travel with the request too, so each ceiling is
+    asserted where it is actually enforced.
+    """
+    size = len(json.dumps(_wire_schema(captured), separators=(",", ":")))
+    assert size <= GRAMMAR_SIZE_BUDGET_BYTES, f"{size} bytes on the wire"
+
+
+def test_the_schema_on_the_wire_stays_shallow(captured: _RecordedCall) -> None:
+    """Nesting is what the compiled grammar grows fastest with."""
+    assert _object_nesting(_wire_schema(captured)) <= MAX_OBJECT_NESTING
+
+
+def test_the_wire_checks_would_catch_the_shipped_schema(captured: _RecordedCall) -> None:
+    """Teeth, and specifically for the ceiling the union count cannot see.
+
+    A nested four-number bbox with no unions at all keeps the union count legal. If the
+    size and nesting assertions above were satisfied by it, they would be decoration.
+    """
+    schema = json.loads(json.dumps(_wire_schema(captured)))
+    plain_nested_bbox = {
+        "type": "object",
+        "properties": {axis: {"type": "number"} for axis in ("x0", "y0", "x1", "y1")},
+        "required": ["x0", "y0", "x1", "y1"],
+        "additionalProperties": False,
+    }
+    for name in FieldName:
+        schema["properties"]["fields"]["properties"][name.value]["properties"]["bbox"] = (
+            json.loads(json.dumps(plain_nested_bbox))
+        )
+
+    assert _count_unions(schema) <= adapter.MAX_UNION_PARAMETERS, (
+        "the union count alone should NOT catch this shape — that is the point"
+    )
+    assert len(json.dumps(schema, separators=(",", ":"))) > GRAMMAR_SIZE_BUDGET_BYTES
+    assert _object_nesting(schema) > MAX_OBJECT_NESTING
 
 
 def test_the_whole_request_is_json_serialisable(captured: _RecordedCall) -> None:

@@ -105,18 +105,27 @@ def test_a_genuinely_dark_photograph_is_still_penalised() -> None:
     assert quality.exposure_score(_dim(_label(), 0.06)) < thresholds.HOPELESS
 
 
-def test_the_thresholds_module_declares_no_exposure_ceiling() -> None:
-    """The constant that used to exist must stay gone.
+def test_no_ceiling_can_exist_because_the_score_saturates_and_stays_there() -> None:
+    """The constant that used to exist must stay gone — asserted as behaviour.
 
-    Pinned on the module rather than on behaviour so that reintroducing the ceiling is
-    caught the moment the constant reappears, before any scoring logic uses it.
+    The earlier version searched `dir(thresholds)` for a name containing EXPOSURE and
+    CEIL/MAX/OVER, and its pass condition was an empty match set. A ceiling
+    reintroduced as `BRIGHT_LIMIT`, `GLARE_MEAN_CAP`, or a literal in `exposure_score`
+    would satisfy it — and a name grep whose empty result is the pass is exactly the
+    shape of check this file exists to distrust.
+
+    What actually rules a ceiling out is that the score reaches 1.0 at the floor and
+    never comes back down, all the way to pure white. No ceiling of any name, in any
+    module, can be in force while that holds.
     """
-    ceiling_names = [
-        name
-        for name in dir(thresholds)
-        if "EXPOSURE" in name and ("CEIL" in name or "MAX" in name or "OVER" in name)
-    ]
-    assert ceiling_names == []
+    at_floor = int(thresholds.EXPOSURE_FLOOR)
+    scores = {
+        level: quality.exposure_score(np.full((64, 64, 3), level, dtype=np.uint8))
+        for level in range(at_floor, 256)
+    }
+    assert set(scores.values()) == {1.0}, {
+        level: score for level, score in scores.items() if score != 1.0
+    }
 
 
 # --------------------------------------------------------------------------------------

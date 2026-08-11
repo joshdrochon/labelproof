@@ -207,6 +207,27 @@ def test_every_test_function_names_a_behaviour_rather_than_a_function() -> None:
     assert offenders == [], offenders
 
 
+
+def _skip_marks(module: Path) -> list[tuple[int, str]]:
+    """Every `@pytest.mark.skip(...)` in a module, with its argument text."""
+    import ast
+
+    source = module.read_text()
+    found: list[tuple[int, str]] = []
+    for node in ast.walk(ast.parse(source)):
+        if not isinstance(node, ast.Call):
+            continue
+        target = node.func
+        parts: list[str] = []
+        while isinstance(target, ast.Attribute):
+            parts.append(target.attr)
+            target = target.value
+        if parts[:2] != ["skip", "mark"]:
+            continue
+        found.append((node.lineno, ast.get_source_segment(source, node) or ""))
+    return found
+
+
 def test_no_test_is_skipped_or_xfailed_without_a_reason() -> None:
     """A bare `skip` is a test nobody will ever turn back on.
 
@@ -215,12 +236,9 @@ def test_no_test_is_skipped_or_xfailed_without_a_reason() -> None:
     """
     offenders: list[str] = []
     for module in _test_modules():
-        text = module.read_text()
-        # Anchored on the decorator so prose in a docstring is not mistaken for one.
-        for match in re.finditer(r"@pytest\.mark\.(skip|xfail)\b([^)]*)", text):
-            if "reason=" not in match.group(2):
-                line = text[: match.start()].count("\n") + 1
-                offenders.append(f"{module.relative_to(TESTS)}:{line} {match.group(1)}")
+        for line, text in _xfail_reasons(module) + _skip_marks(module):
+            if "reason=" not in text:
+                offenders.append(f"{module.relative_to(TESTS)}:{line}")
     assert offenders == [], offenders
 
 
@@ -233,25 +251,70 @@ def test_every_xfail_is_strict() -> None:
     """
     offenders: list[str] = []
     for module in _test_modules():
-        text = module.read_text()
-        for match in re.finditer(r"@pytest\.mark\.xfail\(([^)]*)", text, re.S):
-            if "strict=True" not in match.group(1):
-                line = text[: match.start()].count("\n") + 1
+        for line, text in _xfail_reasons(module):
+            if "strict=True" not in text:
                 offenders.append(f"{module.relative_to(TESTS)}:{line}")
     assert offenders == [], offenders
+
+
+def _xfail_reasons(module: Path) -> list[tuple[int, str]]:
+    """Every `@pytest.mark.xfail(...)` in a module, with its full argument text.
+
+    Parsed with `ast` rather than by regex. The regex version required the closing
+    paren on a line of its own — `pytest\\.mark\\.xfail\\((.*?)\\n\\)` — so a
+    single-line `@pytest.mark.xfail(strict=True, reason="no owner named")` matched
+    nothing at all and the check passed vacuously on it. A test whose empty match set
+    is its pass condition is the thing this file exists to find.
+    """
+    import ast
+
+    source = module.read_text()
+    found: list[tuple[int, str]] = []
+    for node in ast.walk(ast.parse(source)):
+        if not isinstance(node, ast.Call):
+            continue
+        target = node.func
+        parts: list[str] = []
+        while isinstance(target, ast.Attribute):
+            parts.append(target.attr)
+            target = target.value
+        if parts[:2] != ["xfail", "mark"]:
+            continue
+        found.append((node.lineno, ast.get_source_segment(source, node) or ""))
+    return found
 
 
 def test_every_pinned_defect_names_the_file_that_owns_it() -> None:
     """A defect report with no owner is a defect report nobody reads.
 
-    Each xfail reason ends by naming the module to change, so the person who picks it
-    up starts in the right file.
+    Each xfail reason names the module to change, so the person who picks it up starts
+    in the right file.
     """
     offenders: list[str] = []
-    for module in sorted((TESTS / "regression").rglob("test_*.py")):
-        text = module.read_text()
-        for match in re.finditer(r"pytest\.mark\.xfail\((.*?)\n\)", text, re.S):
-            if "Owner:" not in match.group(1):
-                line = text[: match.start()].count("\n") + 1
+    for module in sorted(TESTS.rglob("test_*.py")):
+        for line, text in _xfail_reasons(module):
+            if "Owner:" not in text:
                 offenders.append(f"{module.relative_to(TESTS)}:{line}")
     assert offenders == [], offenders
+
+
+def test_the_owner_check_sees_a_single_line_xfail() -> None:
+    """The teeth. The previous regex matched nothing on one, and passed.
+
+    Parsed from a literal here rather than from a real test, so the check is exercised
+    against the exact shape that used to slip past it.
+    """
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as directory:
+        probe = Path(directory) / "test_probe.py"
+        probe.write_text(
+            "import pytest\n\n"
+            '@pytest.mark.xfail(strict=True, reason="no owner named here at all")\n'
+            "def test_x() -> None:\n    pass\n"
+        )
+        found = _xfail_reasons(probe)
+
+    assert len(found) == 1, "a single-line xfail was not seen at all"
+    assert "Owner:" not in found[0][1]
+    assert "strict=True" in found[0][1], "the whole call was captured, not a fragment"

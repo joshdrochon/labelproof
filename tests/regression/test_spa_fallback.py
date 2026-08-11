@@ -52,6 +52,8 @@ def spa_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> TestClient:
     (dist / "index.html").write_text(f"<html>{INDEX_MARKER}</html>")
     (dist / "assets" / "app.js").write_text("console.log('app');")
     (dist / "favicon.ico").write_bytes(b"\x00\x00\x01\x00")
+    # Outside dist on purpose: this is what a traversal would reach.
+    (tmp_path / CANARY_NAME).write_text(CANARY_CONTENTS)
 
     monkeypatch.setattr(main_module, "_WEB_DIST", dist)
     app = create_app(config=Config(use_fake_provider=True), provider=None)
@@ -154,17 +156,83 @@ def test_the_health_endpoint_still_answers_with_the_spa_mounted(
     assert spa_client.get("/health").json() == {"status": "ok"}
 
 
+#: Written into `web/dist`'s *parent* by the fixture. If any of its contents come back
+#: over HTTP, the fallback read a file outside the directory it is allowed to serve.
+CANARY_NAME = "CANARY.txt"
+CANARY_CONTENTS = "CANARY-CONTENTS-MUST-NOT-LEAK"
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        # Percent-encoded, and aimed at a canary file that actually exists.
+        #
+        # The earlier version of this test requested "/../pyproject.toml" literally and
+        # asserted the response did not contain a marker from that file. httpx collapses
+        # `/..` client-side, so the traversal never reached the app — deleting the
+        # containment check in `_install_spa` left the test green. Three tests above in
+        # this same file percent-encode for exactly this reason and explain why; this
+        # one did not. That is how a security test ends up asserting nothing.
+        #
+        # Aiming at a canary rather than at a repository file matters too: a probe for a
+        # file that does not resolve cannot leak whether containment is checked or not.
+        f"/..%2f{CANARY_NAME}",
+        f"/%2e%2e%2f{CANARY_NAME}",
+        f"/assets%2f..%2f..%2f{CANARY_NAME}",
+        f"/..%2f..%2f{CANARY_NAME}",
+        f"/..%5c{CANARY_NAME}",
+    ],
+)
 def test_a_traversal_attempt_never_escapes_the_dist_directory(
-    spa_client: TestClient,
+    spa_client: TestClient, path: str
 ) -> None:
     """The fallback resolves candidates and checks containment before serving.
 
     `..` segments in a client-side route are not a routing question, they are a file
-    read on the server. Anything that resolves outside `web/dist` falls back to the app
-    rather than being read.
+    read on the server. Anything resolving outside `web/dist` must fall back to the app
+    rather than being read off disk.
     """
-    response = spa_client.get("/../pyproject.toml")
-    assert "[tool.pytest.ini_options]" not in response.text
+    response = spa_client.get(path)
+    assert CANARY_CONTENTS not in response.text
+
+
+def test_the_canary_is_readable_when_the_traversal_is_not_blocked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The teeth: the canary is real, reachable, and the probe path is the right shape.
+
+    Without this the test above could pass because the canary was never written, or
+    because the encoding no longer produces a traversal at all — both of which look
+    exactly like "containment works". Here the same request is made against a fallback
+    with containment removed, and the canary comes back.
+    """
+    from fastapi import FastAPI
+    from fastapi.responses import FileResponse
+
+    dist = tmp_path / "dist"
+    dist.mkdir(parents=True)
+    (dist / "index.html").write_text(f"<html>{INDEX_MARKER}</html>")
+    (tmp_path / CANARY_NAME).write_text(CANARY_CONTENTS)
+
+    # The same catch-all `_install_spa` registers, at the same route shape, minus the
+    # one line under test. The route shape matters: `/{full_path:path}` is what lets a
+    # percent-encoded separator survive into the parameter, and a prefixed probe route
+    # would not reproduce that.
+    app = FastAPI()
+
+    @app.get("/{full_path:path}", include_in_schema=False)
+    def unguarded(full_path: str) -> FileResponse:
+        candidate = (dist / full_path).resolve()
+        if candidate.is_file():  # `_install_spa`'s check, with containment removed
+            return FileResponse(candidate)
+        return FileResponse(dist / "index.html")
+
+    client = TestClient(app, raise_server_exceptions=False)
+    leaked = client.get(f"/..%2f{CANARY_NAME}")
+    assert CANARY_CONTENTS in leaked.text, (
+        "the probe does not reach a file read at all, so the containment test above "
+        "cannot be proving anything"
+    )
 
 
 # --------------------------------------------------------------------------------------

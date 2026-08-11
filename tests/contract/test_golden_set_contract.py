@@ -225,8 +225,8 @@ def _pending_exempts_a_warning_from_the_gate() -> bool:
         "capability is already tracked by a strict xfail in "
         "tests/e2e/test_verify_flows.py, which is the honest place for it.\n"
         "Closing EITHER half clears this: stop honouring `pending` in "
-        "is_warning_false_pass (owner: eval/run.py), or drop the marker from the "
-        "warning expectation (owner: fixtures/generator/catalog.py)."
+        "is_warning_false_pass, or drop the marker from the warning expectation.\n"
+        "Owner: eval/run.py, fixtures/generator/catalog.py."
     ),
 )
 def test_no_government_warning_case_is_exempted_from_the_false_pass_gate(
