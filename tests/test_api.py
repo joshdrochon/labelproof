@@ -670,19 +670,27 @@ def test_the_interactive_paths_are_routes_that_exist() -> None:
 def api_overhead_ms(body: dict[str, Any]) -> int:
     """Everything the request spent that was not the model call.
 
-    Ingest, quality scoring, the rules engine, and serialization — the part of PERF-1 this
-    codebase controls.
+    Ingest, quality scoring, the rules engine — the part of PERF-1 this codebase controls.
+
+    Two things this number is not. It is measured server-side and stamped before the
+    response is serialized and before either middleware unwinds, so it runs a few
+    milliseconds narrower than a client's wall clock; that is the right choice for
+    gating our own work and the wrong number to quote as a round trip. And against the
+    fixture provider `extract` is 0, so here the subtraction is a no-op and this is simply
+    the total — `test_the_overhead_measurement_excludes_the_model_call` is what proves the
+    subtraction does its job when there is something to subtract.
     """
     timings = body["timings_ms"]
     return int(timings["total"]) - int(timings["extract"])
 
 
 #: Ceiling on our own overhead for a two-image verification, p95 over a warm process.
-#: Measured at ~130 ms on a developer laptop; this sits roughly eight times above that, so
-#: it catches a real regression (an accidental re-decode, an O(n^2) merge, a synchronous
-#: disk write) without flaking on a loaded CI box. It is also the number the 5-second gate
-#: needs: under a second here leaves four for the model.
-API_OVERHEAD_CEILING_MS = 1000
+#: Thirty samples on a developer laptop ran 124-134 ms with a ±4% spread, so this is a
+#: little over twice the worst observed. It was 1000 ms, which is 7.5x — wide enough that
+#: an accidental re-decode (~3x) would have passed in silence, and 400 ms of our own
+#: overhead is not noise against a model that takes 9.6s. The margin is for a loaded CI
+#: box, not for regressions.
+API_OVERHEAD_CEILING_MS = 300
 
 
 def test_the_api_layer_stays_under_its_share_of_the_five_second_budget() -> None:
@@ -730,36 +738,56 @@ def test_the_overhead_measurement_excludes_the_model_call() -> None:
     assert api_overhead_ms(body) < API_OVERHEAD_CEILING_MS
 
 
+#: The pre-gated path does one image's ingest and quality scoring and then stops. Fifteen
+#: samples ran 37-42 ms; 150 ms is ~3.5x that. Sharing API_OVERHEAD_CEILING_MS here would
+#: have been meaningless — a path that measures 38 ms told to stay under 300 is not being
+#: measured at all.
+PREGATE_CEILING_MS = 150
+
+
 def test_a_pre_gated_request_is_faster_still() -> None:
-    """The cheap path must stay cheap: no model call, no wait for one."""
+    """The cheap path must stay cheap: no model call, and no wait for one.
+
+    Cheapness is the entire argument for the pre-gate, so it is worth a number rather than
+    an adjective. Refusing an unreadable image has to cost visibly less than checking a
+    readable one, or the gate is only saving tokens and not time.
+    """
     client = make_client(provider=FailingProvider())
     files = [("images", ("dark.png", png_bytes((2, 2, 2)), "image/png"))]
     body = post_verify(client, files=files).json()
-    assert body["timings_ms"]["total"] < API_OVERHEAD_CEILING_MS
+
+    assert body["timings_ms"]["total"] < PREGATE_CEILING_MS
+    assert body["timings_ms"]["extract"] == 0, "the pre-gate let a model call through"
 
 
 # --- ENG-2: the sample-to-verdict smoke (LP-116) ----------------------------------------
 
-#: PERF-1's headline number. Asserted here in fixture mode, where it is a statement about
-#: this process and nothing else — see the docstring below.
-SMOKE_CEILING_SECONDS = 5.0
+#: Deliberately NOT five seconds. Ten runs of the walk below took 0.142-0.167s, so an
+#: `assert elapsed < 5.0` was an assertion nothing could trip — and worse, it was PERF-1's
+#: headline number sitting green under a comment naming it. The docstring disclaimer is
+#: the mitigation; the assertion is the hazard, and the assertion is what survives a grep
+#: in six months. This is ~4.5x the worst observed: it catches a real regression on the
+#: sample walk and it cannot be mistaken for evidence that PERF-1 holds in production.
+E2E_CEILING_SECONDS = 0.75
 
 
 def test_sample_to_verdict_smoke(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """LP-116, ENG-2 — the grader's whole first minute, in fixture mode, under 5s.
+    """LP-116, ENG-2 — the grader's whole first minute, in fixture mode.
 
     The walk is the real one: load the page, ask for the sample, fetch both images, post
     them to /verify, read a recommendation. Every hop goes over HTTP through the app the
     container serves, with the SPA present, and the only thing swapped out is the model
-    (ENG-3 — CI passes offline or it is not CI).
+    (ENG-3 — CI passes offline or it is not CI). The wiring is the point; the timing
+    assertion is a floor on this walk and is deliberately not PERF-1's five seconds.
 
-    THE 5s HERE IS NOT THE DEPLOYED p95. The provider is a fixture that answers instantly,
-    so this bounds our own overhead plus the round trips, not the model. Live extraction
-    was measured at 9.6s median on Opus 5 and 5.5s on Haiku 4.5; the 5-second budget does
-    not hold against either without the split concurrent call, and proving it against the
-    deployed URL is LP-144's job, not this test's. A green run here means the app is
-    wired end to end and adds nothing meaningful to the model's time. It does not mean
-    PERF-1 is met in production, and it must never be quoted as though it did.
+    NOTHING HERE IS THE DEPLOYED p95. The provider is a fixture that answers instantly, so
+    the ceiling bounds our own overhead plus four round trips through a test harness, not
+    the model. Live extraction was measured at 9.6s median on Opus 5 and 5.5s on Haiku
+    4.5; the 5-second budget does not hold against either without the split concurrent
+    call, and proving it against the deployed URL is LP-144's job, not this test's. A
+    green run here means the app is wired end to end and adds nothing meaningful to the
+    model's time. It does not mean PERF-1 is met in production, and it must never be
+    quoted as though it did — which is why the number below is not five seconds.
     """
     built_spa(tmp_path, monkeypatch)
     client = make_client(storage_dir=str(tmp_path / "data"))
@@ -792,7 +820,7 @@ def test_sample_to_verdict_smoke(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     assert len(body["fields"]) == 7
     assert body["request_id"] == response.headers["X-Request-ID"]
 
-    assert elapsed < SMOKE_CEILING_SECONDS, (
+    assert elapsed < E2E_CEILING_SECONDS, (
         f"sample to verdict took {elapsed:.2f}s in fixture mode, against a "
-        f"{SMOKE_CEILING_SECONDS:g}s ceiling"
+        f"{E2E_CEILING_SECONDS:g}s ceiling — this is a floor on our own work, not PERF-1"
     )
