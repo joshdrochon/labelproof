@@ -140,13 +140,15 @@ ban-relative-imports = "parents"
 # S101: pytest's entire assertion model is `assert`. Banning it in tests is nonsense.
 # SIM300: `assert actual == expected` is the universal test idiom; SIM300 reads a
 #         module-level CONSTANT as a literal and wants the comparison flipped.
-"tests/**" = ["S101", "SIM300"]
+"tests/**" = ["S101", "SIM300", "S603", "S607"]
 # S608: the only f-string in these DELETEs is `?,?,?` — a placeholder count. Every value
 #       is still a bound parameter (api/batch/store.py, purge_expired).
 "api/batch/store.py" = ["S608"]
-# S607: `git` and friends are resolved from PATH on purpose; hard-coding /usr/bin/git
-#       breaks on every machine that isn't the author's.
-"scripts/**" = ["S607"]
+# S603/S607: both scripts shell out to `git` only. The executable is resolved from PATH
+#       on purpose — hard-coding /usr/bin/git breaks on every machine that isn't the
+#       author's — and every argument is a repo-internal literal. No user input reaches
+#       either call. `shell=True` appears nowhere in this repository.
+"scripts/**" = ["S603", "S607"]
 
 # --- type-narrowing asserts in the request path ---------------------------------------
 # Starlette types every exception handler's `exc` as bare `Exception`, so the handler
@@ -218,7 +220,7 @@ pretty = true
 # and `Any` leaking out of fixture loaders). They are excluded from the gate, not from
 # the intent — closing that is follow-up work, and leaving them silently passing under a
 # narrower flag set would be worse than naming the gap here.
-files = ["api", "scripts/sync_board.py"]
+files = ["api", "scripts/sync_board.py", "scripts/scan_secrets.py"]
 
 [[tool.mypy.overrides]]
 module = ["cv2.*", "pillow_heif.*", "pypdfium2.*"]

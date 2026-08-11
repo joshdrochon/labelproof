@@ -1,0 +1,54 @@
+# Pre-commit hooks (LP-006, LP-010).
+#
+# Every hook is `repo: local`. The framework's usual pattern — pinning a rev of
+# github.com/astral-sh/ruff-pre-commit and friends — clones a repository and builds an
+# isolated environment on first run, which means `pre-commit install` needs the network
+# and the ruff it installs can drift from the one CI runs. Local hooks call the tools
+# already declared in pyproject's `dev` extra, at the exact pinned versions, so a
+# developer's pre-commit result and a CI result cannot disagree.
+#
+# This file is OPTIONAL. `.githooks/pre-commit` runs the secrets scan with no installs at
+# all, and `scripts/install_hooks.sh` wires it up from a clean clone. Use pre-commit if
+# you already have it; nothing depends on it.
+#
+#     pip install pre-commit && pre-commit install
+#     pre-commit run --all-files
+
+repos:
+  - repo: local
+    hooks:
+      - id: scan-secrets
+        name: scan for credentials (SEC-6)
+        description: >-
+          Blocks the commit if a staged file carries anything credential-shaped, or is
+          itself a secret-bearing file (.env, *.pem, id_rsa).
+        entry: python3 scripts/scan_secrets.py --staged
+        language: system
+        pass_filenames: false
+        always_run: true
+
+      - id: ruff-check
+        name: ruff (lint)
+        entry: ruff check --force-exclude
+        language: system
+        types_or: [python, pyi]
+        require_serial: true
+
+      - id: mypy-strict
+        name: mypy --strict
+        # Scope comes from pyproject's `files`, not from the staged set: strict checking
+        # one file in isolation reports errors that a whole-project run does not.
+        entry: mypy
+        language: system
+        types_or: [python, pyi]
+        pass_filenames: false
+        require_serial: true
+
+      - id: pytest
+        name: pytest (offline, fixtures only)
+        entry: python -m pytest -q
+        language: system
+        types_or: [python, pyi]
+        pass_filenames: false
+        require_serial: true
+        stages: [pre-push]
