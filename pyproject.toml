@@ -88,6 +88,17 @@ select = [
     "PLE",   # pylint ERRORS only — incl. PLE2515, invisible characters in source
 ]
 
+ignore = [
+    # RUF001 (ambiguous character in a STRING) stays on: a homoglyph inside a literal can
+    # change what a comparison does, and this codebase compares label text for a living.
+    # RUF002/RUF003 are the same check against docstrings and comments, where the
+    # character cannot reach any behaviour at all. The repo's prose is written with real
+    # typography — `9.4–10.1s` uses an en dash because it is a numeric range — and
+    # demanding a hyphen there is a style opinion wearing a security rule's clothing.
+    "RUF002",
+    "RUF003",
+]
+
 # Deliberately NOT selected, with the reason, so the next engineer does not re-litigate:
 #   ANN   — api/ is already fully annotated and `mypy --strict` proves it; ANN would only
 #           add noise to tests, where annotations buy nothing.

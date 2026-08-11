@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
+from typing import Final
 
 
 class ConfigError(RuntimeError):
