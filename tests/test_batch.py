@@ -14,12 +14,15 @@ that fails, under a provider that raises something nobody anticipated, and at fu
 
 from __future__ import annotations
 
+import asyncio
 import csv
 import io
 import json
 import threading
 import time
+import tracemalloc
 import zipfile
+from collections.abc import Iterator, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -268,6 +271,182 @@ def test_the_shipped_app_mounts_the_batch_router(tmp_path: Path) -> None:
         if getattr(route, "original_router", None) is batch_routes.router
     ]
     assert mounted, "api/main.py does not mount api.routes.batch"
+
+
+# --- upload memory (BATCH-2, PERF-4) ----------------------------------------------------
+#
+# A real dump is 300 applications and ~600 photographs, over a gigabyte. The route used to
+# read every part into a list and check the total afterwards, so peak memory was a multiple
+# of the upload and the container was OOM-killed — which kills six workers mid-item and
+# takes per-item isolation down with them. Nothing bounded it except a 41 MB whole-request
+# ceiling that also refused every real batch, so raising that ceiling and spooling to disk
+# are one fix, not two.
+
+
+def multipart_stream(
+    parts: Sequence[tuple[str, str, bytes | Iterator[bytes]]],
+    boundary: str = "----labelproofprobe",
+) -> Iterator[bytes]:
+    """Yield a multipart body in pieces, never assembling it.
+
+    A single shared chunk object is re-yielded for bulk content on purpose: the point of
+    the measurement is what the *server* retains, so the generator must not put the upload
+    in memory on the client's behalf.
+    """
+    for field, filename, content in parts:
+        yield (
+            f"--{boundary}\r\n"
+            f'Content-Disposition: form-data; name="{field}"; filename="{filename}"\r\n'
+            f"Content-Type: application/octet-stream\r\n\r\n"
+        ).encode()
+        if isinstance(content, bytes):
+            yield content
+        else:
+            yield from content
+        yield b"\r\n"
+    yield f"--{boundary}--\r\n".encode()
+
+
+def asgi_post(app: Any, path: str, body: Iterator[bytes]) -> tuple[int, Any]:
+    """POST by driving the ASGI app directly, with a body that is never resident in full.
+
+    TestClient cannot be used here. httpx does `b"".join(self.stream)` before it sends, so
+    the whole upload lands in memory on the client side — which both hides whether the
+    server did the same and makes any measurement meaningless. Driving the app by hand is
+    also the only way to send a body with NO `Content-Length`: that is the shape a
+    `Transfer-Encoding: chunked` upload arrives in, and it skips the whole-request ceiling
+    in `api/main.py` entirely, so the cap has to hold without it.
+    """
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0", "spec_version": "2.3"},
+        "http_version": "1.1",
+        "method": "POST",
+        "scheme": "http",
+        "path": path,
+        "raw_path": path.encode(),
+        "query_string": b"",
+        "root_path": "",
+        "headers": [
+            (b"host", b"testserver"),
+            (b"content-type", b"multipart/form-data; boundary=----labelproofprobe"),
+            (b"transfer-encoding", b"chunked"),
+        ],
+        "client": ("testclient", 50000),
+        "server": ("testserver", 80),
+    }
+
+    async def receive() -> dict[str, Any]:
+        try:
+            return {"type": "http.request", "body": next(body), "more_body": True}
+        except StopIteration:
+            return {"type": "http.request", "body": b"", "more_body": False}
+
+    sent: list[dict[str, Any]] = []
+
+    async def send(message: dict[str, Any]) -> None:
+        sent.append(message)
+
+    asyncio.run(app(scope, receive, send))
+
+    status = next(m["status"] for m in sent if m["type"] == "http.response.start")
+    payload = b"".join(m.get("body", b"") for m in sent if m["type"] == "http.response.body")
+    return status, json.loads(payload) if payload else None
+
+
+ONE_MB = b"\x89PNG\r\n\x1a\n" + b"q" * (1024 * 1024 - 8)
+
+
+def megabytes(count: int) -> Iterator[bytes]:
+    for _ in range(count):
+        yield ONE_MB
+
+
+def test_a_large_upload_is_spooled_rather_than_held(tmp_path: Path) -> None:
+    """120 MB of artwork must not cost 120 MB of RSS. BATCH-2's dump is ten times this.
+
+    Measured with tracemalloc around the whole request, so what is asserted is what the
+    process retained while the route ran. Before the fix this tracked the upload almost
+    exactly; the ceiling here is a small multiple of a chunk, which is what O(1) looks
+    like.
+    """
+    app = create_app(config=make_config(tmp_path), provider=spec_provider())
+    files = 15
+    body = multipart_stream(
+        [("manifest", "manifest.csv", manifest_csv([row()]).encode())]
+        + [("files", f"f{n}.png", megabytes(8)) for n in range(files)]
+    )
+
+    tracemalloc.start()
+    tracemalloc.reset_peak()
+    try:
+        status, _ = asgi_post(app, "/batch", body)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+
+    uploaded = files * 8 * 1024 * 1024
+    assert status in (200, 400)  # the manifest names one image; the rest are unmatched
+    assert peak < 24 * 1024 * 1024, (
+        f"the route retained {peak / 1e6:.0f} MB while {uploaded / 1e6:.0f} MB was "
+        f"uploaded — the upload is being held, not spooled"
+    )
+
+
+def test_the_batch_cap_holds_without_a_content_length(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A chunked upload declares no length, so the whole-request ceiling never sees it.
+
+    `api/main._too_large_to_read` returns None when `Content-Length` is absent, which is
+    correct — it cannot check what it was not told — but it means the ONLY bound on a
+    chunked upload is the running total counted as the bytes land. This is that bound.
+    """
+    monkeypatch.setattr(batch_routes, "MAX_TOTAL_BYTES", 4 * 1024 * 1024)
+    app = create_app(config=make_config(tmp_path), provider=spec_provider())
+    body = multipart_stream([("files", "big.png", megabytes(16))])
+
+    status, payload = asgi_post(app, "/batch", body)
+    assert status == 400
+    assert payload["error"]["code"] == "batch_too_large"
+    assert payload["error"]["next_step"] == "reduce"
+
+
+def test_a_refused_upload_leaves_no_artwork_behind(tmp_path: Path) -> None:
+    """SEC-2 — a rejected gigabyte must not sit in staging waiting for a sweep."""
+    client = make_client(tmp_path)
+    response = post_batch(client, [], manifest_text="not,a,manifest\n1,2,3\n")
+    assert response.status_code == 400
+
+    store: BatchStore = client.app.state.batch_store
+    assert list(store.staging_root.iterdir()) == []
+
+
+def test_accepted_artwork_is_moved_out_of_staging_not_copied(tmp_path: Path) -> None:
+    """The staged file becomes the stored file. Copying would double peak disk on a dump."""
+    client = make_client(tmp_path, provider=spec_provider())
+    job_id = post_batch(client, [row()]).json()["job_id"]
+
+    store: BatchStore = client.app.state.batch_store
+    assert list(store.staging_root.iterdir()) == []
+    assert store.read_image(job_id, GOOD_IMAGE) == GOOD_BYTES
+    drain(client)
+
+
+def test_staging_a_killed_process_left_behind_is_swept(tmp_path: Path) -> None:
+    """`staging()` cleans up after itself on every ordinary path; this is for SIGKILL.
+
+    Which is precisely when a gigabyte of someone's label artwork is most likely to be
+    sitting there and least likely to be noticed.
+    """
+    store = BatchStore(tmp_path)
+    abandoned = store.staging_root / "up_deadprocess"
+    abandoned.mkdir()
+    (abandoned / "0000001").write_bytes(GOOD_BYTES)
+
+    assert store.purge_staging(now=time.time()) == 0, "a fresh upload was swept mid-flight"
+    assert store.purge_staging(now=time.time() + 7200) == 1
+    assert not abandoned.exists()
 
 
 # --- the store (LP-147, LP-152, LP-158, BATCH-6) ---------------------------------------

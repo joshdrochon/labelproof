@@ -11,9 +11,18 @@ under a second, no held connection. Everything else is fetched afterwards.
 not come back numbered, with the column named. Three bad rows out of 300 must not send an
 agent back to processing them one at a time (TC-20).
 
+**Nothing is held in memory.** A real batch is 300 applications and roughly 600
+photographs — over a gigabyte. Every part is spooled to disk a chunk at a time, the caps
+are enforced as the bytes land rather than after the upload is resident, and the files an
+item needs are renamed into the job directory rather than read out and written back. The
+first version built `list[(name, bytes)]` and checked the total afterwards, which made
+peak memory a multiple of the upload; the only thing bounding it was a whole-request
+ceiling so low it refused every real batch, so the two had to be fixed together.
+
 **Archive contents are hostile.** A zip can name `../../etc/passwd`, expand a kilobyte
 into a gigabyte, or carry ten thousand entries. Names are reduced to their last segment,
-every entry is size-capped before it is read, and the entry count is capped too (SEC-5).
+every entry is size-capped before it is read *and* bounded again as it is decompressed —
+the declared size is the attacker's number — and the entry count is capped too (SEC-5).
 
 **The reader never waits on the writer.** `GET /batch/{id}` reads whatever has landed —
 finished items are readable while the rest of the job runs, which is the entire point of
@@ -165,22 +174,101 @@ def _safe_name(name: str) -> str:
     return Path(name.replace("\\", "/")).name.strip()
 
 
-def _expand(uploads: list[tuple[str, bytes]], config: Config) -> dict[str, bytes]:
-    """Flatten the upload into `name -> bytes`, expanding any archives (LP-150, LP-151).
+#: Bytes moved per read while a part is spooled to disk. Big enough that a gigabyte is not
+#: a million syscalls, small enough that resident memory is a rounding error whatever the
+#: upload weighs.
+_CHUNK_BYTES = 1024 * 1024
+
+
+def _too_much() -> errors.UserError:
+    return errors.UserError(
+        f"That upload holds more than this tool accepts in one batch. Split it into "
+        f"batches of up to {MAX_ROWS} applications and upload them separately. Nothing "
+        f"has been checked.",
+        next_step="reduce",
+        code="batch_too_large",
+    )
+
+
+class _Landing:
+    """Disk-backed staging for one upload, with the total cap enforced as bytes arrive.
+
+    This is not a convenience. `create_batch` used to build `list[(name, bytes)]` and
+    check `MAX_TOTAL_BYTES` after the list was complete, which meant the cap could only
+    fire once the whole upload was already resident — measured at 693 MB of RSS for
+    240 MB of content, because the read, the dict and any archive expansion all coexist.
+    Extrapolated to the 1.2 GB dump this feature exists for, the container is OOM-killed:
+    six workers die mid-item, and items left `processing` are only recovered on the next
+    `BatchStore` construction. Per-item isolation survives one bad image and does not
+    survive the process dying, so this is the failure that costs the whole server.
+
+    Bytes now go from the socket to a file one chunk at a time and the running total is
+    checked on every chunk. That bounds resident memory to a chunk regardless of upload
+    size — and it bounds a `Transfer-Encoding: chunked` upload, which declares no length
+    and so never meets the whole-request ceiling in `api/main.py` at all.
+    """
+
+    def __init__(self, root: Path):
+        self.root = root
+        self.total = 0
+        self._sequence = 0
+
+    def _slot(self) -> Path:
+        self._sequence += 1
+        return self.root / f"{self._sequence:07d}"
+
+    def _account(self, size: int) -> None:
+        self.total += size
+        if self.total > MAX_TOTAL_BYTES:
+            raise _too_much()
+
+    async def spool(self, upload: UploadFile) -> Path:
+        """Stream one multipart part to disk, refusing the moment the batch is too big."""
+        path = self._slot()
+        with path.open("wb") as sink:
+            while chunk := await upload.read(_CHUNK_BYTES):
+                self._account(len(chunk))
+                sink.write(chunk)
+        return path
+
+    def unpack(self, archive: zipfile.ZipFile, entry: zipfile.ZipInfo, limit: int) -> Path:
+        """Decompress one entry to disk, reading at most `limit` + 1 bytes.
+
+        The +1 is the point: `entry.file_size` is a number the attacker wrote, so a bomb
+        that declares a kilobyte and expands to a gigabyte is stopped by the read bound
+        rather than by the declaration, and the extra byte is what makes the lie visible
+        to the caller's size check.
+        """
+        path = self._slot()
+        remaining = limit + 1
+        with archive.open(entry) as source, path.open("wb") as sink:
+            while remaining > 0:
+                chunk = source.read(min(_CHUNK_BYTES, remaining))
+                if not chunk:
+                    break
+                remaining -= len(chunk)
+                self._account(len(chunk))
+                sink.write(chunk)
+        return path
+
+
+def _expand(
+    staged: Sequence[tuple[str, Path]], landing: _Landing, config: Config
+) -> dict[str, Path]:
+    """Flatten the upload into `name -> path on disk`, expanding any archives (LP-150, LP-151).
 
     Multi-select and a zip land in the same place on purpose: an agent who cannot make a
     zip on a locked-down desktop should not be blocked from batch mode, and one who can
     should not have to select 600 files (UX-7).
     """
-    files: dict[str, bytes] = {}
-    total = 0
+    files: dict[str, Path] = {}
 
-    def add(name: str, data: bytes) -> None:
-        nonlocal total
+    def add(name: str, path: Path) -> None:
         clean = _safe_name(name)
         if not clean or clean.startswith("."):
             return
-        if len(data) > config.max_image_bytes:
+        size = path.stat().st_size
+        if size > config.max_image_bytes:
             raise errors.UserError(
                 f"“{clean}” is larger than "
                 f"{config.max_image_bytes // (1024 * 1024)} MB. Save the label images at "
@@ -188,33 +276,31 @@ def _expand(uploads: list[tuple[str, bytes]], config: Config) -> dict[str, bytes
                 next_step="resize",
                 code="file_too_large",
             )
-        total += len(data)
-        if total > MAX_TOTAL_BYTES or len(files) >= MAX_FILES:
-            raise errors.UserError(
-                f"That upload holds more than this tool accepts in one batch. Split it "
-                f"into batches of up to {MAX_ROWS} applications and upload them "
-                f"separately.",
-                next_step="reduce",
-                code="batch_too_large",
-            )
-        files[clean] = data
+        if len(files) >= MAX_FILES:
+            raise _too_much()
+        files[clean] = path
 
-    for name, data in uploads:
+    for name, path in staged:
         if _safe_name(name).lower().endswith(_ARCHIVE_SUFFIX):
-            for inner_name, inner_data in _read_archive(name, data, config):
-                add(inner_name, inner_data)
+            for inner_name, inner_path in _read_archive(name, path, landing, config):
+                add(inner_name, inner_path)
         else:
-            add(name, data)
+            add(name, path)
 
     return files
 
 
 def _read_archive(
-    name: str, data: bytes, config: Config
-) -> list[tuple[str, bytes]]:
-    """Read a zip defensively: capped entries, capped sizes, names reduced to basenames."""
+    name: str, path: Path, landing: _Landing, config: Config
+) -> list[tuple[str, Path]]:
+    """Read a zip defensively: capped entries, capped sizes, names reduced to basenames.
+
+    Opened from the path rather than from `BytesIO`, so a 2 GB archive is read through the
+    filesystem's own buffer instead of being resident in full before the first entry is
+    even listed.
+    """
     try:
-        archive = zipfile.ZipFile(io.BytesIO(data))
+        archive = zipfile.ZipFile(path)
     except zipfile.BadZipFile as exc:
         raise errors.UserError(
             f"“{_safe_name(name)}” could not be opened as a zip file. Re-create "
@@ -233,34 +319,53 @@ def _read_archive(
             code="batch_too_large",
         )
 
-    out: list[tuple[str, bytes]] = []
-    for entry in entries:
-        if entry.is_dir():
-            continue
-        clean = _safe_name(entry.filename)
-        if not clean or clean.startswith(".") or "__MACOSX" in entry.filename:
-            continue
-        # The declared size is checked before a byte is decompressed, so a zip bomb is
-        # refused rather than expanded and then measured.
-        if entry.file_size > config.max_image_bytes:
-            raise errors.UserError(
-                f"“{clean}” inside that archive is larger than "
-                f"{config.max_image_bytes // (1024 * 1024)} MB. Save the label images at "
-                f"a smaller size and upload the batch again.",
-                next_step="resize",
-                code="file_too_large",
-            )
-        with archive.open(entry) as handle:
-            out.append((clean, handle.read(config.max_image_bytes + 1)))
+    out: list[tuple[str, Path]] = []
+    with archive:
+        for entry in entries:
+            if entry.is_dir():
+                continue
+            clean = _safe_name(entry.filename)
+            if not clean or clean.startswith(".") or "__MACOSX" in entry.filename:
+                continue
+            # The declared size is checked before a byte is decompressed, so an honest
+            # oversized entry is refused rather than expanded and then measured. A
+            # dishonest one is caught by the read bound inside `unpack`.
+            if entry.file_size > config.max_image_bytes:
+                raise errors.UserError(
+                    f"“{clean}” inside that archive is larger than "
+                    f"{config.max_image_bytes // (1024 * 1024)} MB. Save the label images at "
+                    f"a smaller size and upload the batch again.",
+                    next_step="resize",
+                    code="file_too_large",
+                )
+            out.append((clean, landing.unpack(archive, entry, config.max_image_bytes)))
     return out
 
 
 def _manifest_text(
-    supplied: UploadFile | None, supplied_bytes: bytes | None, files: dict[str, bytes]
+    supplied: Path | None, files: dict[str, Path], config: Config
 ) -> str:
-    """The manifest, whether it arrived as its own part or inside the archive."""
-    if supplied is not None and supplied_bytes:
-        return supplied_bytes.decode("utf-8-sig", errors="replace")
+    """The manifest, whether it arrived as its own part or inside the archive.
+
+    Read into memory, because parsing a CSV is not a streaming operation — but only after
+    the same per-file cap every other part gets, so "the manifest" is not a way to hand
+    this process a gigabyte of text.
+    """
+
+    def text_of(path: Path) -> str:
+        if path.stat().st_size > config.max_image_bytes:
+            raise errors.UserError(
+                f"That manifest is larger than "
+                f"{config.max_image_bytes // (1024 * 1024)} MB, which is far larger than a "
+                f"list of {MAX_ROWS} applications. Send the manifest as a spreadsheet "
+                f"exported to CSV.",
+                next_step="fix_manifest",
+                code="file_too_large",
+            )
+        return path.read_bytes().decode("utf-8-sig", errors="replace")
+
+    if supplied is not None and supplied.stat().st_size:
+        return text_of(supplied)
 
     candidates = [
         name
@@ -268,7 +373,7 @@ def _manifest_text(
         if name.lower().endswith(_MANIFEST_SUFFIXES)
     ]
     if len(candidates) == 1:
-        return files.pop(candidates[0]).decode("utf-8-sig", errors="replace")
+        return text_of(files.pop(candidates[0]))
     if len(candidates) > 1:
         raise errors.UserError(
             "That upload holds more than one spreadsheet, so there is no way to tell "
@@ -310,64 +415,74 @@ async def create_batch(
 
     # Retention runs at the one moment we know the process is alive and doing batch work.
     # A sweeper thread would be a second thing to supervise for a job that has a natural
-    # hook right here (SEC-2, LP-152).
+    # hook right here (SEC-2, LP-152). The read paths refuse an expired job in the
+    # meantime, so this is a disk sweep and not the guarantee itself.
     if purged := store.purge_expired():
         applog.log("batch_purged", count=len(purged))
+    if abandoned := store.purge_staging():
+        applog.log("batch_staging_purged", count=abandoned)
 
-    uploads: list[tuple[str, bytes]] = []
-    for upload in files or []:
-        uploads.append((upload.filename or "", await upload.read()))
+    with store.staging() as scratch:
+        landing = _Landing(scratch)
 
-    manifest_bytes = await manifest.read() if manifest is not None else None
-    supplied = _expand(uploads, config)
-    text = _manifest_text(manifest, manifest_bytes, supplied)
+        # Spooled before anything is parsed, so peak memory is one chunk rather than the
+        # whole dump, and the cap fires on the chunk that crosses it.
+        staged: list[tuple[str, Path]] = []
+        for upload in files or []:
+            staged.append((upload.filename or "", await landing.spool(upload)))
+        manifest_path = await landing.spool(manifest) if manifest is not None else None
 
-    try:
-        parsed = manifest_mod.parse(text)
-    except manifest_mod.ManifestError as exc:
-        raise errors.UserError(
-            str(exc), next_step="fix_manifest", code="unreadable_manifest"
-        ) from exc
+        supplied = _expand(staged, landing, config)
+        text = _manifest_text(manifest_path, supplied, config)
 
-    if len(parsed.rows) > MAX_ROWS:
-        raise errors.UserError(
-            f"That manifest lists {len(parsed.rows)} applications and this tool takes "
-            f"{MAX_ROWS} at a time. Split it into smaller manifests and upload them "
-            f"separately.",
-            next_step="reduce",
-            code="batch_too_large",
+        try:
+            parsed = manifest_mod.parse(text)
+        except manifest_mod.ManifestError as exc:
+            raise errors.UserError(
+                str(exc), next_step="fix_manifest", code="unreadable_manifest"
+            ) from exc
+
+        if len(parsed.rows) > MAX_ROWS:
+            raise errors.UserError(
+                f"That manifest lists {len(parsed.rows)} applications and this tool takes "
+                f"{MAX_ROWS} at a time. Split it into smaller manifests and upload them "
+                f"separately.",
+                next_step="reduce",
+                code="batch_too_large",
+            )
+
+        pairing = manifest_mod.pair(parsed.rows, list(supplied))
+        row_errors: list[RowError] = sorted(
+            parsed.errors + pairing.errors, key=lambda e: (e.row, e.column or "")
+        )
+        queueable = [row for row in parsed.rows if row.row in pairing.resolved]
+
+        if not queueable:
+            raise errors.UserError(
+                _nothing_queueable_message(row_errors, pairing.unmatched),
+                next_step="fix_manifest",
+                code="no_valid_rows",
+            )
+
+        job = store.create_job(
+            row_errors=row_errors,
+            unmatched_files=pairing.unmatched,
+            retention_hours=config.retention_hours,
         )
 
-    pairing = manifest_mod.pair(parsed.rows, list(supplied))
-    row_errors: list[RowError] = sorted(
-        parsed.errors + pairing.errors, key=lambda e: (e.row, e.column or "")
-    )
-    queueable = [row for row in parsed.rows if row.row in pairing.resolved]
+        # Renamed, not copied: the staged file *becomes* the stored one. Files nobody's
+        # row named are never moved and go out with the staging directory.
+        referenced: set[str] = set()
+        for row in queueable:
+            for name in pairing.resolved[row.row]:
+                if name not in referenced:
+                    store.adopt_image(job.job_id, name, supplied[name])
+                    referenced.add(name)
 
-    if not queueable:
-        raise errors.UserError(
-            _nothing_queueable_message(row_errors, pairing.unmatched),
-            next_step="fix_manifest",
-            code="no_valid_rows",
+        store.add_items(
+            job.job_id,
+            [(row.row, row.application, pairing.resolved[row.row]) for row in queueable],
         )
-
-    job = store.create_job(
-        row_errors=row_errors,
-        unmatched_files=pairing.unmatched,
-        retention_hours=config.retention_hours,
-    )
-
-    referenced: set[str] = set()
-    for row in queueable:
-        for name in pairing.resolved[row.row]:
-            if name not in referenced:
-                store.save_image(job.job_id, name, supplied[name])
-                referenced.add(name)
-
-    store.add_items(
-        job.job_id,
-        [(row.row, row.application, pairing.resolved[row.row]) for row in queueable],
-    )
 
     get_pool(request).start()
 

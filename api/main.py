@@ -195,11 +195,18 @@ def _size_ceiling(request: Request) -> tuple[int, errors.LabelProofError]:
 def _too_large_to_read(request: Request) -> errors.LabelProofError | None:
     """Reject an impossible upload before a byte of it is buffered.
 
-    `ingest` and the batch route enforce the real per-file and per-job caps, but only once
-    the body has been spooled — which is a long, expensive way to say no to a 2 GB post.
-    The declared length is only a hint (it can be absent, and it can lie), so this is a
-    cheap first door, not the lock. The ceilings are derived from the configured caps and
-    the batch limits, so raising either raises this too.
+    This is a cheap first door, not the lock, and it is important to be exact about which.
+    `Content-Length` is a hint: it can be absent — a `Transfer-Encoding: chunked` upload
+    declares no length and never meets this check at all — and it can lie. So nothing here
+    bounds anything on its own.
+
+    The real bounds live downstream and are enforced as bytes arrive, not after they have
+    all arrived: `pipeline.ingest` for a single verification, and `routes.batch._Landing`
+    for a batch, which counts the running total on every chunk it spools. An earlier
+    version of this docstring said the batch route "enforces the real per-job cap", which
+    was true of disk and false of memory — that cap ran after the whole upload was already
+    resident, and this ceiling was the only thing accidentally preventing an OOM. Raising
+    the ceiling for batch removed that accident, so the two were fixed together.
     """
     declared = request.headers.get("content-length")
     if not declared or not declared.isdigit():

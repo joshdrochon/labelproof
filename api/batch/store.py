@@ -17,6 +17,12 @@ it six times. `RETURNING` would be shorter but pins a SQLite version; this does 
 **Image bytes live on the filesystem, not in a column.** 600 images of a few hundred KB
 each is not what SQLite is for, and a directory is what the TTL sweep already knows how to
 delete (SEC-2).
+
+**An upload lands on disk before it lands anywhere else.** `staging()` hands the route a
+scratch directory on the same filesystem as the store, so a 1.2 GB importer dump is spooled
+rather than held, and the files an item actually needs are then *renamed* into the job
+directory by `adopt_image` instead of being read out and written back. A rename is atomic
+and free; reading 1.2 GB into memory to write it out again is neither.
 """
 
 from __future__ import annotations
@@ -25,6 +31,7 @@ import hashlib
 import json
 import shutil
 import sqlite3
+import tempfile
 import threading
 import time
 import uuid
@@ -104,6 +111,10 @@ class BatchStore:
         self.db_path = self.root / "jobs.db"
         self.images_root = self.root / "batches"
         self.images_root.mkdir(parents=True, exist_ok=True)
+        # Deliberately a sibling of `batches` and not a system temp dir: `adopt_image`
+        # renames across it, and a rename only stays atomic and free within one filesystem.
+        self.staging_root = self.root / "staging"
+        self.staging_root.mkdir(parents=True, exist_ok=True)
         # Serialises this process's writers so `BEGIN IMMEDIATE` contention stays inside
         # a lock we control rather than inside SQLite's busy-wait, which burns CPU across
         # every batch worker at once.
@@ -383,11 +394,60 @@ class BatchStore:
         directory.mkdir(parents=True, exist_ok=True)
         (directory / stored_name(supplied_name)).write_bytes(data)
 
+    def adopt_image(self, job_id: str, supplied_name: str, source: Path) -> None:
+        """Move an already-staged file into the job directory.
+
+        The upload path uses this rather than `save_image` because `save_image` takes
+        `bytes`, and calling it means reading the file back into memory to write it out
+        again — 600 photographs' worth, for no gain. `Path.replace` is a rename within one
+        filesystem: atomic, constant-memory, and it frees the staging copy as it goes.
+        """
+        directory = self.images_root / job_id
+        directory.mkdir(parents=True, exist_ok=True)
+        source.replace(directory / stored_name(supplied_name))
+
     def read_image(self, job_id: str, supplied_name: str) -> bytes | None:
         path = self.images_root / job_id / stored_name(supplied_name)
         if not path.is_file():
             return None
         return path.read_bytes()
+
+    # --- staging ---------------------------------------------------------------------
+
+    @contextmanager
+    def staging(self) -> Iterator[Path]:
+        """A scratch directory for one upload, removed however this call ends.
+
+        The route spools every incoming part in here before anything is parsed, so
+        resident memory stays flat whatever the upload weighs. The `finally` matters as
+        much as the directory: a refused upload — a bad zip, an unreadable manifest, a
+        batch over the cap — must not leave a gigabyte of someone's label artwork behind
+        on the way out (SEC-2).
+        """
+        directory = Path(tempfile.mkdtemp(prefix="up_", dir=self.staging_root))
+        try:
+            yield directory
+        finally:
+            shutil.rmtree(directory, ignore_errors=True)
+
+    def purge_staging(self, *, older_than_seconds: float = 3600.0, now: float | None = None) -> int:
+        """Drop staging directories a killed process could not clean up itself.
+
+        `staging()` removes its own on every ordinary path, so this only ever finds the
+        leavings of a SIGKILL or an OOM — which is exactly when a gigabyte of label
+        artwork is most likely to be sitting there, and least likely to be noticed.
+        """
+        moment = time.time() if now is None else now
+        removed = 0
+        for directory in self.staging_root.glob("up_*"):
+            try:
+                if moment - directory.stat().st_mtime <= older_than_seconds:
+                    continue
+            except OSError:
+                continue
+            shutil.rmtree(directory, ignore_errors=True)
+            removed += 1
+        return removed
 
     # --- retention -------------------------------------------------------------------
 
