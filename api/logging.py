@@ -72,6 +72,10 @@ EVENTS: dict[str, tuple[int, str]] = {
         logging.INFO,
         "One pipeline stage's duration (OPS-1). One line per stage per request.",
     ),
+    "verification_cost": (
+        logging.INFO,
+        "Tokens and dollars for one verification (OPS-4).",
+    ),
     "verify_complete": (logging.INFO, "A verification produced a recommendation."),
     "verify_pregated": (
         logging.INFO,

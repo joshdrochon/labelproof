@@ -49,7 +49,6 @@ from api.provider.base import (
     ExtractionProvider,
     ImageInput,
     ProviderError,
-    ProviderUsage,
 )
 from api.routes import get_config, provider_for
 from api.verify import verify as run_verification
@@ -332,9 +331,14 @@ async def verify_endpoint(
     # The pipeline measured extract and compare from inside itself; this adds the two
     # stages only the route can see and stops the one clock that owns `total`.
     timer.merge_into(result.timings_ms)
-    result.cost.usd = _estimated_usd(result.cost)
+    result.cost.usd = timing.usd_for(result.cost)
 
     timing.emit(result.timings_ms, count=len(result.fields))
+    # The provider name rides along so a sample-mode run can never be mistaken for a
+    # priced one when the cost lines are summed for the cost analysis (OPS-4).
+    timing.cost_line(
+        result.cost, model=config.extraction_model, provider=getattr(provider, "name", "")
+    )
     applog.log(
         "verify_complete",
         recommendation=result.aggregate.recommendation.value,
@@ -345,28 +349,6 @@ async def verify_endpoint(
         usd=result.cost.usd,
     )
     return result
-
-
-def _estimated_usd(cost: Cost) -> float:
-    """Price the token counts the pipeline already returned (OPS-4).
-
-    The pricing table belongs to the provider layer, so this borrows it rather than
-    copying the numbers — a second copy of a price list is a second thing to get wrong.
-    Imported lazily and failure-tolerantly: a cost line is worth showing, and never worth
-    failing a verification over.
-    """
-    if not (cost.input_tokens or cost.output_tokens):
-        return 0.0
-    try:
-        from api.provider.anthropic_adapter import estimated_usd
-
-        return estimated_usd(
-            ProviderUsage(
-                input_tokens=cost.input_tokens, output_tokens=cost.output_tokens
-            )
-        )
-    except Exception:
-        return 0.0
 
 
 async def _verify_within_budget(

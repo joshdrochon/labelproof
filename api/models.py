@@ -142,8 +142,17 @@ class Timings(BaseModel):
 
 
 class Cost(BaseModel):
+    """What one verification cost (OPS-4).
+
+    `cache_read_tokens` is carried separately because it is *priced* separately — a tenth
+    of an input token. The provider's `input_tokens` excludes cache reads, so leaving this
+    field off does not make the number conservative, it makes cached tokens free. A cost
+    analysis that under-claims is as wrong as one that over-claims.
+    """
+
     input_tokens: int = 0
     output_tokens: int = 0
+    cache_read_tokens: int = 0
     usd: float = 0.0
 
 

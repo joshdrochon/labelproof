@@ -39,7 +39,7 @@ from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 
 from api import logging as applog
-from api.models import Timings
+from api.models import Cost, Timings
 
 #: Stages measured directly by a clock. `preprocess` is absent on purpose — see the
 #: module docstring; it is derived, and deriving it twice is how the two copies diverge.
@@ -167,3 +167,54 @@ def emit(timings: Timings, *, ok: bool = True, **fields: object) -> None:
             applog.log(
                 "stage_complete", stage=name, duration_ms=duration, ok=ok, **fields
             )
+
+
+def usd_for(cost: Cost) -> float:
+    """List-price cost of one verification (OPS-4).
+
+    The price list belongs to the provider adapter, so this borrows it rather than
+    copying the numbers — a second copy of a price list is a second thing to get wrong,
+    and the one that is wrong is always the copy.
+
+    Imported lazily and failure-tolerantly. The adapter pulls in the Anthropic SDK, which
+    is not needed to price a pair of integers, and a cost line is worth showing but never
+    worth failing a verification over.
+    """
+    if not (cost.input_tokens or cost.output_tokens or cost.cache_read_tokens):
+        return 0.0
+    try:
+        from api.provider.anthropic_adapter import estimated_usd
+        from api.provider.base import ProviderUsage
+
+        return estimated_usd(
+            ProviderUsage(
+                input_tokens=cost.input_tokens,
+                output_tokens=cost.output_tokens,
+                cache_read_tokens=cost.cache_read_tokens,
+            )
+        )
+    except Exception:
+        return 0.0
+
+
+def cost_line(cost: Cost, *, model: str = "", **fields: object) -> None:
+    """The per-request cost line (LP-118, OPS-4).
+
+    A dedicated event rather than three more keys on `verify_complete`, because the Cost
+    Analysis deliverable is produced by grepping one event name out of a log file and
+    summing a column. Tokens and dollars are the only two things this line is for.
+
+    Cached reads are carried separately because they are priced separately — a tenth of
+    an input token. Folding them into `input_tokens` would make a warm-cache request look
+    ten times more expensive than it is; dropping them entirely, which is what happened
+    before `Cost` carried the field, made it look free.
+    """
+    applog.log(
+        "verification_cost",
+        input_tokens=cost.input_tokens,
+        output_tokens=cost.output_tokens,
+        cache_read_tokens=cost.cache_read_tokens,
+        usd=cost.usd if cost.usd else usd_for(cost),
+        model=model,
+        **fields,
+    )

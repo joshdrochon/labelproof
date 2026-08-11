@@ -1,4 +1,4 @@
-"""Stage latency and the honesty check (LP-063, LP-126).
+"""Stage latency, cost accounting and the honesty check (LP-063, LP-118, LP-126).
 
 Two things are under test here and they are not the same thing.
 
@@ -28,8 +28,12 @@ from api import logging as applog
 from api import timing
 from api.config import Config
 from api.main import create_app
-from api.models import Commodity, Timings
-from api.provider.base import ExtractionRequest, ExtractionResponse
+from api.models import Commodity, Cost, Timings
+from api.provider.base import (
+    ExtractionRequest,
+    ExtractionResponse,
+    ProviderUsage,
+)
 from api.provider.fake import SpecBackedProvider
 from fixtures.generator.catalog import by_name
 
@@ -73,6 +77,25 @@ class SlowProvider:
     def extract(self, request: ExtractionRequest) -> ExtractionResponse:
         time.sleep(self.delay_s)
         return self._inner.extract(request)
+
+
+class CountingProvider:
+    """Reports token usage including cached reads, so the cost line can be checked."""
+
+    name = "fake:counting"
+
+    def __init__(self, spec: str = "tc16_front_back") -> None:
+        self._inner = SpecBackedProvider(by_name(spec))
+
+    def extract(self, request: ExtractionRequest) -> ExtractionResponse:
+        response = self._inner.extract(request)
+        response.usage = ProviderUsage(
+            input_tokens=9840,
+            output_tokens=1120,
+            cache_read_tokens=4000,
+            model="claude-opus-5",
+        )
+        return response
 
 
 def make_client(
@@ -261,6 +284,59 @@ def test_stage_lines_carry_no_label_content() -> None:
     assert {"stage", "duration_ms", "ok"} <= ALLOWED_FIELDS
 
 
+# --- cost (LP-118) -------------------------------------------------------------------
+
+
+def test_cost_line_carries_tokens_in_out_and_dollars(logs: io.StringIO) -> None:
+    timing.cost_line(
+        Cost(input_tokens=9840, output_tokens=1120, usd=0.0772), model="claude-opus-5"
+    )
+    line = next(x for x in lines(logs) if x["event"] == "verification_cost")
+    assert line["input_tokens"] == 9840
+    assert line["output_tokens"] == 1120
+    assert line["usd"] == pytest.approx(0.0772)
+    assert line["model"] == "claude-opus-5"
+
+
+def test_the_price_list_is_borrowed_from_the_adapter_not_copied() -> None:
+    """One price list. `estimated_usd` is the only place the numbers live."""
+    from api.provider.anthropic_adapter import estimated_usd
+
+    cost = Cost(input_tokens=9840, output_tokens=1120, cache_read_tokens=4000)
+    expected = estimated_usd(
+        ProviderUsage(input_tokens=9840, output_tokens=1120, cache_read_tokens=4000)
+    )
+    assert timing.usd_for(cost) == expected
+
+
+def test_cached_reads_are_priced_rather_than_free() -> None:
+    """Provider `input_tokens` excludes cache reads. Dropping them under-claims cost."""
+    without = timing.usd_for(Cost(input_tokens=1000, output_tokens=100))
+    with_cache = timing.usd_for(
+        Cost(input_tokens=1000, output_tokens=100, cache_read_tokens=100_000)
+    )
+    assert with_cache > without
+
+
+def test_a_request_that_spent_nothing_is_priced_at_zero() -> None:
+    assert timing.usd_for(Cost()) == 0.0
+
+
+def test_pricing_never_fails_a_verification(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A cost line is worth showing and never worth a 500."""
+    import builtins
+
+    real_import = builtins.__import__
+
+    def explode(name: str, *args: Any, **kwargs: Any) -> Any:
+        if "anthropic_adapter" in name:
+            raise ImportError("no sdk here")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", explode)
+    assert timing.usd_for(Cost(input_tokens=100, output_tokens=10)) == 0.0
+
+
 # --- the stages reach the agent (LP-063, PRD §Observability) --------------------------
 
 
@@ -284,8 +360,19 @@ def test_preprocess_is_a_real_measurement_not_a_placeholder() -> None:
     assert stages["preprocess"] > 0
 
 
-def test_a_verification_writes_its_stage_lines(logs: io.StringIO) -> None:
-    post_verify(make_client(logs=logs))
+def test_the_cost_block_reaches_the_agent() -> None:
+    body = post_verify(make_client(provider=CountingProvider())).json()
+    assert body["cost"]["input_tokens"] == 9840
+    assert body["cost"]["output_tokens"] == 1120
+    assert body["cost"]["cache_read_tokens"] == 4000
+    assert body["cost"]["usd"] > 0
+
+
+def test_a_verification_writes_its_stage_and_cost_lines(logs: io.StringIO) -> None:
+    post_verify(make_client(provider=CountingProvider(), logs=logs))
+    events = {line["event"] for line in lines(logs)}
+    assert "stage_complete" in events
+    assert "verification_cost" in events
     assert {"preprocess", "extract", "compare"} <= set(stage_lines(logs))
 
 

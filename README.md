@@ -94,6 +94,7 @@ lists one nothing emits.
 | `request_complete` | INFO | One HTTP request finished. Carries status and total duration. |
 | `request_failed` | INFO | A request ended in the error taxonomy. Carries kind, code, status. |
 | `stage_complete` | INFO | One pipeline stage's duration (OPS-1). One line per stage per request. |
+| `verification_cost` | INFO | Tokens and dollars for one verification (OPS-4). |
 | `unhandled_exception` | ERROR | Something broke that nobody anticipated. The agent got a sentence, not a trace. |
 | `verify_complete` | INFO | A verification produced a recommendation. |
 | `verify_over_budget` | INFO | The request budget expired; partial result returned as Needs review. |
