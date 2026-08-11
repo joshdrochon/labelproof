@@ -284,10 +284,30 @@ def _ran_the_whole_suite(session: pytest.Session) -> bool:
     `pytest tests/properties` reports that the rest of the suite did not run — which
     the developer already knows — and the lesson learned is to pass a skip flag, which
     then gets pasted into CI.
+
+    **Compares resolved paths, not the strings the user typed.** The first version
+    compared literal selection strings against a small allowlist, so with a rules module
+    dropped to 90.9% against a 100% floor:
+
+        pytest tests   -> exit 1, gate fired
+        pytest tests/  -> exit 0, SILENT
+        pytest ./tests -> exit 0, SILENT
+
+    A trailing slash turned the release gate off, and printed the coverage table on the
+    way past so the run still looked measured. Any CI line written `pytest tests/` —
+    which is how most people write it — enforced nothing. That is the same shape as an
+    eval gate bypassed by one word, in the file whose job is to stop that.
     """
     selected = list(session.config.option.file_or_dir or [])
-    testpaths = [str(ROOT / path) for path in session.config.getini("testpaths")]
-    return selected in ([], testpaths, [str(ROOT / "tests")], ["tests"])
+    if not selected:
+        return True
+    configured = {(ROOT / path).resolve() for path in session.config.getini("testpaths")}
+    configured.add((ROOT / "tests").resolve())
+    try:
+        chosen = {Path(path).resolve() for path in selected}
+    except (OSError, ValueError):  # pragma: no cover - a selection like "tests::foo"
+        return False
+    return chosen <= configured
 
 
 def _live_coverage(session: pytest.Session) -> Any:
@@ -325,7 +345,20 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
     global threshold and the floor that matters is per-module, and because this hook
     knows whether the whole suite ran.
     """
+    reporter = session.config.pluginmanager.get_plugin("terminalreporter")
+
     if session.config.getoption("--no-cov-gate", default=False):
+        # Announced, not silent. A bypass flag ends up pasted into a CI file eventually,
+        # and the only thing that stops it living there for a year is that every run
+        # says so in the output somebody is already reading.
+        if reporter is not None:
+            reporter.write_line("")
+            reporter.write_line(
+                "COVERAGE GATE DISABLED by --no-cov-gate. Coverage was measured and "
+                "NOT enforced (LP-245). Do not use this flag in CI.",
+                yellow=True,
+                bold=True,
+            )
         return
     if exitstatus not in (0, pytest.ExitCode.OK):
         return  # already failing; a coverage complaint would only bury the real error
@@ -377,7 +410,6 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
 
     if failures:
         session.exitstatus = 1
-        reporter = session.config.pluginmanager.get_plugin("terminalreporter")
         if reporter is not None:
             reporter.write_line("")
             reporter.write_line("COVERAGE FLOOR NOT MET (LP-245):", red=True, bold=True)

@@ -25,8 +25,12 @@ below is organised around closing that gap and keeping it closed.
 .venv/bin/python -m pytest -m regression
 .venv/bin/python -m pytest -m e2e
 .venv/bin/python -m pytest -m "tc"         # every canonical PRD case
-.venv/bin/python -m pytest --no-cov-gate   # measure coverage, do not enforce the floors
+.venv/bin/python -m pytest --no-cov-gate   # local debugging only — NEVER in CI
 ```
+
+`--no-cov-gate` measures coverage and enforces nothing. It prints a loud banner when
+used, and `tests/meta/test_coverage_gate.py` fails if it appears in any checked-in CI or
+shell file. Use it while chasing a local failure, never anywhere that gates a merge.
 
 Coverage is measured on **every** invocation — a number you have to remember to ask for
 is a number nobody has. The floors are enforced only on a full-suite run, so
