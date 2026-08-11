@@ -93,6 +93,27 @@ job. On exit code `3`, say so in the job name or the step summary — that one i
 accuracy regression, it is a compliance failure, and it should read differently to whoever
 is looking at the red build.
 
+## Tiers
+
+`--tier` selects the golden set. The default is `a`.
+
+| Value | Set | Gates CI |
+|---|---|---|
+| `a` | synthetic fixtures, deterministic, offline | **yes** — this is the CI run |
+| `b` | real bottle photographs, live model | never |
+| `all` | both, reported separately with the A↔B gap | only `a`'s gates count |
+
+Tier B's status appears in **every** run, including the default, so the gap is never
+invisible. When it is empty the report says so in plain language and reports no accuracy
+figure — `0/0` is not 100%, and a section that rendered 100% is the number that would end
+up in a submission. Populating it is documented in `../golden/tier_b/README.md`.
+
+Tier B never changes the exit code, even on a Tier B warning false pass. Small n and a live
+model make it flaky by nature, and gating on it would pressure whoever is on the hook into
+weakening the expectations. The one thing that *does* fail is a Tier B manifest that does
+not validate under `--tier b` — that is a repo defect rather than a model result, and it
+exits `2`.
+
 ## Not part of CI
 
 Two commands in this directory cost real money and must never run in the default job:

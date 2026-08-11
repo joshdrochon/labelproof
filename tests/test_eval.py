@@ -15,6 +15,7 @@ from pathlib import Path
 import pytest
 
 from api.models import FieldName, Verdict
+from eval import tier_b
 from eval.gates import (
     EXIT_ACCURACY,
     EXIT_HARNESS_ERROR,
@@ -591,6 +592,228 @@ def test_the_confusion_matrix_keeps_its_shape_when_the_data_changes() -> None:
         return sum(1 for line in lines[start:start + 9] if line.startswith((" ", "!")))
 
     assert grid(full) == grid(sparse)
+
+
+# --- Tier B: real bottle photographs (LP-332) --------------------------------------------------
+
+TIER_B_DIR = REPO / "golden" / "tier_b"
+
+
+def _tier_b_manifest(
+    tmp_path: Path,
+    labels: list[dict[str, object]],
+    absent: frozenset[str] = frozenset(),
+    **top: object,
+) -> Path:
+    """Write a Tier B manifest with one real image on disk per declared file.
+
+    `absent` names files the manifest declares but that are deliberately not written —
+    the case where a row points at a photograph nobody has.
+    """
+    images = tmp_path / "images"
+    images.mkdir(exist_ok=True)
+    source = REPO / "fixtures" / "labels" / "tc01_old_tom_clean.png"
+    for label in labels:
+        for image in label.get("images", []):  # type: ignore[union-attr]
+            name = str(image.get("file", ""))
+            if name and name not in absent and not (images / name).exists():
+                (images / name).write_bytes(source.read_bytes())
+
+    body: dict[str, object] = {"tier": "B", "gates_ci": False, "labels": labels}
+    body.update(top)
+    path = tmp_path / "manifest.json"
+    path.write_text(json.dumps(body, indent=2))
+    return path
+
+
+def _old_tom_row(**overrides: object) -> dict[str, object]:
+    spec = CATALOG[0]
+    row: dict[str, object] = {
+        "name": "b01_old_tom",
+        "commodity": "spirits",
+        "images": [{"file": "b01.png", "role": "single"}],
+        "application": spec.application(),
+        "expect": {},
+        "expect_findings": {},
+        "capture": {"conditions": "straight on"},
+        "ground_truth": "bootstrapped",
+        "notes": "Baseline straight-on shot.",
+    }
+    row.update(overrides)
+    return row
+
+
+def test_the_committed_tier_b_manifest_loads_clean() -> None:
+    """It ships empty, but it must be a valid empty rather than a broken one."""
+    loaded = tier_b.load()
+    assert loaded.problems == [], loaded.problems
+    assert loaded.is_empty
+    assert loaded.capture_guide, "the capture guide is the instruction for populating it"
+
+
+def test_tier_b_never_gates_by_construction() -> None:
+    assert tier_b.TIER_B_GATES is False
+
+
+def test_a_manifest_claiming_to_gate_is_rejected(tmp_path: Path) -> None:
+    """Flipping this flag would quietly reverse the one rule that keeps Tier B honest."""
+    path = _tier_b_manifest(tmp_path, [], gates_ci=True)
+    assert any("gates_ci" in p for p in tier_b.load(path).problems)
+
+
+def test_an_empty_tier_b_reports_no_accuracy_at_all(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """0 of 0 is not 100%, and a section that rendered 100% would end up in a submission."""
+    main(["--json", "--tier", "all"])
+    body = json.loads(capsys.readouterr().out)["tier_b"]
+    assert body["empty"] is True
+    assert body["accuracy"] is None
+    assert body["gap_pp"] is None
+
+
+def test_the_empty_state_says_so_in_plain_language() -> None:
+    text = render(evaluate(CATALOG), tier_b.load())
+    assert "Tier B" in text
+    assert "EMPTY" in text
+    assert "says NOTHING about real bottle photographs" in text
+    assert "0 of 0 is not" in text
+
+
+def test_tier_b_appears_even_in_the_default_tier_a_run(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The gap must never be invisible, so the status shows on every run."""
+    main([])
+    assert "Tier B" in capsys.readouterr().out
+
+
+def test_a_tier_b_false_pass_does_not_change_the_exit_code() -> None:
+    """Tier B is reported, never gating — including its safety-critical rows."""
+    tier_a = evaluate(CATALOG)
+    broken = Report(tier="B", outcomes=[warning_violation(actual=Verdict.MATCH)])
+    assert exit_code_for(gates_for(tier_a)) == EXIT_OK
+    text = render(tier_a, tier_b.load(), broken)
+    assert "Tier B does not gate" in text
+    assert text.strip().endswith("subset=false")
+
+
+def test_the_a_to_b_gap_is_published(tmp_path: Path) -> None:
+    tier_a = evaluate(CATALOG)
+    tier_b_report = Report(
+        tier="B",
+        outcomes=[outcome() for _ in range(9)]
+        + [outcome(expected=Verdict.MISMATCH, actual=Verdict.MATCH)],
+    )
+    text = render(tier_a, tier_b.load(), tier_b_report)
+    assert "A↔B accuracy gap" in text
+    assert "+10.0 pp" in text
+    assert "Blending them would hide the second" in text
+
+
+def test_tier_b_runs_end_to_end_against_a_populated_manifest(tmp_path: Path) -> None:
+    """The loader, the image read and the scoring, with the model stubbed out."""
+    from api.provider.fake import SpecBackedProvider
+
+    path = _tier_b_manifest(tmp_path, [_old_tom_row()])
+    loaded = tier_b.load(path)
+    assert loaded.problems == []
+    assert len(loaded.labels) == 1
+    assert loaded.labels[0].images[0].path.read_bytes()
+
+    report = tier_b.evaluate(
+        loaded.labels, lambda label, images: SpecBackedProvider(CATALOG[0])
+    )
+    assert report.tier == "B"
+    assert report.errors == []
+    assert report.total > 0
+    assert report.accuracy == 1.0
+
+
+def test_tier_b_loads_the_real_image_bytes(tmp_path: Path) -> None:
+    path = _tier_b_manifest(tmp_path, [_old_tom_row()])
+    label = tier_b.load(path).labels[0]
+    inputs = tier_b.image_inputs(label)
+    assert inputs[0].data.startswith(b"\x89PNG")
+    assert inputs[0].media_type == "image/png"
+
+
+@pytest.mark.parametrize(
+    ("overrides", "fragment"),
+    [
+        ({"commodity": "cider"}, "commodity"),
+        ({"expect": {"government_warning": "probably_fine"}}, "field/verdict"),
+        ({"expect": {"vintage": "match"}}, "field/verdict"),
+        ({"ground_truth": "trust_me"}, "ground_truth"),
+        ({"notes": "  "}, "no notes"),
+        ({"images": []}, "at least one entry"),
+        ({"application": {"brand_name": "x"}}, "not a valid record"),
+    ],
+)
+def test_the_loader_names_what_is_wrong(
+    tmp_path: Path, overrides: dict[str, object], fragment: str
+) -> None:
+    path = _tier_b_manifest(tmp_path, [_old_tom_row(**overrides)])
+    problems = tier_b.load(path).problems
+    assert any(fragment in p for p in problems), problems
+
+
+def test_a_declared_image_that_is_missing_is_a_defect_not_a_skip(tmp_path: Path) -> None:
+    """Scoring a row against an image nobody has would be worse than not scoring it."""
+    path = _tier_b_manifest(
+        tmp_path,
+        [_old_tom_row(images=[{"file": "gone.heic", "role": "front"}])],
+        absent=frozenset({"gone.heic"}),
+    )
+    loaded = tier_b.load(path)
+    assert any("is not in" in p for p in loaded.problems), loaded.problems
+    assert loaded.labels == []
+    assert not loaded.usable
+
+
+def test_duplicate_label_names_are_rejected(tmp_path: Path) -> None:
+    path = _tier_b_manifest(tmp_path, [_old_tom_row(), _old_tom_row()])
+    assert any("duplicate" in p for p in tier_b.load(path).problems)
+
+
+def test_a_broken_manifest_fails_the_run_that_asked_for_tier_b(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A malformed manifest is a repo defect, not a model result."""
+    path = _tier_b_manifest(tmp_path, [_old_tom_row(commodity="cider")])
+    monkeypatch.setattr(tier_b, "MANIFEST", path)
+    assert main(["--tier", "b"]) == EXIT_USAGE
+    # ...and does not break the run that never asked for it.
+    assert main([]) == EXIT_OK
+
+
+def test_tier_b_skips_rather_than_fails_without_credentials(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """An offline machine has not regressed. It has simply not measured this."""
+    path = _tier_b_manifest(tmp_path, [_old_tom_row()])
+    monkeypatch.setattr(tier_b, "MANIFEST", path)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+
+    assert main(["--json", "--tier", "b"]) == EXIT_OK
+    body = json.loads(capsys.readouterr().out)["tier_b"]
+    assert body["accuracy"] is None
+    assert "ANTHROPIC_API_KEY" in body["note"]
+
+
+def test_the_tier_b_readme_documents_the_row_shape() -> None:
+    """Dropping images in a directory is only the last step if the shape is written down."""
+    readme = (TIER_B_DIR / "README.md").read_text()
+    for key in ("images", "application", "expect", "ground_truth", "notes"):
+        assert key in readme
+    assert "python -m eval.run --tier b" in readme
+
+
+def test_tier_b_does_not_report_a_missing_warning_violation_as_a_hole() -> None:
+    """An approved label cannot carry a violation, so its absence is expected, not a gap."""
+    report = Report(tier="B", outcomes=[outcome()])
+    text = render(evaluate(CATALOG), tier_b.load(), report)
+    assert "an approved label carries no violation to find" in text.lower()
 
 
 # --- expectations are honest -----------------------------------------------------------------

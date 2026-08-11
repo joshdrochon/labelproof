@@ -1,0 +1,18 @@
+{
+  "tier": "B",
+  "gates_ci": false,
+  "description": "Tier B — real bottle photographs. Reported every run, never gates CI. Small n, nondeterministic, live model. The gap between this number and Tier A's is the honest answer to 'does this work', and it is a published metric rather than an embarrassment (BUILD.md section 5).",
+  "capture_guide": [
+    "6-8 photographs total, shot with a phone, originals unedited.",
+    "Mixed commodity: at least one spirits, one wine, one malt.",
+    "Front AND back of at least two products — the government warning usually lives on the back, which is TC-16.",
+    "2-3 straight-on and well lit. These are the baseline; if these fail, nothing else matters.",
+    "One at roughly 30 degrees off-axis (TC-11).",
+    "One dim but recoverable (TC-13).",
+    "One with flash on curved glass, so there is real specular glare (TC-12). Code cannot fake this, which is the whole reason Tier B exists.",
+    "Keep the HEIC originals. They exercise the HEIC path and give the ingest step real EXIF orientation to strip.",
+    "Ground truth is bootstrapped, not transcribed: run the label through the app, then confirm or correct each field by eye and record the corrected value here. Set ground_truth to hand_verified once a human has signed off on the row.",
+    "Known limitation, stated rather than papered over: warning-statement VIOLATIONS cannot appear here. A commercially approved label does not carry them by definition, so those cases stay simulated in Tier A."
+  ],
+  "labels": []
+}

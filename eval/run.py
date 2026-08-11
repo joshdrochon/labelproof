@@ -32,6 +32,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from api.config import Config, ConfigError
+from eval import live, tier_b
 from eval.gates import EXIT_USAGE, exit_code_for, gates_for
 from eval.outcomes import (
     ACCURACY_FLOOR,
@@ -59,10 +61,70 @@ __all__ = [
 ]
 
 
-def payload(report: Report) -> dict[str, Any]:
+def run_tier_b(
+    tier_b_set: tier_b.TierBSet, *, wanted: bool
+) -> tuple[Report | None, str]:
+    """Run Tier B if it was asked for and is runnable. Returns (report, note).
+
+    Every branch that does not produce a report explains itself, and none of them is a
+    failure: an empty set, a missing API key and a run that simply did not ask for Tier B
+    are three different kinds of "not measured", and the report says which.
+    """
+    if not wanted:
+        return None, ""
+    if not tier_b_set.usable:
+        return None, "not run — the manifest does not validate (see problems above)."
+    if tier_b_set.is_empty:
+        return None, "not run — there are no photographs yet."
+    if not live.has_credentials():
+        return None, live.NO_CREDENTIALS
+
+    try:
+        provider = live.build(Config.from_env().extraction_model)
+    except ConfigError as exc:
+        return None, f"SKIPPED — {exc}"
+
+    return tier_b.evaluate(tier_b_set.labels, provider), ""
+
+
+def payload(
+    report: Report,
+    tier_b_set: tier_b.TierBSet | None = None,
+    tier_b_report: Report | None = None,
+    tier_b_note: str = "",
+) -> dict[str, Any]:
     """The machine-readable form of a report, gates included (LP-122)."""
     gates = gates_for(report)
+    tier_b_body: dict[str, Any] | None = None
+    if tier_b_set is not None:
+        tier_b_body = {
+            "gates_ci": tier_b.TIER_B_GATES,
+            "labels_declared": len(tier_b_set.labels),
+            "hand_verified": tier_b_set.hand_verified,
+            "empty": tier_b_set.is_empty,
+            "usable": tier_b_set.usable,
+            "problems": tier_b_set.problems,
+            "note": tier_b_note,
+            # Deliberately absent when nothing was measured. A null here is unmistakable;
+            # a 1.0 from 0/0 is the number that would end up in a submission.
+            "accuracy": (
+                round(tier_b_report.accuracy, 4)
+                if tier_b_report is not None and tier_b_report.total
+                else None
+            ),
+            "total": tier_b_report.total if tier_b_report is not None else 0,
+            "false_passes": (
+                len(tier_b_report.false_passes) if tier_b_report is not None else 0
+            ),
+            "gap_pp": (
+                round((report.accuracy - tier_b_report.accuracy) * 100, 2)
+                if tier_b_report is not None and tier_b_report.total
+                else None
+            ),
+        }
+
     return {
+        "tier_b": tier_b_body,
         "gates": [g.as_dict() for g in gates],
         "exit_code": exit_code_for(gates),
         "status": "pass" if exit_code_for(gates) == 0 else "fail",
@@ -122,6 +184,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="also write the machine-readable payload here, for CI to keep as an artifact",
     )
     parser.add_argument(
+        "--tier",
+        choices=("a", "b", "all"),
+        default="a",
+        help=(
+            "which golden set to run. 'a' (default) is the synthetic, CI-gating set. "
+            "'b' is real bottle photographs — needs a live model, never gates."
+        ),
+    )
+    parser.add_argument(
         "--min-accuracy",
         type=float,
         default=ACCURACY_FLOOR,
@@ -163,12 +234,21 @@ def main(argv: list[str] | None = None) -> int:
         return EXIT_USAGE
 
     report = evaluate(specs, subset=bool(args.fixture), floor=args.min_accuracy)
-    body = payload(report)
+
+    wanted = args.tier in ("b", "all")
+    tier_b_set = tier_b.load()
+    tier_b_report, tier_b_note = run_tier_b(tier_b_set, wanted=wanted)
+
+    # A broken manifest is a repo defect, not a model result. It fails the run that asked
+    # for Tier B; in a run that did not, it is a printed warning and nothing more.
+    manifest_broken = wanted and not tier_b_set.usable
+
+    body = payload(report, tier_b_set, tier_b_report, tier_b_note)
 
     if args.json:
         print(json.dumps(body, indent=2, sort_keys=True))
     else:
-        print(render(report))
+        print(render(report, tier_b_set, tier_b_report, tier_b_note))
 
     if args.report_json:
         artifact = Path(args.report_json)
@@ -178,6 +258,14 @@ def main(argv: list[str] | None = None) -> int:
             # The status line is the last thing on stdout; keep it there.
             print(f"wrote {artifact}", file=sys.stderr)
 
+    if manifest_broken:
+        print(
+            "golden/tier_b/manifest.json does not validate — see the Tier B section above.",
+            file=sys.stderr,
+        )
+        return EXIT_USAGE
+
+    # Tier B never touches this. Only Tier A's gates set the exit code (BUILD.md §5).
     code: int = body["exit_code"]
     return code
 
