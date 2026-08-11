@@ -14,6 +14,7 @@ import itertools
 
 import pytest
 
+from api import canon
 from api.models import BoundingBox, Finding, WarningTypography
 from api.rules import typography
 
@@ -252,7 +253,7 @@ def test_every_finding_cites_the_regulation() -> None:
 
 def test_escalation_fires_when_a_bright_line_is_unresolved() -> None:
     signals = WarningTypography(header_is_bold=None, body_is_bold=False)
-    assert typography.needs_escalation(signals, warning_text="GOVERNMENT WARNING: ...")
+    assert typography.needs_escalation(signals, warning_text=canon.CANONICAL_WARNING)
 
 
 def test_escalation_fires_when_the_warning_could_not_be_read() -> None:
@@ -271,9 +272,61 @@ def test_escalation_fires_on_the_pass() -> None:
     pixels is exactly the case worth a second reading.
     """
     clean = WarningTypography(header_is_bold=True, body_is_bold=False, contrast_ok=True)
-    assert typography.needs_escalation(clean, warning_text="GOVERNMENT WARNING: ...")
-    reason = typography.escalation_reason(clean, warning_text="GOVERNMENT WARNING: ...")
+    assert typography.needs_escalation(clean, warning_text=canon.CANONICAL_WARNING)
+    reason = typography.escalation_reason(clean, warning_text=canon.CANONICAL_WARNING)
     assert reason is not None and "compliant" in reason
+
+
+def test_escalation_does_not_fire_when_the_words_already_settle_it() -> None:
+    """It fired on 16 of 19 fixtures, three of them with an established text mismatch,
+    and told the log they were "about to be reported as compliant" while they were about
+    to be rejected. Every return-for-correction application paid for a second look it
+    could not use, and the audit trail asserted the opposite of what happened.
+    """
+    clean = WarningTypography(header_is_bold=True, body_is_bold=False, contrast_ok=True)
+    for text in (
+        canon.CANONICAL_WARNING.replace("GOVERNMENT WARNING:", "Government Warning:", 1),
+        canon.CANONICAL_WARNING.replace("birth defects", "health risks"),
+        canon.CANONICAL_WARNING[: canon.CANONICAL_WARNING.index("(2)")].strip(),
+    ):
+        assert typography.escalation_reason(clean, warning_text=text) is None
+
+
+def test_a_disputed_heading_fires_and_asks_about_the_heading() -> None:
+    """It used to fire and then ask for three signals, none of them the one in dispute —
+    a call that structurally could not settle what it was made for."""
+    disputed = WarningTypography(
+        header_is_all_caps=False, header_is_bold=True, body_is_bold=False, contrast_ok=True
+    )
+    reason = typography.escalation_reason(
+        disputed, warning_text=canon.CANONICAL_WARNING
+    )
+    assert reason is not None and "capitals" in reason
+    request = typography.escalation_request(
+        disputed, image_index=0, warning_text=canon.CANONICAL_WARNING
+    )
+    assert "header_is_all_caps" in request.wanted
+
+
+def test_every_request_can_answer_the_question_it_asks() -> None:
+    """A reason naming a signal the request never asks for is money spent on nothing."""
+    for signals in (
+        WarningTypography(header_is_bold=None, body_is_bold=False, contrast_ok=True),
+        WarningTypography(header_is_bold=True, body_is_bold=False, contrast_ok=None),
+        WarningTypography(header_is_all_caps=False, header_is_bold=True,
+                          body_is_bold=False, contrast_ok=True),
+        WarningTypography(header_is_bold=True, body_is_bold=False, contrast_ok=True),
+    ):
+        request = typography.escalation_request(
+            signals, image_index=0, warning_text=canon.CANONICAL_WARNING
+        )
+        assert request.wanted, request.reason
+        for name in ("header_is_bold", "body_is_bold", "contrast_ok",
+                     "header_is_all_caps"):
+            if name.replace("_", " ") in request.reason or (
+                name == "header_is_all_caps" and "capitals" in request.reason
+            ):
+                assert name in request.wanted, f"{request.reason} -> {request.wanted}"
 
 
 def test_escalation_does_not_fire_on_a_violation() -> None:
@@ -286,7 +339,7 @@ def test_escalation_does_not_fire_on_a_violation() -> None:
                           relative_size=0.3),
     ):
         assert not typography.needs_escalation(
-            signals, warning_text="GOVERNMENT WARNING: ..."
+            signals, warning_text=canon.CANONICAL_WARNING
         )
 
 
@@ -307,7 +360,7 @@ def test_escalation_request_says_what_it_wants_and_why() -> None:
         WarningTypography(header_is_bold=None, body_is_bold=False, contrast_ok=True),
         image_index=1,
         bbox=BoundingBox(x0=0.1, y0=0.7, x1=0.9, y1=0.9),
-        warning_text="GOVERNMENT WARNING: ...",
+        warning_text=canon.CANONICAL_WARNING,
     )
     assert request.image_index == 1
     assert request.wanted == ("header_is_bold",)
@@ -318,7 +371,7 @@ def test_a_request_on_a_clean_reading_re_asks_every_bright_line() -> None:
     request = typography.escalation_request(
         WarningTypography(header_is_bold=True, body_is_bold=False, contrast_ok=True),
         image_index=0,
-        warning_text="GOVERNMENT WARNING: ...",
+        warning_text=canon.CANONICAL_WARNING,
     )
     assert request.wanted == typography.ESCALATION_SIGNALS
 
@@ -497,7 +550,7 @@ def test_the_rereader_protocol_accepts_a_stub() -> None:
             self, request: typography.WarningRereadRequest
         ) -> typography.WarningReread:
             return typography.WarningReread(
-                warning_text="GOVERNMENT WARNING: ...",
+                warning_text=canon.CANONICAL_WARNING,
                 typography=WarningTypography(header_is_bold=True),
                 model="stub-strong",
             )

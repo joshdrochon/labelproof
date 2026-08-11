@@ -1254,6 +1254,33 @@ def test_the_warning_row_points_at_a_region_on_the_picture() -> None:
 # without the pipeline changing shape — and so it can be proved to engage at all.
 
 
+def _sightings_for(fixture: str) -> list[warning.WarningSighting]:
+    """The warning as the fake extractor reads it off a rendered fixture, per image."""
+    from api.provider.base import ExtractionRequest, ImageInput
+    from api.provider.fake import SpecBackedProvider
+    from api.verify import warning_sightings
+    from fixtures.generator.catalog import by_name
+
+    spec = by_name(fixture)
+    roles = ["front", "back"] if spec.face == "front" else [spec.face]
+    response = SpecBackedProvider(spec).extract(
+        ExtractionRequest(
+            commodity=Commodity(spec.commodity),
+            images=[ImageInput(index=i, data=b"", role=r) for i, r in enumerate(roles)],
+        )
+    )
+    return warning_sightings(response.extractions)
+
+
+def _warning_row_with(
+    fixture: str, *, rereader: object = None
+) -> warning.WarningResult:
+    return warning.evaluate_across_images(
+        _sightings_for(fixture),
+        rereader=rereader,  # type: ignore[arg-type]
+    )
+
+
 class _Rereader:
     """A stub stronger model. Records what it was asked, returns what it was told to."""
 
@@ -1476,6 +1503,52 @@ def test_a_second_look_at_a_missing_warning_targets_the_back_label() -> None:
         [_sighting(0, None), _sighting(1, None)], rereader=stub
     )
     assert stub.requests[0].image_index == 1
+
+
+@pytest.mark.parametrize(
+    "fixture",
+    ["tc03_title_case_warning", "tc05_reworded_warning", "tc05b_truncated_warning",
+     "tc04_bold_warning_body", "tc03b_non_bold_warning_header", "tc06_buried_warning"],
+)
+def test_no_rejected_label_pays_for_a_second_look(fixture: str) -> None:
+    """The cost model, asserted against real fixtures rather than described.
+
+    Escalation fired on 16 of 19 fixtures, three of them with an established text
+    mismatch, and told the log they were "about to be reported as compliant" while they
+    were about to be rejected. Both halves of the documented contract were wrong: the
+    cost and the audit trail.
+    """
+    stub = _Rereader(typography.WarningReread(typography=GOOD))
+    _warning_row_with(fixture, rereader=stub)
+    assert stub.requests == [], f"{fixture} paid for a second look it cannot use"
+
+
+@pytest.mark.parametrize(
+    "fixture", ["tc01_old_tom_clean", "tc06b_warning_contrast_unread"]
+)
+def test_a_label_that_could_still_pass_does_pay_for_one(fixture: str) -> None:
+    """The other half. A net that never fires is the failure this replaced."""
+    stub = _Rereader(typography.WarningReread(typography=GOOD))
+    _warning_row_with(fixture, rereader=stub)
+    assert len(stub.requests) == 1
+
+
+def test_every_reason_written_to_the_log_is_true_of_the_verdict() -> None:
+    """The reason string is the audit trail for why the money was spent."""
+    from fixtures.generator.catalog import CATALOG
+
+    for spec in CATALOG:
+        sightings = _sightings_for(spec.name)
+        chosen = warning.select_sighting(sightings)
+        reason = typography.escalation_reason(
+            warning.merge_sighting_typography(sightings),
+            warning_text=chosen.text if chosen else None,
+        )
+        if reason is None:
+            continue
+        verdict = warning.evaluate_across_images(sightings).verdict
+        if "about to be reported as compliant" in reason:
+            assert verdict is Verdict.MATCH, f"{spec.name}: {verdict} — {reason}"
 
 
 def test_escalation_does_not_fire_when_the_first_pass_already_found_a_violation() -> None:

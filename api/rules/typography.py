@@ -448,21 +448,47 @@ def escalation_reason(
 ) -> str | None:
     """Why this warning needs a second, stronger reading — or None if it does not.
 
-    Three triggers, none of them a confidence number and none of them reachable from
+    The returned string is written to the log and is the audit trail for why the money
+    was spent, so it has to be true. An earlier version returned "about to be reported as
+    compliant" for a label with an established text mismatch, which is the opposite of
+    what was happening.
+
+    None of the triggers is a confidence number, and none is reachable from
     `api.rules.thresholds`; the warning statement is exempt from all of it (WARN-6).
     """
+    # Imported at call time: `warning` imports this module. Same reason as `_merge_text`.
+    from api.rules.warning import is_verbatim
+
     if not legible or warning_text is None or not warning_text.strip():
         return "the warning statement could not be read on the first pass"
 
+    if not is_verbatim(warning_text):
+        # The words already settle it. This label is going back to the applicant however
+        # bold its heading turns out to be, and no reading of the type styling changes
+        # that — so the call buys nothing but cost and a misleading log line. Checking
+        # only the typography here meant every return-for-correction application paid
+        # for a second look it could not use.
+        return None
+
     look = assess(signals)
     if look.type_style_violations or look.prominence_concerns:
-        # Already established. A second reading cannot clear it — `adopt_reread` refuses
-        # to overwrite a recorded violation — so the call would buy nothing.
+        # Also already established. `adopt_reread` refuses to overwrite a recorded
+        # violation, so a second reading cannot clear this either.
         return None
 
     if unresolved := unresolved_signals(signals):
         return "the first pass could not determine " + " or ".join(
             name.replace("_", " ") for name in unresolved
+        )
+
+    if signals.header_is_all_caps is False:
+        # The returned text reads in capitals — it is verbatim — and the reading of the
+        # image says the heading is not capitalised. Exactly the case where an extractor
+        # may have tidied the statement before handing it back, and the one dispute a
+        # stronger look can actually settle.
+        return (
+            "the reading of the image disagrees with the returned wording about the "
+            "heading's capitals"
         )
 
     return (
@@ -496,10 +522,18 @@ def escalation_request(
     legible: bool = True,
     warning_text: str | None = None,
 ) -> WarningRereadRequest:
-    """Describe the second look, in terms the adapter and a log line can both use."""
+    """Describe the second look, in terms the adapter and a log line can both use.
+
+    `wanted` has to be able to answer the question `reason` asks. It used to be the three
+    bright lines regardless, so a request fired over a disputed `header_is_all_caps`
+    asked for three signals, none of them the one in dispute — a call that structurally
+    could not settle what it was made for.
+    """
     reason = escalation_reason(signals, warning_text=warning_text, legible=legible) or ""
     if not legible or warning_text is None or not warning_text.strip():
         wanted: tuple[str, ...] = ("warning_text", *ESCALATION_SIGNALS)
+    elif signals.header_is_all_caps is False:
+        wanted = ("header_is_all_caps", *unresolved_signals(signals))
     else:
         # Re-ask for everything still open, and for everything the pass is resting on.
         wanted = unresolved_signals(signals) or ESCALATION_SIGNALS
