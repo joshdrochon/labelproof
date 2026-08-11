@@ -706,14 +706,61 @@ def select_sighting(sightings: Sequence[WarningSighting]) -> WarningSighting | N
     return illegible[0] if illegible else None
 
 
+def merge_sighting_typography(
+    sightings: Sequence[WarningSighting],
+) -> WarningTypography:
+    """Fold every image's typography signals into one reading of one physical label.
+
+    **Selecting a sighting must not discard what the other images established.** The
+    front and the back are two photographs of one label; if the reading of image 1 says
+    the statement is set in bold and image 0's reading is silent, the label is still set
+    in bold. Judging only the chosen sighting's signals threw that answer away, and
+    which sighting got chosen came down to an image-index tie-break — the same label
+    passed or failed depending on the order the photographs were uploaded.
+
+    So each signal takes its most concerning answer across the images that actually
+    carried a warning. A detected violation on any image is a violation. An abstention
+    never overrides an answer, and two images that both answered can only agree — a
+    signal has one true value per label, and if the readings disagree, the concerning
+    one is the one a person needs to see.
+    """
+    relevant = [s for s in sightings if s.has_text] or list(sightings)
+
+    def fold(name: str, unsafe: bool) -> bool | None:
+        values = [
+            getattr(s.typography, name)
+            for s in relevant
+            if getattr(s.typography, name) is not None
+        ]
+        if not values:
+            return None
+        return unsafe if unsafe in values else values[0]
+
+    sizes = [
+        s.typography.relative_size
+        for s in relevant
+        if s.typography.relative_size is not None
+    ]
+    return WarningTypography(
+        header_is_all_caps=fold("header_is_all_caps", unsafe=False),
+        header_is_bold=fold("header_is_bold", unsafe=False),
+        body_is_bold=fold("body_is_bold", unsafe=True),
+        contrast_ok=fold("contrast_ok", unsafe=False),
+        relative_size=min(sizes) if sizes else None,
+    )
+
+
 def conflicting_sightings_note(
     sightings: Sequence[WarningSighting], chosen: WarningSighting | None
 ) -> Finding | None:
     """Say so when two images showed different warning text.
 
-    Choosing the most complete reading is right, and it can also hide a defective warning
-    printed elsewhere on the same label. The tool cannot resolve that from here, so it
-    says what it did rather than quietly picking a winner.
+    Choosing the most complete reading is right, and on its own it hides a defective
+    warning printed on another panel: a reworded statement on the front and a correct one
+    on the back would be reported as a clean match. This cannot be resolved from the
+    images — the tool does not know whether the second reading is a second warning or a
+    bad read of the first — so it does the one honest thing and refuses to call the
+    label clean until a person has looked.
     """
     if chosen is None:
         return None
@@ -729,11 +776,11 @@ def conflicting_sightings_note(
         code="warning_differs_between_images",
         message=(
             "More than one image carries a government warning and the wording is not the "
-            "same on each. The most complete reading was checked; look at the others "
-            "yourself."
+            "same on each. The most complete reading was checked and the others have "
+            "not been — look at every panel yourself before approving this."
         ),
         citation=canon.CITATIONS["warning_text"],
-        severity=typography.SEVERITY_CONTEXT,
+        severity=typography.SEVERITY_UNVERIFIED,
     )
 
 
@@ -742,20 +789,34 @@ def evaluate_across_images(
     *,
     net_contents_ml: float | None = None,
 ) -> WarningResult:
-    """The whole application's warning verdict, from every image at once (LP-217)."""
+    """The whole application's warning verdict, from every image at once (LP-217).
+
+    The text comes from the best single reading; the typography comes from all of them.
+    Those are different questions: "what does the statement say" has one answer that one
+    photograph can give best, while "is any of it set in bold" is answered by whichever
+    image could see it.
+    """
     chosen = select_sighting(sightings)
     result = evaluate(
         chosen.text if chosen else None,
-        chosen.typography if chosen else None,
+        merge_sighting_typography(sightings),
         legible=chosen.legible if chosen else True,
         net_contents_ml=net_contents_ml,
     )
     note = conflicting_sightings_note(sightings, chosen)
     if note is None:
         return result
+
+    # A disagreement between panels can never leave the label reported as clean.
+    verdict = result.verdict
+    rationale = result.rationale
+    if verdict is Verdict.MATCH:
+        verdict = Verdict.UNREADABLE
+        rationale = note.message
+
     return WarningResult(
-        verdict=result.verdict,
-        rationale=result.rationale,
+        verdict=verdict,
+        rationale=rationale,
         diff=result.diff,
         findings=[*result.findings, note],
         comparison=result.comparison,

@@ -362,10 +362,102 @@ def test_absent_warning_is_missing_not_mismatch(text: str | None) -> None:
 
 # --- LP-217 / TC-16: one application, several images ----------------------------------
 
-def _sighting(index: int, text: str | None, **kw: object) -> warning.WarningSighting:
+def _sighting(
+    index: int,
+    text: str | None,
+    signals: WarningTypography | None = None,
+    **kw: object,
+) -> warning.WarningSighting:
     return warning.WarningSighting(
-        image_index=index, text=text, typography=GOOD, **kw  # type: ignore[arg-type]
+        image_index=index,
+        text=text,
+        typography=signals if signals is not None else GOOD,
+        **kw,  # type: ignore[arg-type]
     )
+
+
+# --- the typography of one label, seen from several photographs -----------------------
+#
+# These are the regression tests for a confirmed false pass. Selecting one sighting used
+# to discard the other images' typography signals, so a label whose bold-body violation
+# was DETECTED on image 1 came back Match when image 0 happened to win the tie-break —
+# and Mismatch when the two photographs were uploaded in the other order.
+
+_BOLD_BODY = WarningTypography(
+    header_is_all_caps=True, header_is_bold=True, body_is_bold=True,
+    contrast_ok=True, relative_size=1.0,
+)
+
+
+@pytest.mark.parametrize("order", [(0, 1), (1, 0)])
+def test_a_violation_detected_on_any_image_is_a_violation(order: tuple[int, int]) -> None:
+    """The extractor answered correctly and the pipeline threw the answer away."""
+    good_at, bad_at = order
+    result = warning.evaluate_across_images(
+        [
+            _sighting(good_at, canon.CANONICAL_WARNING, GOOD),
+            _sighting(bad_at, canon.CANONICAL_WARNING, _BOLD_BODY),
+        ]
+    )
+    assert result.verdict is Verdict.MISMATCH
+    assert "warning_body_is_bold" in _asserted(result)
+
+
+def test_the_verdict_does_not_depend_on_the_order_images_were_uploaded() -> None:
+    """The property the false pass violated. Two photographs, one label, one answer."""
+    for signals in (_BOLD_BODY, WarningTypography(header_is_bold=False),
+                    WarningTypography(contrast_ok=False)):
+        forward = warning.evaluate_across_images(
+            [_sighting(0, canon.CANONICAL_WARNING, GOOD),
+             _sighting(1, canon.CANONICAL_WARNING, signals)]
+        ).verdict
+        backward = warning.evaluate_across_images(
+            [_sighting(0, canon.CANONICAL_WARNING, signals),
+             _sighting(1, canon.CANONICAL_WARNING, GOOD)]
+        ).verdict
+        assert forward is backward
+
+
+def test_an_abstention_on_one_image_does_not_erase_an_answer_on_another() -> None:
+    merged = warning.merge_sighting_typography(
+        [
+            _sighting(0, canon.CANONICAL_WARNING, WarningTypography()),
+            _sighting(1, canon.CANONICAL_WARNING, GOOD),
+        ]
+    )
+    assert merged.header_is_bold is True
+    assert merged.body_is_bold is False
+
+
+def test_the_most_concerning_size_ratio_wins() -> None:
+    merged = warning.merge_sighting_typography(
+        [
+            _sighting(0, canon.CANONICAL_WARNING,
+                      WarningTypography(relative_size=1.0)),
+            _sighting(1, canon.CANONICAL_WARNING,
+                      WarningTypography(relative_size=0.4)),
+        ]
+    )
+    assert merged.relative_size == 0.4
+
+
+def test_signals_from_an_image_with_no_warning_on_it_are_ignored() -> None:
+    """A front label carrying no warning has nothing to say about the warning's type."""
+    merged = warning.merge_sighting_typography(
+        [_sighting(0, None, _BOLD_BODY), _sighting(1, canon.CANONICAL_WARNING, GOOD)]
+    )
+    assert merged.body_is_bold is False
+
+
+def test_a_reworded_warning_on_another_panel_is_never_a_clean_match() -> None:
+    """The second confirmed path: front reworded, back correct, reported as approved."""
+    reworded = canon.CANONICAL_WARNING.replace("birth defects", "health risks")
+    result = warning.evaluate_across_images(
+        [_sighting(0, reworded, GOOD), _sighting(1, canon.CANONICAL_WARNING, GOOD)]
+    )
+    assert result.verdict is not Verdict.MATCH
+    note = next(f for f in result.findings if f.code == "warning_differs_between_images")
+    assert note.severity == typography.SEVERITY_UNVERIFIED
 
 
 @pytest.mark.tc("TC-16")
@@ -433,17 +525,18 @@ def test_completeness_scores_a_fragment_below_the_whole_statement() -> None:
 
 
 def test_two_images_with_different_warnings_are_flagged_not_silently_resolved() -> None:
-    """Picking the most complete reading is right, and it can hide a defective warning
-    printed elsewhere on the same label. Say so rather than choosing quietly."""
+    """Picking the most complete reading is right, and on its own it hides a defective
+    warning printed on another panel. This test previously asserted Match, which was
+    the bug written down as an expectation."""
     result = warning.evaluate_across_images(
         [
             _sighting(0, _retitled("Government Warning:")),
             _sighting(1, canon.CANONICAL_WARNING),
         ]
     )
-    assert result.verdict is Verdict.MATCH
+    assert result.verdict is Verdict.UNREADABLE
     note = next(f for f in result.findings if f.code == "warning_differs_between_images")
-    assert note.severity == typography.SEVERITY_CONTEXT
+    assert note.severity == typography.SEVERITY_UNVERIFIED
 
 
 def test_the_same_warning_on_both_images_raises_no_note() -> None:
