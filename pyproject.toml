@@ -93,7 +93,23 @@ omit = [
     # render.py and spec.py, which are covered; what is left here is argument parsing
     # and file writing, and a test of it would assert that Pillow can save a file.
     "fixtures/generator/build.py",
-    "*/__init__.py",
+    # The empty package markers, named individually.
+    #
+    # This was `*/__init__.py`, which is the only omit entry here that carried no
+    # justification — and it was not omitting nothing. It removed api/routes/__init__.py
+    # from measurement: 118 lines containing `provider_for` and `_fixture_provider`,
+    # i.e. the sample-mode fail-closed logic that is one of this suite's five motivating
+    # incidents and is pinned in tests/regression/test_sample_mode_false_pass.py. It
+    # also hid api/batch/__init__.py. A glob is a claim about every file that matches it
+    # now and every file that will match it later; these seven are the ones that are
+    # actually empty.
+    "api/__init__.py",
+    "api/pipeline/__init__.py",
+    "api/provider/__init__.py",
+    "api/rules/__init__.py",
+    "eval/__init__.py",
+    "fixtures/__init__.py",
+    "fixtures/generator/__init__.py",
 ]
 
 [tool.coverage.report]

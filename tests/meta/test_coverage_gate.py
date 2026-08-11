@@ -159,6 +159,45 @@ def test_the_project_floor_is_a_backstop_rather_than_a_target() -> None:
     assert 80.0 <= PROJECT_COVERAGE_FLOOR <= 95.0
 
 
+def test_no_coverage_omit_entry_is_a_directory_wide_glob() -> None:
+    """An omit glob is a claim about files that do not exist yet.
+
+    `*/__init__.py` was the one entry in the list with no justification beside it, and
+    it was not omitting nothing: it removed `api/routes/__init__.py` — 118 lines
+    containing `provider_for` and `_fixture_provider`, the sample-mode fail-closed logic
+    that is one of this suite's motivating incidents — plus `api/batch/__init__.py`.
+    Neither is an empty package marker, and nobody had looked since the glob was
+    written.
+
+    Named files only. A file added later that ought to be omitted is then a deliberate
+    edit with a reason next to it, which is the same standard every other entry meets.
+    """
+    import tomllib
+
+    config = tomllib.loads((ROOT / "pyproject.toml").read_text())
+    omitted = config["tool"]["coverage"]["run"]["omit"]
+
+    globbed = [entry for entry in omitted if "*" in entry]
+    assert globbed == [], f"coverage omit uses globs: {globbed}"
+
+
+def test_every_omitted_file_exists_and_is_named_in_the_config() -> None:
+    """A stale omit silently stops omitting, or silently omits a renamed file.
+
+    Both directions are quiet failures: the first inflates the number, the second hides
+    a module. Neither shows up anywhere except in this test.
+    """
+    import tomllib
+
+    config = tomllib.loads((ROOT / "pyproject.toml").read_text())
+    missing = [
+        entry
+        for entry in config["tool"]["coverage"]["run"]["omit"]
+        if not (ROOT / entry).exists()
+    ]
+    assert missing == [], f"coverage omits files that do not exist: {missing}"
+
+
 def test_the_bypass_flag_is_not_used_anywhere_in_the_repository() -> None:
     """`--no-cov-gate` exists for a local debugging session and nowhere else.
 

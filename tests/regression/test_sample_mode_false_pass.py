@@ -180,6 +180,112 @@ def test_filename_to_fixture_mapping_is_an_allowlist_not_a_guess(
     assert spec_name_for_image(filename) == expected
 
 
+# --------------------------------------------------------------------------------------
+# The other branch of the same resolver: a server with no key
+# --------------------------------------------------------------------------------------
+#
+# `api/routes/__init__.py` was hidden from coverage by an undocumented `*/__init__.py`
+# omit — 118 lines including this resolver, the sample-mode fallback above, and the
+# live-adapter path below. Removing the glob surfaced the live path as the one part of
+# provider resolution nothing exercised, which is the reason these three exist.
+
+
+class _Request:
+    """The two attributes `provider_for` reads off a request, and nothing else."""
+
+    def __init__(self, app: Any) -> None:
+        self.app = app
+
+
+class _App:
+    def __init__(self, config: Config) -> None:
+        self.state = type("_State", (), {"config": config, "provider": None})()
+
+
+def _request(app: _App) -> Any:
+    """A stand-in `Request`, cast at one boundary.
+
+    `provider_for` reads `request.app.state`, and a real `Request` cannot be built
+    outside a running ASGI call. Casting once here beats an ignore comment on every
+    call site.
+    """
+    return _Request(app)
+
+
+def test_a_server_with_no_key_and_no_fake_mode_refuses_rather_than_crashing() -> None:
+    """A misconfigured deployment answers in the taxonomy, not with an ImportError.
+
+    From the agent's seat this is what it is: the label reading service is not
+    available, and no application data changed. Telling them to ask whoever runs the
+    service — or to switch to sample mode — is the whole difference between an outage
+    they can act on and a 500 they cannot.
+    """
+    from api.routes import provider_for
+
+    app = _App(Config(anthropic_api_key="", use_fake_provider=False))
+    with pytest.raises(errors.ProviderUnavailable) as raised:
+        provider_for(_request(app), ["tc01_old_tom_clean.png"])
+
+    message = str(raised.value)
+    assert "not set up on this server" in message
+    assert "sample mode" in message
+
+
+def test_an_injected_provider_wins_over_every_other_resolution() -> None:
+    """The hook the whole offline suite depends on (ENG-3).
+
+    If injection ever stopped taking precedence, every test in this repository would
+    silently start resolving a real adapter — and the socket guard would be the only
+    thing standing between the suite and a live call.
+    """
+    from api.provider.fake import FailingProvider
+    from api.routes import provider_for
+
+    app = _App(Config(anthropic_api_key="a-key", use_fake_provider=False))
+    injected = FailingProvider()
+    app.state.provider = injected
+
+    assert provider_for(_request(app), ["anything.png"]) is injected
+
+
+def test_the_live_adapter_is_built_once_and_kept_on_the_app() -> None:
+    """A breaker that resets every request has learned nothing.
+
+    Per-request construction throws away the connection pool and the circuit breaker,
+    which is what keeps a provider outage from becoming a queue of hanging requests. So
+    resolution has to cache — asserted by resolving twice and requiring the same object.
+
+    Constructing the adapter does not open a socket; the guard in conftest would refuse
+    it if it did.
+    """
+    from api.routes import provider_for
+
+    app = _App(Config(anthropic_api_key="placeholder", use_fake_provider=False))
+    first = provider_for(_request(app), [])
+    second = provider_for(_request(app), [])
+
+    assert first is second
+    assert app.state.provider is first
+    assert first.name == "anthropic"
+
+
+def test_an_adapter_that_cannot_be_built_degrades_rather_than_raising_a_config_error() -> None:
+    """A bad `LABELPROOF_EFFORT` must not reach the agent as a ConfigError.
+
+    The adapter validates effort at construction (PERF-6), and that is right — but the
+    resolver is a request path, so the failure has to leave as a provider outage in the
+    taxonomy rather than as whatever exception the constructor chose.
+    """
+    from api.routes import provider_for
+
+    app = _App(
+        Config(anthropic_api_key="placeholder", use_fake_provider=False, effort="turbo")
+    )
+    with pytest.raises(errors.ProviderUnavailable) as raised:
+        provider_for(_request(app), [])
+    assert "not available on this server" in str(raised.value)
+
+
 def test_a_recognised_fixture_still_resolves(sample_mode_client: TestClient) -> None:
     """Failing closed must not mean failing always.
 
