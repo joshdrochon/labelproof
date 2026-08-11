@@ -4,7 +4,7 @@
 
 | | |
 |---|---|
-| **Status** | Source of truth for the LabelProof build. Tickets in `TICKETS.md` trace to requirement IDs defined here. |
+| **Status** | Source of truth for the LabelProof build. Requirement IDs defined here (Appendix A) are referenced throughout the implementation. |
 | **Source brief** | `TakeHome Project: AI-Powered Alcohol Label Verification App.docx`, sha `7f50443d68066298…` |
 | **Format blueprint** | GFA Week 5 FleetGraph PRD (structure only — content is 100% take-home derived) |
 | **Version** | 1.0 — 2026-08-10 |
@@ -367,7 +367,7 @@ Sections due by checkpoint:
 
 ## Appendix A — Requirements Traceability
 
-Every requirement extracted from the brief — overt and between-the-lines — with its source. Quotes are verbatim from the take-home document. **This appendix owns requirement definitions; `TICKETS.md` owns the requirement → ticket mapping.** Nothing is maintained by hand in both places.
+Every requirement extracted from the brief — overt and between-the-lines — with its source. Quotes are verbatim from the take-home document. This appendix owns requirement definitions; the execution plan that maps them to work items is tracked separately and is not part of the submission.
 
 Sources: **[SC]** Sarah Chen, Deputy Director · **[MW]** Marcus Williams, IT Systems Admin · **[DM]** Dave Morrison, Senior Agent · **[JP]** Jenny Park, Junior Agent · **[BR]** brief body (requirements/context/deliverables/evaluation sections)
 
@@ -621,4 +621,4 @@ Proof = 2 × ABV (90 Proof ⇔ 45% Alc./Vol.).
 
 ---
 
-*End of PRD. The execution plan lives in `TICKETS.md`; every ticket there traces to a requirement ID above.*
+*End of PRD. Every requirement above carries an ID; the implementation and its tests reference those IDs directly.*
