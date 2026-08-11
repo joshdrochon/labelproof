@@ -621,6 +621,80 @@ def test_punctuation_differences_are_not_folded_away() -> None:
     assert not warning.is_verbatim(canon.CANONICAL_WARNING.replace(":", ";"))
 
 
+# --- LP-218: the manifest cannot fall behind the code ---------------------------------
+#
+# Documentation about checks goes stale the first time someone adds a check. These tests
+# make that impossible: the manifest and the finding codes the source actually emits are
+# asserted to be the same set, by reading the source.
+
+
+def _emitted_codes() -> set[str]:
+    """Every `code="..."` literal in the two modules that produce warning findings."""
+    import re as _re
+    from pathlib import Path
+
+    root = Path(warning.__file__).parent
+    source = (root / "warning.py").read_text() + (root / "typography.py").read_text()
+    return set(_re.findall(r'code="([a-z_]+)"', source))
+
+
+def test_the_manifest_lists_every_finding_the_code_can_raise() -> None:
+    missing = _emitted_codes() - warning.FINDING_CODES
+    assert missing == set(), f"findings raised but not documented: {sorted(missing)}"
+
+
+def test_the_manifest_documents_nothing_the_code_cannot_raise() -> None:
+    stale = warning.FINDING_CODES - _emitted_codes()
+    assert stale == set(), f"documented but never raised: {sorted(stale)}"
+
+
+def test_every_check_says_what_it_checks_and_what_follows() -> None:
+    for check in warning.CHECK_MANIFEST:
+        assert check.checks.strip()
+        assert check.evidence.strip()
+        assert check.outcome.strip()
+        assert check.citation.startswith("27 CFR 16.")
+
+
+def test_manifest_codes_are_unique() -> None:
+    codes = [c.code for c in warning.CHECK_MANIFEST]
+    assert len(codes) == len(set(codes))
+
+
+def test_context_only_findings_are_marked_as_such_in_the_manifest() -> None:
+    """A row that says "context only" must not be one that changes a verdict."""
+    context_codes = {
+        c.code for c in warning.CHECK_MANIFEST if c.outcome.startswith("context only")
+    }
+    assert context_codes == {
+        "warning_prominence_unassessed",
+        "warning_type_size_not_verified",
+        "warning_differs_between_images",
+    }
+
+
+def test_the_limits_are_stated_rather_than_left_out() -> None:
+    """WARN-9 as a list. A requirement quietly missing from a checker reads as a
+    requirement that was met."""
+    requirements = " ".join(limit.requirement for limit in warning.LIMITS).lower()
+    assert "millimetres" in requirements
+    assert "separate and apart" in requirements
+    assert "compressed" in requirements
+    for limit in warning.LIMITS:
+        assert len(limit.why_not) > 60, f"{limit.requirement}: no reason given"
+
+
+def test_the_type_size_limit_is_cited_to_the_subsection() -> None:
+    limit = next(x for x in warning.LIMITS if "millimetres" in x.requirement)
+    assert limit.citation == "27 CFR 16.22(b)"
+
+
+def test_separate_and_apart_is_cited_to_16_21_not_16_22() -> None:
+    """It sits with the statement, not with the type-style rules — see LP-328."""
+    limit = next(x for x in warning.LIMITS if "separate and apart" in x.requirement)
+    assert limit.citation == "27 CFR 16.21"
+
+
 # --- LP-204: what the diff view is handed ---------------------------------------------
 #
 # WARN-8 says the word-level diff is the evidence — the thing an agent shows a supervisor

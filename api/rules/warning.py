@@ -407,6 +407,248 @@ def type_size_finding(net_contents_ml: float | None) -> Finding:
 
 
 # --------------------------------------------------------------------------------------
+# What this module checks, and what it does not (DEL-6 / LP-218)
+# --------------------------------------------------------------------------------------
+#
+# Documentation as data rather than prose, for one reason: prose about checks goes stale
+# the first time someone adds a check, and nobody notices. A test asserts that this list
+# and the finding codes the code can actually emit are the same set, so the two cannot
+# drift. The UI and the README render it; an agent asking "what did this tool actually
+# look at" gets an answer that is true by construction.
+
+
+@dataclass(frozen=True)
+class Check:
+    """One thing this module looks for, and what happens when it finds it."""
+
+    code: str
+    checks: str
+    citation: str
+    evidence: str
+    outcome: str
+
+
+@dataclass(frozen=True)
+class Limit:
+    """Something the regulation requires that this tool does not verify.
+
+    WARN-9 in list form. A checker that silently omits a requirement is telling an agent
+    it checked more than it did, and on the government warning that is the failure this
+    whole module exists to prevent.
+    """
+
+    requirement: str
+    citation: str
+    why_not: str
+
+
+CHECK_MANIFEST: Final[tuple[Check, ...]] = (
+    Check(
+        code="warning_missing",
+        checks="the statement appears on at least one of the supplied images",
+        citation="27 CFR 16.21",
+        evidence="the text read off every image",
+        outcome="Missing — recommend returning the application",
+    ),
+    Check(
+        code="warning_text_truncated",
+        checks="the statement is complete rather than stopping part-way",
+        citation="27 CFR 16.21",
+        evidence="the words on the label",
+        outcome="Mismatch",
+    ),
+    Check(
+        code="warning_text_omission",
+        checks="no required words have been dropped",
+        citation="27 CFR 16.21",
+        evidence="the words on the label",
+        outcome="Mismatch",
+    ),
+    Check(
+        code="warning_text_addition",
+        checks="nothing has been added to the required statement",
+        citation="27 CFR 16.21",
+        evidence="the words on the label",
+        outcome="Mismatch",
+    ),
+    Check(
+        code="warning_text_reordering",
+        checks="the required words appear in the required order",
+        citation="27 CFR 16.21",
+        evidence="the words on the label",
+        outcome="Mismatch",
+    ),
+    Check(
+        code="warning_text_casing",
+        checks="the statement is capitalised as written in the regulation",
+        citation="27 CFR 16.21",
+        evidence="the words on the label",
+        outcome="Mismatch",
+    ),
+    Check(
+        code="warning_text_punctuation",
+        checks="the statement is punctuated as written in the regulation",
+        citation="27 CFR 16.21",
+        evidence="the words on the label",
+        outcome="Mismatch",
+    ),
+    Check(
+        code="warning_text_rewording",
+        checks="the statement is word for word, with no paraphrase",
+        citation="27 CFR 16.21",
+        evidence="the words on the label",
+        outcome="Mismatch",
+    ),
+    Check(
+        code="warning_header_missing",
+        checks='the statement begins with the heading "GOVERNMENT WARNING:"',
+        citation="27 CFR 16.22",
+        evidence="the words on the label",
+        outcome="Mismatch",
+    ),
+    Check(
+        code="warning_header_not_all_caps",
+        checks="the heading is in capital letters",
+        citation="27 CFR 16.22",
+        evidence="the words on the label",
+        outcome="Mismatch",
+    ),
+    Check(
+        code="warning_header_punctuation",
+        checks="the heading ends in a colon",
+        citation="27 CFR 16.21",
+        evidence="the words on the label",
+        outcome="Mismatch",
+    ),
+    Check(
+        code="warning_header_caps_disputed",
+        checks="the wording and the image agree about the heading's capitals",
+        citation="27 CFR 16.22",
+        evidence="the words on the label, against the typography signal",
+        outcome="Unreadable — not settled, a person must look",
+    ),
+    Check(
+        code="warning_header_not_bold",
+        checks="the heading is in bold type",
+        citation="27 CFR 16.22",
+        evidence="a typography signal from the image",
+        outcome="Mismatch",
+    ),
+    Check(
+        code="warning_header_bold_unverified",
+        checks="the heading is in bold type",
+        citation="27 CFR 16.22",
+        evidence="not established — the reading could not tell",
+        outcome="Unreadable — a person must look",
+    ),
+    Check(
+        code="warning_body_is_bold",
+        checks="the rest of the statement is NOT in bold type",
+        citation="27 CFR 16.22",
+        evidence="a typography signal from the image",
+        outcome="Mismatch",
+    ),
+    Check(
+        code="warning_body_bold_unverified",
+        checks="the rest of the statement is NOT in bold type",
+        citation="27 CFR 16.22",
+        evidence="not established — the reading could not tell",
+        outcome="Unreadable — a person must look",
+    ),
+    Check(
+        code="warning_typography_disputed",
+        checks="two readings of the same label agree about the type styling",
+        citation="27 CFR 16.22",
+        evidence="two readings that disagreed",
+        outcome="Unreadable — not settled, a person must look",
+    ),
+    Check(
+        code="warning_less_prominent",
+        checks="the warning is not printed much smaller than the rest of the label",
+        citation="27 CFR 16.22",
+        evidence="a size ratio estimated from the image",
+        outcome="Unreadable — a person must judge it against the label",
+    ),
+    Check(
+        code="warning_low_contrast",
+        checks="the warning stands out from the background behind it",
+        citation="27 CFR 16.22",
+        evidence="a contrast signal from the image",
+        outcome="Unreadable — a person must judge it against the label",
+    ),
+    Check(
+        code="warning_prominence_unassessed",
+        checks="nothing — it reports that size and contrast were not assessed",
+        citation="27 CFR 16.22",
+        evidence="not established",
+        outcome="context only, never changes a verdict",
+    ),
+    Check(
+        code="warning_type_size_not_verified",
+        checks="nothing — it states the minimum type size that applies to this container",
+        citation="27 CFR 16.22",
+        evidence="the container size on the application",
+        outcome="context only, never changes a verdict",
+    ),
+    Check(
+        code="warning_differs_between_images",
+        checks="the images agree about what the warning says",
+        citation="27 CFR 16.21",
+        evidence="the text read off every image",
+        outcome="context only — the most complete reading was checked",
+    ),
+)
+
+#: Every finding code this module and `typography.py` can produce. A test asserts it
+#: matches what the source actually emits, so the manifest cannot fall behind the code.
+FINDING_CODES: Final[frozenset[str]] = frozenset(c.code for c in CHECK_MANIFEST)
+
+
+LIMITS: Final[tuple[Limit, ...]] = (
+    Limit(
+        requirement="Minimum type size in millimetres, and maximum characters per inch",
+        citation="27 CFR 16.22(b)",
+        why_not=(
+            "A photograph has no scale. Without knowing the physical size of the "
+            "container in the frame, millimetres cannot be recovered from pixels. The "
+            "applicable minimum is quoted as context so an agent can measure the real "
+            "label, and the tool never claims to have measured it."
+        ),
+    ),
+    Limit(
+        requirement="The statement must be separate and apart from other information",
+        citation="27 CFR 16.21",
+        why_not=(
+            "Judging separation needs the layout of the whole label, and what the "
+            "extractor returns is the warning's own region. Text found around the "
+            "warning is more often an artefact of how the region was read than a real "
+            "crowding problem, and flagging it would train agents to ignore the row."
+        ),
+    ),
+    Limit(
+        requirement="Characters may not be compressed so as to impair legibility",
+        citation="27 CFR 16.22(a)(3)",
+        why_not=(
+            "No signal in the extraction schema reports horizontal compression, so "
+            "this is not checked at all. It is listed here rather than left out, "
+            "because a requirement quietly missing from a checker reads as a "
+            "requirement that was met."
+        ),
+    ),
+    Limit(
+        requirement="Whether the warning is bold, when the reading could not tell",
+        citation="27 CFR 16.22(a)(2)",
+        why_not=(
+            "Stroke weight is hard to judge from a photograph of printed matter and "
+            "the extraction model is allowed to decline. It declines often. That "
+            "outcome is reported as Unreadable and routed to a person; it is never "
+            "resolved in the label's favour."
+        ),
+    ),
+)
+
+
+# --------------------------------------------------------------------------------------
 # One application, several images (IMG-8 / LP-217 / TC-16)
 # --------------------------------------------------------------------------------------
 #

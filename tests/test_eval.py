@@ -194,12 +194,13 @@ def test_no_fixture_expects_a_warning_violation_to_pass() -> None:
 
 
 def test_finding_expectations_reference_codes_the_code_can_raise() -> None:
+    """Warning codes come from `warning.CHECK_MANIFEST`, which is itself asserted
+    against the source (LP-218), so this list cannot fall behind the rules engine."""
+    from api.rules.warning import FINDING_CODES
+
     known = {
         "proof_abv_inconsistent", "spirits_abv_abbreviation", "non_standard_fill",
-        "warning_missing", "warning_header_not_all_caps", "warning_header_not_bold",
-        "warning_body_is_bold", "warning_header_missing",
-        "warning_header_bold_unverified", "warning_body_bold_unverified",
-    }
+    } | FINDING_CODES
     for spec in CATALOG:
         for codes in spec.expect_findings.values():
             for code in codes:
