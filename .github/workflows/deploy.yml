@@ -129,10 +129,14 @@ jobs:
       # fly.toml should fail in twenty seconds here rather than four minutes into a
       # remote build. It does NOT prove the configuration is complete; only the drill in
       # CHANGES.md does that.
+      # `--strict` is the flag that identifies unrecognised sections and keys. Without it
+      # a misspelled `auto_stop_machnes` or a typo'd `[env]` key validates clean — and a
+      # setting the platform silently ignores is exactly the failure this whole wave keeps
+      # producing: a deployment that looks configured and is not.
       - name: Validate the deployment configuration
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
-        run: flyctl config validate --app "$FLY_APP" --config fly.toml
+        run: flyctl config validate --app "$FLY_APP" --config fly.toml --strict
 
       # ------------------------------------------------------------------------------
       # Record what is live right now. This is the rollback target, and it has to be
@@ -166,7 +170,18 @@ jobs:
             exit 1
           fi
 
-          count="$(printf '%s' "$releases" | jq 'if type == "array" then length else 0 end')"
+          # "Not an array" is not "no releases". The previous version collapsed the two
+          # with `if type == "array" then length else 0 end`, so a shape change to
+          # `{"releases": [...]}` would classify a live app as a first deploy, print a
+          # notice on an otherwise green run, and disarm the rollback — the same fail-open
+          # this step was rewritten to close, moved down one line.
+          if ! printf '%s' "$releases" | jq -e 'type == "array"' >/dev/null; then
+            echo "::error::'flyctl releases --json' did not return an array. The output shape has changed and 'has this app ever deployed' can no longer be answered. Refusing to deploy without a known rollback target. Raw output follows."
+            printf '%s\n' "$releases"
+            exit 1
+          fi
+
+          count="$(printf '%s' "$releases" | jq 'length')"
           if [[ "$count" == "0" ]]; then
             echo "::notice::$FLY_APP has no releases yet — first deploy. No rollback target, by definition."
             echo "first_deploy=true" >> "$GITHUB_OUTPUT"
@@ -206,13 +221,19 @@ jobs:
           # blanks the SPA — the configuration IS the fault, and that rollback ships the
           # bug again and then fails its own smoke test. CHANGES.md promised a rollback
           # that restores service; for those cases it structurally could not.
-          if flyctl config show --app "$FLY_APP" > previous-fly.toml 2>/dev/null \
-             && [[ -s previous-fly.toml ]]; then
+          # `--toml` is NOT optional. `flyctl config show` emits JSON by default, and
+          # `flyctl deploy --config` picks its parser from the file extension — so JSON in
+          # a .toml file fails to parse at exactly the moment it is needed, and the step
+          # (no `set -e`) carries on to re-smoke the still-broken URL and report "ROLLBACK
+          # DID NOT RESTORE SERVICE". A correct alarm attached to no capability.
+          if flyctl config show --app "$FLY_APP" --toml > previous-fly.toml 2>/dev/null \
+             && [[ -s previous-fly.toml ]] \
+             && python3 -c "import sys,tomllib; tomllib.load(open('previous-fly.toml','rb'))"; then
             echo "config=previous-fly.toml" >> "$GITHUB_OUTPUT"
             echo "Captured the live configuration for rollback."
           else
             echo "config=" >> "$GITHUB_OUTPUT"
-            echo "::warning::Could not capture the live configuration. A rollback will re-apply the new fly.toml, which cannot recover a configuration-caused failure. Check flyctl config show manually if the rollback does not restore service."
+            echo "::warning::Could not capture the live configuration as valid TOML. A rollback will re-apply the new fly.toml, which cannot recover a configuration-caused failure. Check 'flyctl config show --toml' manually if the rollback does not restore service."
           fi
 
       - name: Preserve the rollback config across steps
