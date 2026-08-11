@@ -124,6 +124,16 @@ jobs:
 
       - uses: superfly/flyctl-actions/setup-flyctl@master
 
+      # The cheap half of the destroy-and-redeploy drill (LP-136). It proves the platform
+      # accepts this configuration, before a deploy is attempted with it — a malformed
+      # fly.toml should fail in twenty seconds here rather than four minutes into a
+      # remote build. It does NOT prove the configuration is complete; only the drill in
+      # CHANGES.md does that.
+      - name: Validate the deployment configuration
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: flyctl config validate --app "$FLY_APP" --config fly.toml
+
       # ------------------------------------------------------------------------------
       # Record what is live right now. This is the rollback target, and it has to be
       # captured before anything changes — after a failed deploy, "the previous release"

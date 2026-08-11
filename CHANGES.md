@@ -124,6 +124,11 @@ from the repository plus one secret. If any step needs a console click, an out-o
 environment value, or a manually created volume, `fly.toml` is incomplete and the drill has
 found it.
 
+**Build the image for the platform you deploy to.** Fly runs `linux/amd64`. If you are on
+an Apple Silicon machine, a local `docker build` produces `arm64` — the image you validate
+is not the image that ships. Use `--platform linux/amd64` locally, or rely on
+`fly deploy --remote-only` (which CI does) to build on the target architecture.
+
 ```bash
 # 0. Baseline — record what a working service looks like
 scripts/smoke.sh https://labelproof.fly.dev | tee /tmp/before.txt
@@ -145,11 +150,29 @@ Step 3 must pass with **no manual step between 2 and 3**. The one input that is 
 repository is the API key, and that is the point: it is the only thing that should have to
 come from somewhere else.
 
+**What "identical" can and cannot mean here.** The configuration, the source and the base
+image are pinned; the Python dependency set is not (see the note in the `Dockerfile`), so a
+rebuild months later may resolve different library versions. The drill proves the
+environment *rebuilds from configuration alone*, which is what ENG-6 asks. It does not
+prove bit-identical images, and should not be described as though it does.
+
+**Run it against a throwaway app.** `fly apps destroy labelproof` on the app a grader is
+about to open is a bad trade for a checkmark. Create `labelproof-drill` from the same
+`fly.toml` (`fly deploy --app labelproof-drill`), run the sequence there, and destroy it
+afterwards. That converts the strongest claim in this repository from an assertion into a
+result, and costs nothing anyone is looking at.
+
 ### Recorded result
 
-**Not yet executed.** This procedure ships with the configuration it tests; the run
-requires a live Fly account and an API key, and the results below are deliberately blank
-rather than filled with plausible output.
+**Not yet executed.** This procedure ships with the configuration it tests. The results
+below are deliberately blank rather than filled with plausible output — this is the one
+artifact whose entire purpose is proof, and inventing its output would make it the least
+trustworthy thing in the repository.
+
+Until it is run, the gate does the cheap half: `flyctl config validate` runs on every
+deploy, so a `fly.toml` that the platform will not accept fails in CI rather than at
+`fly deploy`. That catches a malformed config; it does not catch a config that is valid
+and incomplete, which is what the drill is for.
 
 | | |
 |---|---|

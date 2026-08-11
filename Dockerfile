@@ -23,8 +23,8 @@ FROM node:22-slim AS web
 WORKDIR /build
 
 # Dependencies before source, so a source-only change does not re-run `npm ci`.
-# `npm ci` (not `npm install`) installs exactly the lockfile: the same commit produces
-# the same node_modules on any machine, which is the reproducibility claim ENG-6 makes.
+# `npm ci` (not `npm install`) installs exactly the lockfile, so the same commit produces
+# the same node_modules on any machine and at any date.
 COPY web/package.json web/package-lock.json ./
 RUN npm ci --no-audit --no-fund
 
@@ -47,10 +47,23 @@ FROM python:3.12-slim AS deps
 #
 # Only `project.dependencies` is installed — the `dev` extra (pytest, mypy, ruff,
 # hypothesis) is left behind. The image cannot run the test suite, and should not.
+#
+# REPRODUCIBILITY, STATED HONESTLY. The web stage above is lockfile-exact. This stage is
+# NOT: `pyproject.toml` carries lower bounds (`fastapi>=0.115`) with no lockfile and no
+# hashes, so two builds a month apart can resolve different versions of FastAPI, Pillow or
+# OpenCV. The image is reproducible in its *inputs* — same base image, same source, same
+# declared constraints — not in its *resolved dependency set*. An earlier version of this
+# file called `npm ci` "the reproducibility claim ENG-6 makes" while leaving that gap
+# unmentioned, which made the claim sound stronger than it was.
+#
+# Closing it properly means a compiled, hashed constraints file (`pip-compile` /
+# `uv pip compile`) checked into the repository and installed with `--require-hashes`.
+# That belongs with whoever owns `pyproject.toml`; the pip version is pinned here so at
+# least the resolver itself is not a moving part.
 COPY pyproject.toml /tmp/pyproject.toml
 
 RUN python -m venv /opt/venv \
- && /opt/venv/bin/pip install --no-cache-dir --upgrade pip \
+ && /opt/venv/bin/pip install --no-cache-dir "pip==25.2" \
  && python -c "import tomllib; open('/tmp/requirements.txt','w').write('\n'.join(tomllib.load(open('/tmp/pyproject.toml','rb'))['project']['dependencies']))" \
  && cat /tmp/requirements.txt \
  && /opt/venv/bin/pip install --no-cache-dir -r /tmp/requirements.txt
