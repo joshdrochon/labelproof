@@ -4,8 +4,12 @@ Every test in this module starts from bytes on disk and runs the whole path a re
 takes: sniff and sanitize (`api.pipeline.ingest`), score (`api.pipeline.quality`), extract
 (an offline provider), merge across images (`api.pipeline.merge`), compare, and aggregate.
 The only substitution is the model call, which is what ENG-3 requires — the suite passes
-with no network or it is not CI. A module-scoped guard makes that a fact rather than a
-convention: any attempt to open a socket fails the test.
+with no network or it is not CI.
+
+The `no_network` fixture below enforces that **for this module only**, and it is scoped to
+each test rather than to the session. It is a check on these tests, not a suite-wide
+guarantee; the suite-wide claim rests on the fake providers and on `Config.use_fake_provider`.
+A session-wide guard belongs in `tests/conftest.py`, which this branch does not own.
 
 The unit suites already cover each stage in isolation. What only an integration test can
 catch is a seam: an image index that survives ingest and is lost at merge, a role that is
@@ -25,11 +29,13 @@ import pytest
 from api.config import Config
 from api.models import (
     Application,
+    Commodity,
     ExtractedField,
     Extraction,
     FieldName,
     Recommendation,
     Verdict,
+    WarningTypography,
 )
 from api.pipeline import ingest as ingest_module
 from api.pipeline import merge as merge_module
@@ -57,7 +63,10 @@ BRAND = FieldName.BRAND_NAME
 
 @pytest.fixture(autouse=True)
 def no_network(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Any socket connection from this module is a test failure, not a slow test."""
+    """Any socket connection from a test in this module is a failure, not a slow test.
+
+    Autouse and function-scoped, so it covers every test here and nothing elsewhere.
+    """
 
     def refuse(*args: object, **kwargs: object) -> None:
         raise AssertionError(
@@ -92,12 +101,24 @@ def prepare(filenames: list[str]) -> list[ImageInput]:
     This is the part an integration test exists for: `ingest` renumbers images as it
     expands them, and everything downstream — provenance, evidence, the picture an agent
     is sent to — hangs off the index it assigns.
+
+    Roles are mapped back onto the expanded list rather than zipped onto it. Every fixture
+    today is a single-page PNG, so a `zip(..., strict=True)` would work and would then
+    raise the first time somebody adds a PDF fixture — one file, several images. Walking
+    the page markers costs two lines and does not have a trap in it.
     """
     raw = [(LABELS / name).read_bytes() for name in filenames]
     ingested = ingest_module.ingest(raw, config())
 
     images: list[ImageInput] = []
-    for image, name in zip(ingested, filenames, strict=True):
+    source = -1
+    for image in ingested:
+        # `page` is None for a plain image and 0 for the first page of a PDF. Either marks
+        # the start of the next uploaded file.
+        if image.page in (None, 0):
+            source += 1
+        name = filenames[source]
+
         assessment = quality_module.assess(ingest_module.to_array(image))
         assert not quality_module.should_skip_extraction(assessment), (
             f"{name} scored hopeless before any model call; the fixture regressed"
@@ -110,6 +131,8 @@ def prepare(filenames: list[str]) -> list[ImageInput]:
                 role=role_of(name),
             )
         )
+
+    assert source == len(filenames) - 1, "every uploaded file must produce at least one image"
     return images
 
 
@@ -161,15 +184,53 @@ def test_ingest_sanitizes_every_fixture(entry: dict[str, Any]) -> None:
 
 
 @pytest.mark.parametrize("entry", fixtures(), ids=lambda e: e["name"])
-def test_no_fixture_produces_a_fabricated_value(entry: dict[str, Any]) -> None:
-    """LP-067 end to end: an unread field is never reported with a value."""
+def test_every_reported_value_was_actually_read_off_an_image(entry: dict[str, Any]) -> None:
+    """LP-067 end to end: nothing in `extracted` that no picture reported.
+
+    An earlier version of this test asserted `extracted is None` on Unreadable, Missing
+    and Not-applicable rows. That cannot fail — `compare._missing`, `_unreadable` and
+    `_not_applicable` all hardcode `extracted=None`, so it restated the implementation
+    instead of checking it. This compares what the pipeline reports against what the
+    provider actually produced, which is the claim LP-067 makes and the one that can break:
+    any normalisation, repair, or carry-over between images shows up here as a value the
+    extraction never contained.
+    """
     images = prepare(entry["images"])
     provider = SpecBackedProvider(by_name(entry["name"]))
-    result = verify(application_of(entry), images, provider)
 
-    for field in result.fields:
-        if field.verdict in (Verdict.UNREADABLE, Verdict.MISSING, Verdict.NOT_APPLICABLE):
-            assert field.extracted is None
+    extracted_by_provider = {
+        field.value
+        for extraction in provider.extract(
+            ExtractionRequest(commodity=Commodity(entry["commodity"]), images=images)
+        ).extractions
+        for field in extraction.fields.values()
+        if field.value is not None
+    }
+
+    result = verify(application_of(entry), images, provider)
+    reported = {f.extracted for f in result.fields if f.extracted is not None}
+
+    assert reported, "a clean fixture must report something, or this test is vacuous"
+    assert reported <= extracted_by_provider, (
+        f"reported values no image produced: {sorted(reported - extracted_by_provider)}"
+    )
+
+
+@pytest.mark.tc("TC-14")
+def test_an_illegible_label_reports_nothing_and_approves_nothing() -> None:
+    """The complement, and the half that can regress: every field unreadable.
+
+    A fabricated value would have to come from somewhere, and the somewhere is a pipeline
+    that fills a gap rather than reporting it. Nothing may be filled in, and nothing that
+    was never read may reach Ready to approve.
+    """
+    entry = next(f for f in fixtures() if f["name"] == "tc01_old_tom_clean")
+    provider = SpecBackedProvider(by_name("tc01_old_tom_clean"), illegible=set(FieldName))
+    result = verify(application_of(entry), prepare(entry["images"]), provider)
+
+    assert all(f.extracted is None for f in result.fields)
+    assert all(f.verdict is Verdict.UNREADABLE for f in result.fields)
+    assert result.aggregate.recommendation is not Recommendation.READY_TO_APPROVE
 
 
 # --- TC-16: the two-image case -----------------------------------------------------------
@@ -353,6 +414,105 @@ def test_two_pictures_that_merely_style_a_brand_differently_still_match() -> Non
     result = _run_conflict(BRAND, "OLD TOM DISTILLERY", "Old Tom Distillery")
     assert row(result, BRAND).verdict is Verdict.MATCH
     assert result.aggregate.recommendation is Recommendation.READY_TO_APPROVE
+
+
+# --- the two false passes this branch shipped and then fixed --------------------------------
+
+
+class _TypographyDisagreementProvider:
+    """Two photographs of the same back panel that disagree about how it is printed.
+
+    Same statement, word for word, on both. One picture says the heading is not bold —
+    a WARN-2 violation — and the sharper picture says it is.
+    """
+
+    name = "fake:typography-disagreement"
+
+    def __init__(self, *, confident_says_bold: bool) -> None:
+        self.confident_says_bold = confident_says_bold
+
+    def extract(self, request: ExtractionRequest) -> ExtractionResponse:
+        spec = by_name("tc16_front_back")
+        statement = spec.rendered_warning()
+        base = SpecBackedProvider(spec).extract(request)
+
+        for offset, extraction in enumerate(base.extractions):
+            bold = self.confident_says_bold if offset else not self.confident_says_bold
+            extraction.fields[WARNING] = ExtractedField(
+                value=statement, confidence=0.90 + 0.05 * offset, legible=True
+            )
+            extraction.warning_text = statement
+            extraction.warning_typography = WarningTypography(
+                header_is_all_caps=True, header_is_bold=bold, body_is_bold=False
+            )
+        return base
+
+
+@pytest.mark.tc("TC-16")
+@pytest.mark.parametrize("confident_says_bold", [True, False])
+def test_pictures_that_disagree_about_typography_do_not_settle_it_by_confidence(
+    confident_says_bold: bool,
+) -> None:
+    """WARN-2 must not be decided by which photograph was sharper.
+
+    Parametrized both ways on purpose. Only one direction is a false pass, but a fix that
+    happens to work because the violation was the confident reading is not a fix.
+    """
+    result = verify(
+        application_of(TC16),
+        prepare(TC16["images"]),
+        _TypographyDisagreementProvider(confident_says_bold=confident_says_bold),
+    )
+    assert row(result, WARNING).verdict is not Verdict.MATCH
+    assert result.aggregate.recommendation is Recommendation.NEEDS_REVIEW
+    assert any(
+        f.code == "warning_header_bold_unverified" for f in row(result, WARNING).findings
+    )
+
+
+class _StrayNonLabelProvider:
+    """The artwork has no warning on it. Something else in the upload does.
+
+    A carton photo, a marketing one-sheet, a printout of the regulation itself — the
+    extractor flags it `is_label=False` and still reads text off it.
+    """
+
+    name = "fake:stray-non-label"
+
+    def extract(self, request: ExtractionRequest) -> ExtractionResponse:
+        spec = by_name("tc16_front_back")
+        base = SpecBackedProvider(spec).extract(request)
+
+        artwork = base.extractions[0]
+        artwork.fields.pop(WARNING, None)
+        artwork.warning_text = None
+        artwork.warning_typography = WarningTypography()
+
+        stray = base.extractions[1]
+        stray.is_label = False
+        stray.fields[WARNING] = ExtractedField(
+            value=spec.rendered_warning(), confidence=0.99, legible=True
+        )
+        stray.warning_text = spec.rendered_warning()
+        stray.warning_typography = WarningTypography(
+            header_is_all_caps=True, header_is_bold=True, body_is_bold=False
+        )
+        return base
+
+
+@pytest.mark.tc("TC-15")
+def test_a_warning_on_a_non_label_image_does_not_answer_for_the_label() -> None:
+    """The worst outcome this product can produce: no warning on the label, approved.
+
+    TC-15 covers the case where nothing uploaded is a label. This is the mixed upload,
+    which is likelier and quieter — the response looks completely normal.
+    """
+    result = verify(
+        application_of(TC16), prepare(TC16["images"]), _StrayNonLabelProvider()
+    )
+    assert row(result, WARNING).verdict is Verdict.MISSING
+    assert result.aggregate.recommendation is Recommendation.RETURN_FOR_CORRECTION
+    assert result.aggregate.driving_field is WARNING
 
 
 # --- unreadable on one picture, readable on the other -------------------------------------
