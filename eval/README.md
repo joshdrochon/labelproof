@@ -209,7 +209,10 @@ Re-sending one image is the opposite of an independent read.
 *name*, so two specs differing only in `name` rendered byte-identical PNGs and counted as
 two — and two differing only in `brand_name` were two files but one warning region, which
 is the thing the posture is about. It now keys on `warning_fingerprint`: the rendered
-statement, its weights, scale, contrast and type size.
+statement, its weights, scale, contrast and type size. **One exception, deliberate:** for
+`warning_absent` there is no warning region to key on, so the whole label is the
+fingerprint and brand-only variants *do* count as two — noticing a missing warning depends
+on what else is on the label.
 
 **A fixture carrying two defects is evidence for neither.** A label that is both body-bold
 and title-case comes back non-passing if the model catches *either*, so it cannot show that

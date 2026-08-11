@@ -45,6 +45,7 @@ from fixtures.generator.catalog import (
     WARNING_DEFECT_PINS,
     by_name,
     misrendered_warning_fixtures,
+    spec_type_problems,
     warning_defects,
 )
 from fixtures.generator.spec import LabelSpec
@@ -199,12 +200,23 @@ def test_the_declaration_pin_fires_when_an_expectation_is_emptied() -> None:
     assert not report.warning_coverage_ok
     assert not report.passed
     assert "DECLARATION SHORTFALL" in render(report)
-    # The pin, not `expect`, is the authority on whether this row is a violation — so
-    # neutering the declaration surfaces the live fail-open as a FALSE PASS rather than
-    # demoting it to a coverage shortfall. "Coverage" is the wrong page for
-    # "a label violating 27 CFR 16.21 was reported compliant".
-    assert exit_code_for(gates_for(report)) == EXIT_WARNING_FALSE_PASS
-    assert {o.fixture for o in report.false_passes} == {"tc06_buried_warning"}
+
+    # The pin, not `expect`, is the authority on whether this row is a violation. When the
+    # pipeline currently fails open on it, neutering the declaration therefore surfaces a
+    # FALSE PASS rather than demoting it to a coverage shortfall — "coverage" is the wrong
+    # page for "a label violating 27 CFR 16.21 was reported compliant".
+    #
+    # Asked of the harness at run time, never hardcoded. This assertion previously pinned
+    # "tc06 fails open today", which made it the one test that a legitimate LP-211 landing
+    # broke — indistinguishable from the catalog edit it exists to catch, with the same
+    # obvious repair. `golden_exit()` is written this way for the same reason.
+    fails_open = "tc06_buried_warning" in live_false_passes()
+    assert exit_code_for(gates_for(report)) == (
+        EXIT_WARNING_FALSE_PASS if fails_open else EXIT_WARNING_COVERAGE
+    )
+    assert {o.fixture for o in report.false_passes} == (
+        {"tc06_buried_warning"} if fails_open else set()
+    )
 
 
 def test_neutering_expect_on_a_pinned_fixture_that_is_caught_is_a_coverage_failure() -> None:
@@ -234,6 +246,39 @@ def test_a_passing_expectation_is_as_bad_as_no_expectation() -> None:
 
 
 # --- what the fixture RENDERS, not what is declared about it -----------------------------------
+
+#: The defect map the repository committed to, written out rather than imported.
+#:
+#: `WARNING_DEFECT_PINS` had no ratchet: both per-fixture tests parametrise over its keys
+#: and the agreement test loops over it, so deleting one entry dropped collection by two
+#: and left the suite green — the "applied to all five fixtures" claim erasing one line at
+#: a time. `PINNED_REQUIRED_VIOLATIONS` already learned this lesson; it was not carried
+#: over. Growing the map is free; shrinking it fails here.
+PINNED_DEFECT_MAP: dict[str, frozenset[str]] = {
+    "tc03_title_case_warning": frozenset({"header_not_all_caps"}),
+    "tc04_bold_warning_body": frozenset({"body_bold"}),
+    "tc05_reworded_warning": frozenset({"text_altered"}),
+    "tc06_buried_warning": frozenset({"prominence"}),
+    "tc07_missing_warning": frozenset({"absent"}),
+}
+
+
+def test_the_defect_pins_can_only_grow() -> None:
+    missing = {
+        name: defects
+        for name, defects in PINNED_DEFECT_MAP.items()
+        if WARNING_DEFECT_PINS.get(name) != defects
+    }
+    assert missing == {}, f"defect pin removed or altered: {sorted(missing)}"
+
+
+def test_the_defect_pin_ratchet_is_not_itself_a_tautology() -> None:
+    assert PINNED_DEFECT_MAP != {}
+    assert any(
+        WARNING_DEFECT_PINS.get(name) != defects
+        for name, defects in {**PINNED_DEFECT_MAP, "invented": frozenset()}.items()
+    )
+
 
 def test_every_pinned_fixture_draws_exactly_its_pinned_defect() -> None:
     assert misrendered_warning_fixtures(list(CATALOG)) == []
@@ -320,6 +365,75 @@ def test_adding_a_second_defect_is_caught_on_every_pinned_fixture(name: str) -> 
         for s in CATALOG
     ]
     assert any(name in p for p in misrendered_warning_fixtures(swapped))
+
+
+@pytest.mark.parametrize(
+    "knob", ["include_warning", "warning_header_bold", "warning_body_bold"]
+)
+def test_a_tri_state_none_on_a_render_knob_is_caught(knob: str) -> None:
+    """Door four. `warning_body_bold=None` drew byte-identical pixels and exited 0.
+
+    The renderer reads None as falsy and draws the same clean body; the extractor reports
+    the tri-state "could not determine", which makes the verdict non-passing for a reason
+    unrelated to the violation under test. A truthiness test on a value that is a
+    tri-state one layer down was the actual bug.
+    """
+    poisoned = [
+        spec.with_(**{knob: None}) if spec.name == "tc06_buried_warning" else spec
+        for spec in CATALOG
+    ]
+    report = evaluate(poisoned)
+    assert report.misrendered_violations, knob
+    assert any("tc06_buried_warning" in p for p in report.misrendered_violations)
+    assert not report.passed
+    assert exit_code_for(gates_for(report)) != EXIT_OK
+
+
+def test_the_none_knob_really_does_render_identically() -> None:
+    """Pins why the pin is needed: the pixels are the same, so only the type check sees it."""
+    from fixtures.generator.render import render as render_label
+
+    base = by_name("tc06_buried_warning").with_(face="back")
+    import io
+
+    def png(spec: LabelSpec) -> bytes:
+        buf = io.BytesIO()
+        render_label(spec).save(buf, "PNG", optimize=True)
+        return buf.getvalue()
+
+    assert png(base) == png(base.with_(warning_body_bold=None))
+
+
+@pytest.mark.parametrize("knob", ["warning_scale", "warning_contrast"])
+def test_a_non_numeric_prominence_knob_is_caught(knob: str) -> None:
+    poisoned = [
+        spec.with_(**{knob: None}) if spec.name == "tc06_buried_warning" else spec
+        for spec in CATALOG
+    ]
+    assert spec_type_problems(
+        next(s for s in poisoned if s.name == "tc06_buried_warning")
+    )
+
+
+def test_bools_are_tested_by_identity_never_truthiness() -> None:
+    base = by_name("tc01_old_tom_clean")
+    assert warning_defects(base.with_(warning_body_bold=None)) == frozenset({"body_bold"})
+    assert warning_defects(base.with_(warning_header_bold=None)) == frozenset(
+        {"header_not_bold"}
+    )
+    assert warning_defects(base.with_(include_warning=None)) == frozenset({"absent"})
+
+
+def test_a_clean_catalog_has_no_type_problems() -> None:
+    for spec in CATALOG:
+        assert spec_type_problems(spec) == [], spec.name
+
+
+def test_the_type_message_explains_the_two_meanings_of_none() -> None:
+    """The next person needs to know why, not just that."""
+    problems = spec_type_problems(CATALOG[0].with_(warning_body_bold=None))
+    assert "DRAWN" in problems[0]
+    assert "could not determine" in problems[0]
 
 
 def test_the_defect_derivation_reads_pixels_not_intent() -> None:

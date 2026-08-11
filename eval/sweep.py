@@ -154,9 +154,12 @@ def warning_fingerprint(spec: LabelSpec) -> tuple[object, ...]:
     `brand_name` were two files but one warning rendering, which is the thing the posture
     is about. This keys on the pixels that matter instead.
 
-    When the warning is absent there is no region to key on, so the whole label is the
-    fingerprint: noticing a missing warning depends on the rest of the label, not on a
-    blank space.
+    **One deliberate exception to "distinctness is by rendering".** When the warning is
+    absent there is no warning region to key on, so the whole label becomes the
+    fingerprint — which means brand-only variants DO count as two for `warning_absent`,
+    and only for it. That is the right answer rather than an oversight: noticing that a
+    warning is missing depends on what else is on the label, so two different labels are
+    two genuine tests of that posture in a way they are not for the others.
     """
     if not spec.include_warning:
         return (
