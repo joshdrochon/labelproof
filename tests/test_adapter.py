@@ -12,6 +12,7 @@ schema need, and that the answer we accept can never become a value nobody read.
 from __future__ import annotations
 
 import json
+import logging
 import threading
 import time
 from dataclasses import dataclass, field
@@ -24,6 +25,7 @@ from api.models import Commodity, FieldName
 from api.provider.anthropic_adapter import (
     EXTRACTION_SCHEMA,
     MAX_TOKENS,
+    MAX_UNION_PARAMETERS,
     SYSTEM_BLOCKS,
     AnthropicVisionProvider,
     build_system_blocks,
@@ -114,7 +116,7 @@ def a_field(
     on_this_image: bool = True,
     legible: bool = True,
     confidence: float = 0.9,
-    bbox: dict[str, float] | None = None,
+    bbox: Any = None,
 ) -> dict[str, Any]:
     return {
         "value": value,
@@ -404,6 +406,85 @@ def test_the_tri_state_signals_admit_null_in_the_schema() -> None:
     typography = EXTRACTION_SCHEMA["properties"]["warning_typography"]["properties"]
     for key in ("header_is_all_caps", "header_is_bold", "body_is_bold", "contrast_ok"):
         assert typography[key] == {"anyOf": [{"type": "boolean"}, {"type": "null"}]}
+
+
+def _count_unions(node: Any) -> int:
+    """Union-typed parameters anywhere in the schema, however deeply nested."""
+    if not isinstance(node, dict):
+        return 0
+    here = 1 if ("anyOf" in node or "oneOf" in node or isinstance(node.get("type"), list)) else 0
+    for key in ("properties", "$defs", "definitions"):
+        for child in (node.get(key) or {}).values():
+            here += _count_unions(child)
+    for key in ("items", "additionalProperties"):
+        here += _count_unions(node.get(key))
+    for branch in node.get("anyOf") or node.get("oneOf") or []:
+        here += _count_unions(branch)
+    return here
+
+
+def test_the_schema_stays_under_the_api_union_limit() -> None:
+    """Structured output rejects a schema with more than 16 union-typed parameters.
+
+    Not a style rule — it is a 400 on *every* live call, and the offline suite cannot
+    see it, because the fake providers never build a request. The natural shape of this
+    schema has 20 (seven values, seven boxes, warning_text, relative_size, four
+    tri-states); the LP-330 spike hit the wall on its first real call. Anything that adds
+    a nullable field has to give one back.
+    """
+    assert _count_unions(EXTRACTION_SCHEMA) <= MAX_UNION_PARAMETERS
+
+
+def test_the_evidence_box_is_flat_and_never_a_nested_object() -> None:
+    """Seven nested boxes overflow the grammar-size cap — a 400 on every live call.
+
+    Independent of the union limit above: the spike's schema failed this way even with
+    every union stripped out. Nesting is the cost, so the shape has to stay flat.
+    """
+    for name in FieldName:
+        field_schema = EXTRACTION_SCHEMA["properties"]["fields"]["properties"][name.value]
+        bbox = field_schema["properties"]["bbox"]
+        assert bbox == {"type": "string"}
+
+
+@pytest.mark.parametrize(
+    "raw",
+    ["0.1,0.2,0.9,0.4", " 0.1 , 0.2 , 0.9 , 0.4 "],
+    ids=["plain", "padded"],
+)
+def test_a_flat_box_string_is_parsed_into_an_evidence_box(raw: str) -> None:
+    provider, _ = a_provider(responds_with(a_label(fields={"brand_name": a_field("OLD TOM", bbox=raw)})))
+    box = provider.extract(a_request()).extractions[0].fields[FieldName.BRAND_NAME].bbox
+
+    assert box is not None
+    assert (box.x0, box.y0, box.x1, box.y1) == (0.1, 0.2, 0.9, 0.4)
+
+
+def test_an_empty_box_string_reads_as_no_box_and_is_not_logged_as_a_defect(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """"" is the expected answer for a field the model did not read, not a bad box."""
+    provider, _ = a_provider(responds_with(a_label(fields={"brand_name": a_field("OLD TOM", bbox="")})))
+    with caplog.at_level(logging.WARNING):
+        extraction = provider.extract(a_request()).extractions[0]
+
+    assert extraction.fields[FieldName.BRAND_NAME].value == "OLD TOM"
+    assert extraction.fields[FieldName.BRAND_NAME].bbox is None
+    assert "provider_bbox_dropped" not in caplog.text
+
+
+@pytest.mark.parametrize(
+    "raw",
+    ["0.1,0.2,0.9", "0.1,0.2,0.9,0.4,0.5", "left,top,right,bottom", "0.1;0.2;0.9;0.4"],
+    ids=["too-few", "too-many", "not-numbers", "wrong-separator"],
+)
+def test_a_malformed_box_string_is_dropped_and_the_reading_survives(raw: str) -> None:
+    """A decorative field must never cost a correctly-read value (BUILD.md §1)."""
+    provider, _ = a_provider(responds_with(a_label(fields={"brand_name": a_field("OLD TOM", bbox=raw)})))
+    brand = provider.extract(a_request()).extractions[0].fields[FieldName.BRAND_NAME]
+
+    assert brand.value == "OLD TOM"
+    assert brand.bbox is None
 
 
 # --------------------------------------------------------------------------------------

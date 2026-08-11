@@ -109,22 +109,34 @@ _TRISTATE: Final[dict[str, Any]] = {"anyOf": [{"type": "boolean"}, {"type": "nul
 
 
 def _bbox_schema() -> dict[str, Any]:
-    return {
-        "anyOf": [
-            {
-                "type": "object",
-                "properties": {
-                    "x0": {"type": "number"},
-                    "y0": {"type": "number"},
-                    "x1": {"type": "number"},
-                    "y1": {"type": "number"},
-                },
-                "required": ["x0", "y0", "x1", "y1"],
-                "additionalProperties": False,
-            },
-            {"type": "null"},
-        ]
-    }
+    """The evidence box, as a flat `"left,top,right,bottom"` string. Empty means no box.
+
+    A nested object here would be the natural shape, and it is the one the API refuses.
+    Structured output compiles the schema to a grammar and enforces two separate ceilings;
+    the LP-330 spike hit both on its first real call, and neither is visible offline
+    because the fake providers never build a request:
+
+    1. At most 16 union-typed parameters. The natural schema has 20 — seven `value`s,
+       seven `bbox`es, `warning_text`, `relative_size`, four tri-states.
+    2. A total grammar-size cap. Seven nested four-number objects blow past it *even with
+       every union removed*, which is what makes this a representation problem rather than
+       a nullability one. (A four-element array is not a way out either: `minItems` above
+       1 is unsupported.)
+
+    Flattening the box to a string clears both and — this is the reason to prefer it over
+    the alternatives — costs nothing that matters. An evidence box points an agent's eye
+    at a region; no verdict depends on one (BUILD.md §1), a malformed one is dropped
+    rather than raised, and the seven boxes were always the cheapest thing in this schema
+    to spend. `value` stays nullable and the typography signals stay `bool | None`, which
+    is the part that had to survive (LP-067, WARN-6).
+    """
+    return {"type": "string"}
+
+
+#: Hard ceiling the Messages API enforces on union-typed parameters in a JSON schema.
+#: Asserted by test, because exceeding it is a 400 on every live call and zero test
+#: failures — the schema is only ever exercised for real against the API.
+MAX_UNION_PARAMETERS: Final[int] = 16
 
 
 def _field_schema() -> dict[str, Any]:
@@ -273,9 +285,15 @@ its heading and punctuation.
 
 For each field give a confidence between 0 and 1 that your transcription is character-for-\
 character correct. Confidence is about legibility and certainty, not about whether you \
-think the label is compliant. Also give bbox, the region the text occupies, as fractions \
-of image width and height with the origin at the top left; approximate is fine, and null \
-is fine if you would rather not say."""
+think the label is compliant.
+
+Also give bbox, the region the text occupies, as four comma-separated numbers — \
+"left,top,right,bottom" — as fractions of image width and height with the origin at the \
+top left. For example "0.12,0.30,0.88,0.41". Approximate is fine. Use the empty string \
+"" if you did not read the field or would rather not place a box; that costs nothing. \
+Never place a box over a region you did not actually read the value from — the box is \
+what a reviewer's eye follows to check your work, and one pointing at the wrong text is \
+worse than none."""
 
 _WARNING_BLOCK: Final[str] = """\
 The government warning statement gets extra attention, and it is the one place where \
@@ -630,8 +648,30 @@ def _validated_bbox(raw: Any) -> BoundingBox | None:
     (BUILD.md §1). Throwing away a correctly-read brand name because the model returned
     a box with x1 of 1.02 would trade something load-bearing for something decorative.
     """
+    # A dict is still accepted so a recorded fixture or an offline provider can hand over
+    # a box in its natural shape. The wire format from the live model is the flat string
+    # described in `_bbox_schema`.
+    if isinstance(raw, str):
+        text = raw.strip()
+        if not text:
+            # The empty string is "no box" — the expected answer for any field the model
+            # did not read. Not a defect, so it is not logged as one; a warning on every
+            # unread field would bury the real ones.
+            return None
+        parts = text.split(",")
+        if len(parts) != 4:
+            lp_logging.warn("provider_bbox_dropped", provider="anthropic", reason_code="malformed")
+            return None
+        try:
+            numbers = [float(part) for part in parts]
+        except ValueError:
+            lp_logging.warn("provider_bbox_dropped", provider="anthropic", reason_code="malformed")
+            return None
+        raw = dict(zip(("x0", "y0", "x1", "y1"), numbers, strict=True))
+
     if not isinstance(raw, dict):
         return None
+
     try:
         box = BoundingBox.model_validate(raw)
     except ValidationError:
