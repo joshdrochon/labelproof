@@ -247,3 +247,99 @@ def test_the_centre_of_a_curved_label_stays_sharpest(clean: np.ndarray) -> None:
     centre = warped[:, int(width * 0.35) : int(width * 0.65)]
     edge = warped[:, : int(width * 0.15)]
     assert quality.blur_score(centre) > quality.blur_score(edge)
+
+
+# --- LP-194 · the fabrication sweep (TC-14) ------------------------------------------------------
+
+def printed_on(spec: LabelSpec) -> str:
+    """Everything the generator actually drew on this label, as one lowercase string.
+
+    Ground truth for "was this value read, or was it made up". The generator drew the
+    label, so anything not in here was not on it.
+    """
+    parts = [
+        spec.brand_name,
+        spec.class_type,
+        spec.alcohol_text,
+        spec.net_contents,
+        spec.producer,
+        spec.country_of_origin or "",
+        spec.rendered_warning() if spec.include_warning else "",
+    ]
+    return " ".join(parts).lower()
+
+
+@pytest.mark.tc("TC-14")
+@pytest.mark.parametrize("condition", degrade.CONDITIONS, ids=lambda c: c.name)
+def test_no_condition_produces_a_value_that_was_not_on_the_label(
+    spec: LabelSpec, clean: np.ndarray, condition: degrade.Condition
+) -> None:
+    """The sweep. Across every degradation, every value reported as extracted must be
+    something the generator actually printed.
+
+    This is the failure that matters more than any accuracy number. A pipeline that
+    returns nothing under bad conditions is annoying; one that returns a plausible
+    government warning it could not see is dangerous, and the damage is invisible because
+    the output looks exactly like a correct one.
+    """
+    result, _, _ = apply_and_run(spec, clean, condition)
+    printed = printed_on(spec)
+
+    for field in result.fields:
+        if field.extracted is None:
+            continue
+        assert field.extracted.lower() in printed, (
+            f"{condition.name}: {field.field.value} reported "
+            f"{field.extracted!r}, which is not printed on the label"
+        )
+
+
+@pytest.mark.tc("TC-14")
+@pytest.mark.parametrize("condition", degrade.CONDITIONS, ids=lambda c: c.name)
+def test_an_illegible_field_is_never_given_a_value(
+    spec: LabelSpec, clean: np.ndarray, condition: degrade.Condition
+) -> None:
+    """Unreadable and a value are mutually exclusive. There is no channel for a guess and
+    this asserts nothing found its way into one anyway."""
+    result, _, _ = apply_and_run(spec, clean, condition)
+    for field in result.fields:
+        if field.verdict is Verdict.UNREADABLE:
+            assert field.extracted is None, f"{condition.name}: {field.field.value}"
+
+
+PREGATED = [c for c in degrade.CONDITIONS if c.expectation == "pregated"]
+
+
+@pytest.mark.tc("TC-14")
+@pytest.mark.parametrize("condition", PREGATED, ids=lambda c: c.name)
+def test_a_hopeless_image_costs_nothing_and_claims_nothing(
+    spec: LabelSpec, clean: np.ndarray, condition: degrade.Condition
+) -> None:
+    """LP-321. The pre-gate's outcome is "we did not verify this", which is the one thing
+    a false pass can never be — and it spends zero tokens saying it."""
+    _, processed, _ = apply_and_run(spec, clean, condition)
+    assert quality.should_skip_extraction(processed.quality_before)
+    assert processed.quality_before.reason
+
+
+@pytest.mark.tc("TC-14")
+@pytest.mark.parametrize("condition", PREGATED, ids=lambda c: c.name)
+def test_the_retake_reason_names_a_fixable_problem(
+    spec: LabelSpec, clean: np.ndarray, condition: degrade.Condition
+) -> None:
+    """An agent has to know what to ask for. "Quality score 0.14" is not an instruction."""
+    _, processed, _ = apply_and_run(spec, clean, condition)
+    reason = (processed.quality_before.reason or "").lower()
+    assert any(word in reason for word in ("blurry", "dark", "glare", "flash"))
+
+
+@pytest.mark.tc("TC-14")
+def test_the_sweep_covers_every_kind_of_expectation() -> None:
+    """Guards the sweep itself. A condition added without a stated expectation would be
+    swept but assert nothing, and the suite would look broader than it is."""
+    assert len(degrade.CONDITIONS) >= 13
+    assert {c.expectation for c in degrade.CONDITIONS} == {
+        "readable",
+        "warning_illegible",
+        "pregated",
+    }
