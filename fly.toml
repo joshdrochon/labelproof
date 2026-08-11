@@ -109,21 +109,32 @@ kill_timeout = "15s"
   # port 80 with a 200.
   force_https = true
 
-  # PERF-6, and the single most important pair of lines in this file.
+  # PERF-6: the machine must never be stopped when the grader clicks.
   #
-  # `min_machines_running = 1` keeps an instance up; `auto_stop_machines = "off"` keeps
-  # the platform from stopping it during the quiet stretch between a grader opening the
-  # repository and clicking the link. "suspend" would be cheaper and would still cost a
-  # resume on the first request — and the first request is the one being protected. The
-  # previous vendor lost this account to 30–40 second responses; a cold start on the
-  # grader's first click is the same failure in miniature.
+  # `auto_stop_machines = "off"` is the line that does the work. "suspend" would be
+  # cheaper and would still cost a resume on the first request — and the first request is
+  # the one being protected. The previous vendor lost this account to 30–40 second
+  # responses; a cold start on the grader's first click is that failure in miniature.
+  #
+  # `min_machines_running = 1` is a NO-OP as configured, and is kept only as documentation
+  # of intent. Fly consults it when deciding how many machines to leave up while
+  # autostopping — with autostop off, nothing ever stops, so there is no floor to enforce.
+  # It matters the moment someone sets autostop to "stop" or "suspend"; until then it
+  # asserts nothing. (An earlier version of this comment called these two lines the most
+  # important pair in the file, which credited the wrong one.)
   auto_stop_machines = "off"
   auto_start_machines = true
   min_machines_running = 1
 
-  # A verification holds a connection for seconds while the provider works. Low limits
-  # here so a burst queues at the edge instead of piling onto one machine's event loop
-  # and pushing everyone past the budget.
+  # A verification holds a connection open for seconds while the provider works, so these
+  # are low.
+  #
+  # What they actually do on a single-machine app: `soft_limit` is the point at which the
+  # edge prefers to route new requests to a DIFFERENT machine — with one machine there is
+  # nowhere else to send them, so it has no effect today and becomes load-spreading the
+  # moment a second machine exists. `hard_limit` is the real control: at that many
+  # in-flight requests the edge stops routing here rather than queueing behind them.
+  # Better a fast, honest rejection than a connection that sits until it times out.
   [http_service.concurrency]
     type = "requests"
     soft_limit = 12
@@ -165,16 +176,24 @@ kill_timeout = "15s"
     method = "GET"
     path = "/health"
 
-  # `/ready` — can this process actually check a label: config complete, provider
-  # reachable. Red means take me out of rotation. It is also the gate a new release must
-  # pass: `fly deploy` will not promote a machine whose checks are failing, so a release
-  # that ships without ANTHROPIC_API_KEY fails here and never receives traffic.
+  # `/ready` — is this process CONFIGURED to check a label: required settings present and
+  # the provider client constructible. Red means take me out of rotation. It is also the
+  # gate a new release must pass: `fly deploy` will not promote a machine whose checks are
+  # failing, so a release that ships without ANTHROPIC_API_KEY fails here and never
+  # receives traffic.
   #
-  # What this check CANNOT catch, stated rather than assumed: `/ready` answers 200 in
-  # sample mode too, flagged `simulated: true` in the body, and Fly's checks match status
-  # codes, not bodies. Two other layers cover it — `LABELPROOF_FAKE_PROVIDER = "0"` above
-  # makes it unreachable by configuration, and scripts/smoke.sh asserts on the field after
-  # every deploy, rolling the release back if it is true.
+  # Two things it CANNOT catch, stated rather than assumed:
+  #
+  # 1. It does not contact the provider. It builds the SDK client and stops; the client
+  #    has no reachability probe. A key that is present but revoked, expired or scoped to
+  #    the wrong workspace answers 200 and `"simulated": false`. A MISSING key is caught.
+  # 2. It answers 200 in sample mode too, flagged only in the body, and Fly's checks match
+  #    status codes rather than bodies.
+  #
+  # Three other layers cover the gap: LABELPROOF_FAKE_PROVIDER = "0" above makes sample
+  # mode unreachable by configuration; scripts/smoke.sh performs a real verification after
+  # every deploy and rolls the release back if it fails; and the keep-warm loop calls the
+  # provider every four minutes and logs the outcome.
   [[http_service.checks]]
     interval = "30s"
     timeout = "6s"

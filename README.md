@@ -29,17 +29,27 @@ that reproduces production locally.
 
 ### Why `iad`
 
-Two reasons, in order of weight.
+The users are a federal agency in Washington DC. Northern Virginia is the closest Fly
+region to them — roughly 5–15 ms round trip against 60–70 ms from the west coast. On a
+budget dominated by a multi-second model call that is not decisive, but it costs nothing
+and it is the reason that survives scrutiny.
 
-The vision call dominates every verification, so the server-to-provider leg sits on the
-critical path of a 5-second budget. `iad` is the shortest hop to where that traffic
-terminates. Second, the users are a federal agency in Washington DC — Northern Virginia
-is roughly 5–15 ms away against 60–70 ms from the west coast. On its own that would not
-decide anything; alongside the first reason it is free.
+Two claims that were here have been removed because we cannot currently support them:
 
-There is a third reason worth stating plainly for a federal audience: the service and its
-only outbound dependency both sit inside the continental United States, so the data
-residency question has a one-word answer.
+- *"the shortest hop to the provider"* — plausible, unmeasured. Nobody has timed
+  `iad → api.anthropic.com` against another region from inside this app. It stays out
+  until someone does.
+- *"the service and its only outbound dependency both sit inside the continental US, so
+  the data-residency question has a one-word answer"* — **not true as shipped.** The
+  adapter does not set `inference_geo`, so requests follow the workspace default, which
+  is global unless configured otherwise. The app's *compute* is in Virginia; where the
+  model runs is a separate setting nobody had set. Told to a federal agency, that was a
+  claim the code did not back, which is worse than making no claim at all.
+
+Pinning `inference_geo="us"` in the adapter is tracked separately. **Until that ships and
+the workspace allowlist is confirmed, do not tell anyone this deployment guarantees US
+data residency.** When it does ship, this section can say so — and `/ready` reporting the
+geo would make it checkable rather than asserted.
 
 ### Deploying
 
@@ -64,11 +74,23 @@ Two endpoints answering two different questions, wired to two different conseque
 | Endpoint | Question | Red means |
 |---|---|---|
 | `GET /health` | Is the process alive? Touches no config, no provider, no disk. | Restart me. |
-| `GET /ready` | Can this process actually check a label — config complete, provider reachable? | Take me out of rotation. |
+| `GET /ready` | Is this process *configured* to check a label — required settings present, provider client constructible? | Take me out of rotation. |
 
 Both are platform checks, and `/ready` is the gate a new release must pass before it
-receives traffic: a release shipped without `ANTHROPIC_API_KEY` fails there and never
+receives traffic: a release shipped **without** `ANTHROPIC_API_KEY` fails there and never
 serves a request.
+
+**`/ready` does not contact the provider.** It validates configuration and constructs the
+SDK client; the client exposes no reachability probe, so nothing leaves the machine. A key
+that is *present but revoked, expired, or scoped to the wrong workspace* answers
+`{"status":"ready","simulated":false}` with a 200. A missing key is genuinely caught — that
+half holds — but "provider reachable" was an overstatement and is not what this endpoint
+measures.
+
+What actually proves the provider works is `scripts/smoke.sh`, which performs a real
+verification after every deploy. If you need continuous assurance rather than
+per-deploy, the keep-warm loop calls the provider every four minutes and logs the
+outcome — that is the closest thing to a live provider check this service has.
 
 **`/ready` returning 200 is not the same as the service being usable.** In sample mode it
 answers 200 with `simulated: true` — a server that can replay the built-in example labels
@@ -134,8 +156,14 @@ single-domain allowlist sufficient for an agency workstation.
 | `deb.debian.org`, `security.debian.org` | One system package (`libglib2.0-0`) |
 | `pypi.org`, `files.pythonhosted.org` | Python dependencies |
 | `registry.npmjs.org` | Web dependencies |
+| `nodejs.org` | Node runtime download, on a `setup-node` cache miss |
+| `github.com`, `objects.githubusercontent.com` | Source checkout, Actions, and the `flyctl` binary download |
+| `api.github.com` | Actions API |
 | `registry.fly.io`, `api.machines.dev` | Image push and machine API, from CI |
-| `github.com`, `api.github.com` | Source checkout and Actions |
+
+*(`nodejs.org` and the `flyctl` download were missing from an earlier version of this
+table, which was presented as complete. If you are allowlisting a build network, prefer
+verifying against a run with egress logging over trusting this list.)*
 
 **Swapping providers.** All AI calls go through one server-side interface
 (`api/provider/base.py`). Pointing the service at an Azure-hosted or gov-cloud endpoint is
