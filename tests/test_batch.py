@@ -79,30 +79,15 @@ def make_config(tmp_path: Path, **overrides: Any) -> Config:
     return Config(**base)
 
 
-def _batch_is_mounted(app: Any) -> bool:
-    for route in app.router.routes:
-        if getattr(route, "original_router", None) is batch_routes.router:
-            return True
-        if str(getattr(route, "path", "")).startswith("/batch"):
-            return True
-    return False
-
-
 def make_client(tmp_path: Path, provider: Any = None, **overrides: Any) -> TestClient:
-    """The real app, with the batch router guaranteed to be mounted and reachable.
+    """The shipped app, exactly as `create_app` builds it.
 
-    `api/main.py` mounts an SPA catch-all last, and a catch-all registered ahead of the
-    batch routes would swallow `GET /batch/{id}`. Anything added here is therefore moved
-    to the front of the table. When main.py already mounts batch itself, this is a no-op
-    and the app under test is exactly the shipped one.
+    Nothing is added here on purpose. An earlier version of this helper mounted the batch
+    router itself when it found it missing, which made every test in this file pass
+    against an app whose batch endpoints were unreachable in production. The router is
+    mounted by `api/main.py` or these tests fail, which is the point.
     """
     app = create_app(config=make_config(tmp_path, **overrides), provider=provider)
-    if not _batch_is_mounted(app):
-        before = len(app.router.routes)
-        app.include_router(batch_routes.router)
-        added = app.router.routes[before:]
-        del app.router.routes[before:]
-        app.router.routes[0:0] = added
     return TestClient(app)
 
 
@@ -265,6 +250,24 @@ class GatedProvider:
 
 def spec_provider() -> SpecBackedProvider:
     return SpecBackedProvider("tc01_old_tom_clean")
+
+
+# --- wiring (LP-073) --------------------------------------------------------------------
+
+
+def test_the_shipped_app_mounts_the_batch_router(tmp_path: Path) -> None:
+    """Everything below this line reaches batch over HTTP, so it all depends on this line.
+
+    Stated once and by name, because a diffuse failure across forty tests reads as "batch
+    is broken" when the actual fault is one missing `include_router` in the app factory.
+    """
+    app = create_app(config=make_config(tmp_path))
+    mounted = [
+        route
+        for route in app.router.routes
+        if getattr(route, "original_router", None) is batch_routes.router
+    ]
+    assert mounted, "api/main.py does not mount api.routes.batch"
 
 
 # --- the store (LP-147, LP-152, LP-158, BATCH-6) ---------------------------------------
@@ -659,20 +662,16 @@ class SlowProvider:
 def test_verify_now_stays_fast_while_a_batch_is_running(tmp_path: Path) -> None:
     """PERF-5, LP-165 — the agent working their queue does not feel the importer dump.
 
-    Runs over HTTP with the priority middleware installed, which is the one line
-    `create_app` needs for the shared budget to mean anything.
+    Runs over HTTP against the shipped app. The priority middleware is installed by
+    `create_app` and not by this test: a test that wires up the thing it is measuring can
+    pass while the deployed process has no priority rule at all.
     """
-    app = create_app(
-        config=make_config(tmp_path, batch_workers=4),
+    client = make_client(
+        tmp_path,
         provider=SlowProvider(spec_provider(), delay=0.05),
+        batch_workers=4,
     )
-    batch_routes.install_verify_priority(app)
-    before = len(app.router.routes)
-    app.include_router(batch_routes.router)
-    added = app.router.routes[before:]
-    del app.router.routes[before:]
-    app.router.routes[0:0] = added
-    client = TestClient(app)
+    app = client.app
 
     job_id = post_batch(client, [row() for _ in range(24)]).json()["job_id"]
     wait_until(

@@ -18,11 +18,13 @@ from fastapi.testclient import TestClient
 from PIL import Image
 
 from api import logging as applog
+from api import main as main_mod
 from api.config import Config
 from api.main import create_app
 from api.models import Recommendation, Verdict
 from api.provider.base import ExtractionRequest, ExtractionResponse
 from api.provider.fake import FailingProvider, SpecBackedProvider
+from api.routes import batch as batch_routes
 from fixtures.generator.catalog import by_name
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -193,27 +195,83 @@ def test_oversized_upload_is_rejected_with_a_size_to_aim_for() -> None:
     assert error["next_step"] == "resize"
 
 
-def test_an_impossible_upload_is_refused_before_it_is_buffered() -> None:
-    """A 2GB post should cost a header read, not a disk spool."""
-    client = make_client(max_image_bytes=1024, max_images=1)
-    response = client.post(
-        "/verify",
-        content=b"x",
-        headers={"Content-Type": "multipart/form-data; boundary=x", "Content-Length": "1"},
-    )
-    # Sanity: a normal-sized body still reaches the route's own validation.
-    assert response.status_code == 400
+def declare(client: TestClient, path: str, length: int) -> Any:
+    """Post a one-byte body that *claims* to be `length` bytes.
 
-    huge = client.post(
-        "/verify",
+    The whole-request ceiling reads `Content-Length` and answers before the body is
+    buffered, which is the behaviour under test. Actually sending a gigabyte to assert
+    that we refuse a gigabyte would make the suite unrunnable.
+    """
+    return client.post(
+        path,
         content=b"x",
         headers={
             "Content-Type": "multipart/form-data; boundary=x",
-            "Content-Length": str(500 * 1024 * 1024),
+            "Content-Length": str(length),
         },
     )
+
+
+def test_an_impossible_upload_is_refused_before_it_is_buffered() -> None:
+    """A 2GB post should cost a header read, not a disk spool."""
+    client = make_client(max_image_bytes=1024, max_images=1)
+    response = declare(client, "/verify", 1)
+    # Sanity: a normal-sized body still reaches the route's own validation.
+    assert response.status_code == 400
+
+    huge = declare(client, "/verify", 500 * 1024 * 1024)
     assert huge.status_code == 400
     assert huge.json()["error"]["code"] == "file_too_large"
+
+
+def test_the_verify_ceiling_names_the_verify_limit() -> None:
+    huge = declare(make_client(), "/verify", 500 * 1024 * 1024)
+    message = huge.json()["error"]["message"]
+    assert "4 images of up to 10 MB each" in message
+    assert "batch" not in message.lower()
+
+
+def test_a_real_batch_upload_is_not_refused_by_the_verify_ceiling(tmp_path: Path) -> None:
+    """The blocker this test exists for.
+
+    A 300-application dump is roughly 600 photographs — over a gigabyte. The ceiling used
+    to be `max_images x max_image_bytes + 1 MB` = 41 MB on every path, so the real thing
+    this feature was built for was refused before it reached a route, and the refusal told
+    the agent to "send at most 4 images". The prototype passed only because every fixture
+    is kilobytes.
+    """
+    client = make_client(storage_dir=str(tmp_path))
+    response = declare(client, "/batch", 600 * 1024 * 1024)
+
+    assert response.status_code == 400  # malformed multipart, having got past the ceiling
+    code = response.json()["error"]["code"]
+    assert code not in ("file_too_large", "batch_too_large"), (
+        "a 600 MB batch was refused by a size ceiling"
+    )
+
+
+def test_the_batch_ceiling_still_refuses_the_impossible_and_names_the_batch_limit(
+    tmp_path: Path,
+) -> None:
+    """Path-aware does not mean unbounded — a 4 GB post still costs a header read."""
+    client = make_client(storage_dir=str(tmp_path))
+    response = declare(client, "/batch", 4 * 1024 * 1024 * 1024)
+
+    assert response.status_code == 400
+    error = response.json()["error"]
+    assert error["code"] == "batch_too_large"
+    assert error["next_step"] == "reduce"
+    # The refusal names the limit for the path that refused, not the other mode's.
+    assert "2 GB" in error["message"]
+    assert "4 images" not in error["message"]
+
+
+def test_the_verify_ceiling_is_unchanged_by_the_batch_one() -> None:
+    """Verify Now keeps the tight cap. Loosening it there is how a 2GB post gets spooled."""
+    client = make_client(max_image_bytes=1024 * 1024, max_images=2)
+    assert declare(client, "/verify", 50 * 1024 * 1024).json()["error"]["code"] == (
+        "file_too_large"
+    )
 
 
 def test_too_many_images_is_rejected_before_any_reading() -> None:
@@ -490,3 +548,118 @@ def test_provider_down_leaves_no_partial_verdict_behind() -> None:
     body = post_verify(client).json()
     assert "aggregate" not in body
     assert "fields" not in body
+
+
+# --- app wiring (LP-073) ----------------------------------------------------------------
+#
+# Everything below drives the app `create_app` actually builds. A feature that exists in a
+# module and is never mounted is indistinguishable, from the agent's seat, from a feature
+# that was never written — and both of the blockers this section covers shipped green
+# because the tests reached around `create_app` instead of through it.
+
+
+def built_spa(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Stand in a built `web/dist`, which is the shipped configuration.
+
+    The SPA catch-all only exists once the UI has been built, so the route-ordering bug is
+    invisible to a suite that runs without it. This makes it visible.
+    """
+    dist = tmp_path / "dist"
+    (dist / "assets").mkdir(parents=True)
+    (dist / "index.html").write_text("<!doctype html><title>LabelProof</title>")
+    monkeypatch.setattr(main_mod, "_WEB_DIST", dist)
+    return dist
+
+
+def test_the_batch_router_is_reachable_over_http(tmp_path: Path) -> None:
+    """`GET /batch/{id}` must answer as batch, not as an unknown address."""
+    response = make_client(storage_dir=str(tmp_path)).get("/batch/job_does_not_exist")
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "batch_not_found"
+
+
+def test_batch_stays_reachable_once_the_spa_is_built(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The blocker: the batch router must be mounted BEFORE `_install_spa`.
+
+    Starlette matches in registration order, so a `GET /{path:path}` catch-all registered
+    first out-ranks a real route. With batch mounted after it — or not mounted at all —
+    `GET /batch/{id}` answers "that address is not part of this tool" while the endpoint
+    sits there unreachable, and every batch an agent started becomes unreadable the moment
+    the UI is built into the image.
+    """
+    built_spa(tmp_path, monkeypatch)
+    client = make_client(storage_dir=str(tmp_path / "data"))
+
+    # The SPA really is live: a client-side route renders the app.
+    assert "text/html" in client.get("/some/client/route").headers["content-type"]
+
+    response = client.get("/batch/job_does_not_exist")
+    assert "text/html" not in response.headers["content-type"]
+    assert response.json()["error"]["code"] == "batch_not_found"
+
+    template = client.get("/batch/manifest-template.csv")
+    assert template.status_code == 200
+    assert "text/csv" in template.headers["content-type"]
+
+
+def route_paths(app: Any) -> list[str]:
+    """Every path in the table, in match order.
+
+    FastAPI wraps an included router in a single opaque entry, so reading `.path` off the
+    top-level routes silently misses every API route. Flattening is what makes an ordering
+    assertion mean anything.
+    """
+    paths: list[str] = []
+    for route in app.router.routes:
+        included = getattr(route, "original_router", None)
+        if included is not None:
+            paths.extend(str(getattr(inner, "path", "")) for inner in included.routes)
+        else:
+            paths.append(str(getattr(route, "path", "")))
+    return paths
+
+
+def test_the_batch_routes_are_registered_ahead_of_the_spa(tmp_path: Path) -> None:
+    """The ordering invariant itself, so a reorder fails here and not in production."""
+    paths = route_paths(create_app(config=make_config(storage_dir=str(tmp_path))))
+    # `_install_spa` always registers "/" last, built UI or not.
+    assert paths.index("/batch/{job_id}") < paths.index("/")
+    assert paths.index("/batch") < paths.index("/")
+
+
+def test_verify_now_is_announced_to_the_shared_provider_budget() -> None:
+    """`create_app` must call `install_verify_priority` (BATCH-9, PERF-5).
+
+    Nothing else in the process knows a single verification is in flight, so without this
+    middleware batch never stands aside and the priority lane is dead code that still
+    passes its own unit tests. The observable proof is that the budget saw the request.
+    """
+    client = make_client()
+    assert post_verify(client).status_code == 200
+
+    budget = getattr(client.app.state, "provider_budget", None)
+    assert budget is not None, "no provider budget: the priority middleware is not installed"
+    assert budget.interactive_seen >= 1
+
+
+def test_the_priority_middleware_covers_the_sample_route_too() -> None:
+    client = make_client()
+    assert client.get("/sample").status_code == 200
+    budget = getattr(client.app.state, "provider_budget", None)
+    assert budget is not None and budget.interactive_seen >= 1
+
+
+def test_batch_traffic_is_not_marked_as_interactive(tmp_path: Path) -> None:
+    """The rule is asymmetric on purpose: batch yields to Verify Now, not the reverse."""
+    client = make_client(storage_dir=str(tmp_path))
+    client.get("/batch/job_does_not_exist")
+    budget = getattr(client.app.state, "provider_budget", None)
+    assert budget is None or budget.interactive_seen == 0
+
+
+def test_the_interactive_paths_are_routes_that_exist() -> None:
+    """A typo in INTERACTIVE_PATHS is a silent loss of the priority rule."""
+    mounted = set(route_paths(create_app(config=make_config())))
+    assert mounted.issuperset(batch_routes.INTERACTIVE_PATHS)

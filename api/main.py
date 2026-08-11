@@ -36,7 +36,7 @@ from api import errors
 from api import logging as applog
 from api.config import Config, load
 from api.provider.base import ExtractionProvider, ProviderError
-from api.routes import health, sample, verify
+from api.routes import batch, health, sample, verify
 
 _WEB_DIST = Path(__file__).resolve().parents[1] / "web" / "dist"
 
@@ -95,6 +95,15 @@ def create_app(
     app.include_router(health.router)
     app.include_router(sample.router)
     app.include_router(verify.router)
+    # Batch must be mounted BEFORE the SPA. `_install_spa` registers a `GET /{path:path}`
+    # catch-all, and a catch-all registered first out-ranks a real route — `GET /batch/{id}`
+    # would answer 404 from the SPA guard while the endpoint sat there unreachable.
+    app.include_router(batch.router)
+
+    # Without this the shared provider budget never learns that a Verify Now request is in
+    # flight, so batch never stands aside and BATCH-9/PERF-5 is dead code that still passes
+    # its unit tests. Marking only — it can never slow a verification down.
+    batch.install_verify_priority(app)
 
     _install_spa(app)
 
@@ -131,32 +140,75 @@ def _install_middleware(app: FastAPI) -> None:
         return response
 
 
+#: Headroom above the batch content ceiling for multipart framing, the manifest, and the
+#: filename of every part. `MAX_FILES` is 4000 and each part costs a couple of hundred
+#: bytes of boundary and headers, so a megabyte would be too tight by an order of
+#: magnitude; 32 MB is generous and still nowhere near "unbounded".
+_BATCH_ENVELOPE_BYTES = 32 * 1024 * 1024
+
+#: Slack above the Verify Now content ceiling for multipart framing and the application
+#: JSON, which ride alongside at most four images.
+_VERIFY_ENVELOPE_BYTES = 1024 * 1024
+
+
+def _size_ceiling(request: Request) -> tuple[int, errors.LabelProofError]:
+    """The whole-request ceiling for this path, and the refusal that goes with it.
+
+    The two modes accept wildly different uploads and a single ceiling cannot serve both.
+    Verify Now takes at most four images: anything past that is a mistake, and the tight
+    cap is what makes a 2 GB post cost a header read. A real batch is 300 applications and
+    roughly 600 photographs — over a gigabyte — and deriving its ceiling from the
+    single-verify caps refused every genuine importer dump before it reached a route, with
+    a message telling the agent to "send at most 4 images". The prototype only looked
+    healthy because the fixtures are kilobytes.
+
+    So the ceiling follows the path, and so does the sentence — a refusal that names the
+    wrong limit sends the agent to fix something that was never wrong.
+    """
+    config: Config = request.app.state.config
+
+    if request.url.path.strip("/").split("/", 1)[0] == "batch":
+        return (
+            batch.MAX_TOTAL_BYTES + _BATCH_ENVELOPE_BYTES,
+            errors.UserError(
+                f"That batch upload is larger than this tool accepts at once — the limit "
+                f"is {batch.MAX_TOTAL_BYTES // (1024**3)} GB of artwork per upload, and up "
+                f"to {batch.MAX_ROWS} applications. Split it into smaller batches and "
+                f"upload them separately. Nothing has been checked.",
+                next_step="reduce",
+                code="batch_too_large",
+            ),
+        )
+
+    return (
+        config.max_images * config.max_image_bytes + _VERIFY_ENVELOPE_BYTES,
+        errors.UserError(
+            f"That upload is larger than this tool accepts. Send at most "
+            f"{config.max_images} images of up to "
+            f"{config.max_image_bytes // (1024 * 1024)} MB each.",
+            next_step="resize",
+            code="file_too_large",
+        ),
+    )
+
+
 def _too_large_to_read(request: Request) -> errors.LabelProofError | None:
     """Reject an impossible upload before a byte of it is buffered.
 
-    `ingest` enforces the real per-file cap, but only once the whole body has been spooled
-    to disk — which is a long, expensive way to say no to a 2GB post. The declared length
-    is only a hint (it can be absent, and it can lie), so this is a cheap first door, not
-    the lock. The ceiling is derived from the configured caps so raising them raises this
-    too.
+    `ingest` and the batch route enforce the real per-file and per-job caps, but only once
+    the body has been spooled — which is a long, expensive way to say no to a 2 GB post.
+    The declared length is only a hint (it can be absent, and it can lie), so this is a
+    cheap first door, not the lock. The ceilings are derived from the configured caps and
+    the batch limits, so raising either raises this too.
     """
     declared = request.headers.get("content-length")
     if not declared or not declared.isdigit():
         return None
 
-    config: Config = request.app.state.config
-    # Multipart framing and the application JSON ride alongside the images.
-    ceiling = config.max_images * config.max_image_bytes + 1024 * 1024
+    ceiling, refusal = _size_ceiling(request)
     if int(declared) <= ceiling:
         return None
-
-    return errors.UserError(
-        f"That upload is larger than this tool accepts. Send at most "
-        f"{config.max_images} images of up to "
-        f"{config.max_image_bytes // (1024 * 1024)} MB each.",
-        next_step="resize",
-        code="file_too_large",
-    )
+    return refusal
 
 
 def _install_error_handlers(app: FastAPI) -> None:
