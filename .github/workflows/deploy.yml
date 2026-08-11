@@ -129,28 +129,89 @@ jobs:
       # captured before anything changes — after a failed deploy, "the previous release"
       # is no longer something the platform will reliably tell us.
       # ------------------------------------------------------------------------------
-      - name: Record the currently-deployed image
+      # Fails closed. The previous version reported "no previous image — this looks like
+      # the first deploy" for BOTH of the reasons it can be empty: an app with no
+      # releases, and a `flyctl` error or a changed JSON shape. The second is a schema
+      # change silently disarming the one guardrail that must not fail open, behind a
+      # warning on an otherwise green run. So the two cases are now distinguished
+      # explicitly, and only the genuine first deploy is allowed through.
+      - name: Record the currently-deployed image and config
         id: current
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
         run: |
           set -uo pipefail
-          image=""
-          if payload="$(flyctl image show --app "$FLY_APP" --json 2>/dev/null)"; then
-            image="$(printf '%s' "$payload" | jq -r '
-              if type == "array" then .[0] else . end
-              | if (.Digest // "") != "" and (.Repository // "") != ""
-                then "\(.Registry // "registry.fly.io")/\(.Repository)@\(.Digest)"
-                else "" end
-            ')"
+
+          # Does the app have any releases at all? This, not a parse failure, is what
+          # "first deploy" means.
+          if ! releases="$(flyctl releases --app "$FLY_APP" --json 2>&1)"; then
+            if printf '%s' "$releases" | grep -qiE "could not find app|not found"; then
+              echo "::notice::$FLY_APP does not exist yet — first deploy. No rollback target, by definition."
+              echo "first_deploy=true" >> "$GITHUB_OUTPUT"
+              echo "image=" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            echo "::error::flyctl releases failed, so the rollback target is unknown. Refusing to deploy without one — a deploy with no way back is the failure this step exists to prevent."
+            printf '%s\n' "$releases"
+            exit 1
           fi
-          if [[ -n "$image" && "$image" != "null" ]]; then
-            echo "There is a release to roll back to: $image"
-          else
-            image=""
-            echo "::warning::No previous image found — this looks like the first deploy of $FLY_APP. Automatic rollback is not available for this run."
+
+          count="$(printf '%s' "$releases" | jq 'if type == "array" then length else 0 end')"
+          if [[ "$count" == "0" ]]; then
+            echo "::notice::$FLY_APP has no releases yet — first deploy. No rollback target, by definition."
+            echo "first_deploy=true" >> "$GITHUB_OUTPUT"
+            echo "image=" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
+          echo "first_deploy=false" >> "$GITHUB_OUTPUT"
+
+          # From here on, an unparseable answer is an error, not a first deploy.
+          if ! payload="$(flyctl image show --app "$FLY_APP" --json 2>&1)"; then
+            echo "::error::flyctl image show failed on an app that has $count release(s). Cannot determine the rollback target."
+            printf '%s\n' "$payload"
+            exit 1
+          fi
+
+          image="$(printf '%s' "$payload" | jq -r '
+            if type == "array" then .[0] else . end
+            | if (.Digest // "") != "" and (.Repository // "") != ""
+              then "\(.Registry // "registry.fly.io")/\(.Repository)@\(.Digest)"
+              else "" end
+          ')"
+
+          if [[ -z "$image" || "$image" == "null" ]]; then
+            echo "::error::Could not read a digest out of 'flyctl image show --json' on an app with $count release(s). The JSON shape has probably changed; fix the parser before deploying. Raw output follows."
+            printf '%s\n' "$payload"
+            exit 1
+          fi
+
+          echo "Rollback target: $image"
           echo "image=$image" >> "$GITHUB_OUTPUT"
+
+          # Capture the CONFIG that is live too, not just the image.
+          #
+          # Rolling back with `--config fly.toml` re-applies the NEW configuration to the
+          # OLD image. For an entire class of failure — a health-check path typo, a
+          # provider timeout below the budget (which is a startup error), a CSP that
+          # blanks the SPA — the configuration IS the fault, and that rollback ships the
+          # bug again and then fails its own smoke test. CHANGES.md promised a rollback
+          # that restores service; for those cases it structurally could not.
+          if flyctl config show --app "$FLY_APP" > previous-fly.toml 2>/dev/null \
+             && [[ -s previous-fly.toml ]]; then
+            echo "config=previous-fly.toml" >> "$GITHUB_OUTPUT"
+            echo "Captured the live configuration for rollback."
+          else
+            echo "config=" >> "$GITHUB_OUTPUT"
+            echo "::warning::Could not capture the live configuration. A rollback will re-apply the new fly.toml, which cannot recover a configuration-caused failure. Check flyctl config show manually if the rollback does not restore service."
+          fi
+
+      - name: Preserve the rollback config across steps
+        if: ${{ steps.current.outputs.config != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: rollback-config
+          path: previous-fly.toml
+          retention-days: 7
 
       # ------------------------------------------------------------------------------
       # Ship it. Fly will not promote a machine whose `/health` and `/ready` checks are
@@ -158,6 +219,7 @@ jobs:
       # single request. The smoke test below covers what a status code cannot.
       # ------------------------------------------------------------------------------
       - name: Deploy
+        id: deploy
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
         run: |
@@ -184,22 +246,55 @@ jobs:
       # image by digest is exact: it re-runs the release that was known good, rather than
       # rebuilding from a commit and hoping the result is identical.
       # ------------------------------------------------------------------------------
+      # The condition, not `failure()`, and both directions matter.
+      #
+      # `failure()` is false under cancellation, and an exceeded `timeout-minutes`
+      # cancels rather than fails — so a remote build that hung left a half-applied
+      # release with no rollback at all. `failure()` is also true when ANY earlier step
+      # failed, so a broken `actions/checkout` triggered a pointless redeploy of an app
+      # that was never touched.
+      #
+      # Keying on the deploy step's own outcome fixes both: it fires whenever the deploy
+      # ran and did not cleanly succeed (including 'cancelled'), and never when the
+      # deploy was skipped because something upstream failed.
       - name: Roll back
-        if: ${{ failure() }}
+        if: >-
+          ${{ always()
+              && steps.deploy.conclusion != 'skipped'
+              && (steps.deploy.outcome != 'success' || steps.smoke.outcome != 'success') }}
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
           PREVIOUS_IMAGE: ${{ steps.current.outputs.image }}
+          PREVIOUS_CONFIG: ${{ steps.current.outputs.config }}
+          FIRST_DEPLOY: ${{ steps.current.outputs.first_deploy }}
+          DEPLOY_OUTCOME: ${{ steps.deploy.outcome }}
+          SMOKE_OUTCOME: ${{ steps.smoke.outcome }}
         run: |
           set -uo pipefail
+          echo "Deploy outcome: ${DEPLOY_OUTCOME}; smoke outcome: ${SMOKE_OUTCOME}"
+
           if [[ -z "$PREVIOUS_IMAGE" ]]; then
-            echo "::error::Deploy failed and there is no previous image to roll back to. The app may be serving nothing. Investigate immediately: flyctl status --app $FLY_APP"
+            if [[ "$FIRST_DEPLOY" == "true" ]]; then
+              echo "::error::The first deploy of $FLY_APP failed. There is nothing to roll back to — the app has never had a working release. The public URL may be serving a broken build. Fix forward: flyctl status --app $FLY_APP && flyctl logs --app $FLY_APP"
+            else
+              echo "::error::Deploy failed and no rollback target was recorded. Investigate immediately: flyctl status --app $FLY_APP"
+            fi
             exit 1
           fi
 
-          echo "::warning::Release failed its post-deploy checks. Rolling back to $PREVIOUS_IMAGE"
+          # Roll back the CONFIGURATION as well as the image where we captured it. A
+          # failure caused by fly.toml is not recovered by re-applying fly.toml.
+          config_args=(--config fly.toml)
+          if [[ -n "$PREVIOUS_CONFIG" && -s "$PREVIOUS_CONFIG" ]]; then
+            config_args=(--config "$PREVIOUS_CONFIG")
+            echo "::warning::Rolling back to $PREVIOUS_IMAGE with the previously-live configuration."
+          else
+            echo "::warning::Rolling back to $PREVIOUS_IMAGE with the CURRENT fly.toml — the live configuration could not be captured. If the failure was configuration-caused, this rollback will reproduce it."
+          fi
+
           flyctl deploy \
             --app "$FLY_APP" \
-            --config fly.toml \
+            "${config_args[@]}" \
             --image "$PREVIOUS_IMAGE" \
             --strategy immediate \
             --wait-timeout 600
@@ -211,6 +306,8 @@ jobs:
             echo "::error::ROLLBACK DID NOT RESTORE SERVICE. The public URL is not healthy. Manual intervention required — see the rollback runbook in CHANGES.md."
             exit 1
           fi
+          # The release failed. Say so, even though the recovery worked.
+          exit 1
 
       - name: Summary
         if: ${{ always() }}

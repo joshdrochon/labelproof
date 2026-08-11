@@ -32,15 +32,34 @@ scripts/smoke.sh https://labelproof.fly.dev   # run it by hand any time; exit 0 
 
 ### It is already automatic
 
-You do not normally do this by hand. The deploy job records the digest of the currently
-live image *before* touching anything, and if either the deploy or the smoke test fails it
-puts that digest straight back and re-runs the smoke test to confirm service is restored.
+You do not normally do this by hand. Before touching anything the deploy job records two
+things — the digest of the live image **and** the live configuration (`flyctl config
+show`) — and if the deploy or the smoke test does not cleanly succeed it puts both back
+and re-runs the smoke test.
+
+Capturing the configuration matters more than it looks. An earlier version rolled back
+with `--config fly.toml`, which re-applies the **new** configuration to the **old** image.
+For any failure whose cause *is* the configuration — a health-check path typo, a provider
+timeout below the request budget (a startup error), a CSP that blanks the SPA — that
+"rollback" ships the bug again and then fails its own smoke test. It could not recover the
+class of failure most likely to need it.
 
 Rollback fires on:
 
-- `fly deploy` failing or timing out (a half-applied release needs reverting too)
+- `fly deploy` failing, timing out, **or being cancelled** (an exceeded `timeout-minutes`
+  cancels rather than fails, and a half-applied release needs reverting either way)
 - any smoke-test failure — a missing key, a broken web build, a field dropped out of the
-  pipeline, or the service answering in sample mode
+  pipeline, a latency budget too small for the model, or the service answering in sample
+  mode
+
+It does **not** fire when the deploy step never ran. A failure in checkout or flyctl setup
+leaves production untouched, and redeploying over it would be the only thing that could
+break it.
+
+**Where it still cannot help you.** If the live configuration could not be captured, the
+rollback re-applies the current `fly.toml` and says so in the log. And a failed *first*
+deploy has nothing to return to by definition — the job reports that plainly rather than
+implying a recovery happened.
 
 It does **not** fire on a slow-but-working release. Latency is reported by the smoke test
 and enforced by the 20-run p95 table; rolling back over one 5.2s sample would cost more
