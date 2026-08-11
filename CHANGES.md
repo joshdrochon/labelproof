@@ -12,6 +12,14 @@ Developer log. Written for the next engineer, not for a grader.
 
 ## Deploying
 
+> **Status: the pipeline has never completed a run.** `ruff check .` and `mypy --strict
+> api/` are currently red on files outside the deployment wave, so the gate fails and the
+> deploy job correctly refuses to run. That is the gate working, but it means nothing
+> below has been exercised end to end, and it is *why* a production that returned 503 on
+> every verification survived long enough to be found by hand. The first green pipeline
+> run is the thing to watch for; until then, treat this section as the intended behaviour
+> rather than the observed one.
+
 `main` deploys itself. `.github/workflows/deploy.yml` runs the release gate — lint, types,
 the full test suite, the golden-set eval, a production web build — and only then ships.
 The gate runs with no API key present, so it cannot accidentally start depending on the
