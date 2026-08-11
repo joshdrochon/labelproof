@@ -81,25 +81,92 @@ def test_producer_mismatch_on_different_city() -> None:
     assert r.verdict is Verdict.MISMATCH
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "KNOWN GAP (LP-045). expand_state_abbreviations() rewrites any standalone word "
-        "matching a state code, so 'Gin or Vodka' becomes 'gin oregon vodka' and "
-        "'Made in Kentucky' becomes 'made indiana kentucky'. It is not a live false pass "
-        "today because the normalizer is applied to BOTH sides of every comparison, so "
-        "the corruption is symmetric; it becomes one the moment either side is expanded "
-        "differently. The real fix needs address position (a code is a state only after "
-        "a comma, or before a ZIP), which is a comparator decision this branch does not "
-        "own. strict=True so this flips red the day someone fixes it and forgets to "
-        "delete the marker."
-    ),
+# --- state expansion: the false-pass class it used to be -------------------------------
+#
+# These are two tests, not one, on purpose. They were one, and the negative assertion came
+# first, so the day someone "fixed" the false pass by deleting `"or": "oregon"` from the
+# table the positive assertion never ran and the suite stayed green. A test whose second
+# half is unreachable when its first half is satisfied is not covering the second half.
+
+
+@pytest.mark.parametrize(
+    ("address", "expected"),
+    [
+        ("Portland, OR", "portland, oregon"),
+        ("Bardstown, KY", "bardstown, kentucky"),
+        ("Bardstown, KY 40004", "bardstown, kentucky 40004"),
+        ("Bardstown, KY 40004-1234", "bardstown, kentucky 40004-1234"),
+        ("Windsor, CA, USA", "windsor, california, usa"),
+        ("Ponce, PR", "ponce, puerto rico"),
+    ],
+    ids=["end", "no-zip", "zip", "zip-plus-four", "trailing-country", "territory"],
 )
-def test_state_expansion_is_word_bounded() -> None:
-    """`or` is Oregon's code but also an English word — must not corrupt other text."""
-    assert "oregon" not in compare.expand_state_abbreviations("Gin or Vodka")
-    expanded = compare.expand_state_abbreviations("Portland, OR")
-    assert "oregon" in expanded
+def test_a_state_code_in_a_state_position_still_expands(address: str, expected: str) -> None:
+    """The feature has to keep working. `Bardstown, KY` is `Bardstown, Kentucky`."""
+    assert compare.expand_state_abbreviations(address) == expected
+
+
+@pytest.mark.parametrize(
+    ("text", "must_not_contain"),
+    [
+        ("Gin or Vodka", "oregon"),
+        ("Made in Kentucky", "indiana"),
+        ("Old Tom Distilling Co", "colorado"),
+        ("Old Tom Distilling Co.", "colorado"),
+        ("La Crema Winery", "louisiana"),
+        ("Casa de Campo", "delaware"),
+        ("In-N-Out Spirits", "indiana"),
+        ("Mo's Distillery", "missouri"),
+        ("Hi-Time Wine Cellars", "hawaii"),
+    ],
+    ids=[
+        "english-or",
+        "english-in",
+        "company-suffix",
+        "company-suffix-dotted",
+        "french-article",
+        "spanish-article",
+        "hyphenated-name",
+        "possessive",
+        "hyphenated-prefix",
+    ],
+)
+def test_a_state_code_outside_a_state_position_is_left_alone(
+    text: str, must_not_contain: str
+) -> None:
+    """`or` is Oregon's code and also an English word; `Co` ends half the producers alive."""
+    assert must_not_contain not in compare.expand_state_abbreviations(text)
+
+
+@pytest.mark.parametrize(
+    ("label", "app_name", "app_address"),
+    [
+        ("La Crema Winery, Windsor, CA", "Louisiana Crema Winery", "Windsor, CA"),
+        ("Casa de Campo, Ponce, PR", "Casa Delaware Campo", "Ponce, PR"),
+        ("Mo's Distillery, Bend, OR", "Missouri's Distillery", "Bend, OR"),
+        ("In-N-Out Spirits, Baltimore, MD", "Indiana-N-Out Spirits", "Baltimore, MD"),
+        (
+            "Old Tom Distilling Co, Bardstown, KY",
+            "Old Tom Distilling Colorado",
+            "Bardstown, KY",
+        ),
+    ],
+    ids=["la", "de", "mo", "in", "co"],
+)
+def test_two_different_producers_never_collide_into_a_match(
+    label: str, app_name: str, app_address: str
+) -> None:
+    """The regression that mattered: distinct producers reported as an exact Tier-1 Match.
+
+    Symmetric normalization prevents false MISMATCHes and does nothing for false MATCHes,
+    because a many-to-one rewrite maps two different inputs onto one string. Every row
+    here returned `match`, tier 1, "The label matches the application." The last one is
+    the one that would really have shipped: every producer ending in "Co" was becoming
+    "colorado" (FIELD-5).
+    """
+    r = compare.compare_producer(E(label), app_name, app_address)
+
+    assert r.verdict is Verdict.MISMATCH, f"{label!r} passed as {app_name!r}"
 
 
 # --- country of origin (TC-19) --------------------------------------------------------
