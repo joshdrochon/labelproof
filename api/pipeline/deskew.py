@@ -56,9 +56,10 @@ _MIN_QUAD_AREA_FRACTION = 0.25
 #: is a no-op that would nonetheless be reported as a correction we made.
 _MAX_QUAD_AREA_FRACTION = 0.95
 
-#: Share of the frame's ink allowed to fall outside the detected quadrilateral before the
-#: rectification is refused. Not zero: edge antialiasing and Canny dilation always leave a
-#: few stray dark pixels. Anything above this means real content sits outside the crop.
+#: Share of the frame's detail allowed to fall outside the detected quadrilateral before
+#: the rectification is refused. Not zero: the approximated quad cuts corners off the true
+#: boundary, so a little of the label's own edge always lands outside. Anything above this
+#: means real content sits outside the crop.
 _MAX_INK_OUTSIDE_QUAD = 0.02
 
 #: How much sharpness a correction may cost before it is judged a bad trade. Resampling
@@ -235,23 +236,34 @@ def find_label_quad(image: np.ndarray) -> np.ndarray | None:
 
 
 def ink_outside(image: np.ndarray, quad: np.ndarray) -> float:
-    """Share of the image's dark pixels that a crop to `quad` would discard.
+    """Share of the image's *detail* that a crop to `quad` would discard.
 
-    This is the guard that keeps LP-326's warning from coming true here. A rectification
-    is a crop, and a crop that loses the bottom of a back label loses the government
-    warning — after which the pipeline reports it Missing and the agent is told a false
-    thing about a compliant label. Counting ink is cheap and the answer is unambiguous.
+    This is the guard that keeps LP-326's stated risk from coming true here. A
+    rectification is a crop, and a crop that loses the bottom of a back label loses the
+    government warning — after which the pipeline reports it Missing and the agent is
+    told a false thing about a compliant label.
+
+    Detail is measured as edge density, not as dark pixels. "Dark" is the wrong proxy:
+    photograph a label on a dark desk and the desk is darker than the print, so a correct
+    crop looks like it is throwing away most of the ink. Text is dense edges and a desk
+    is flat, whatever its brightness.
+
+    The quadrilateral is dilated before the test because the label's own boundary is a
+    strong edge lying exactly on it, and counting that edge as discarded content would
+    make every rectification look destructive.
     """
     gray = _to_gray(image)
-    threshold = max(40.0, float(np.percentile(gray, 15)))
-    ink = (gray < threshold).astype(np.uint8)
-    total = int(ink.sum())
+    edges = cv2.Canny(cv2.GaussianBlur(gray, (3, 3), 0), 60, 160)
+    total = int((edges > 0).sum())
     if total == 0:
         return 0.0
 
     mask = np.zeros(gray.shape, np.uint8)
     cv2.fillConvexPoly(mask, order_corners(quad).astype(np.int32), 255)
-    inside = int((ink & (mask > 0)).sum())
+    margin = max(3, round(max(gray.shape) * 0.01))
+    dilated = cv2.dilate(mask, np.ones((margin, margin), np.uint8))
+
+    inside = int(((edges > 0) & (dilated > 0)).sum())
     return (total - inside) / total
 
 
