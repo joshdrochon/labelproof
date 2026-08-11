@@ -54,7 +54,6 @@ def merge_extractions(
     """
     merged: dict[FieldName, ExtractedField] = {}
     provenance: dict[FieldName, int] = {}
-    warning_text: str | None = None
     warning_image: int | None = None
     typography = WarningTypography()
 
@@ -70,38 +69,62 @@ def merge_extractions(
                 merged[name] = field
                 provenance[name] = extraction.image_index
 
-        if extraction.warning_text and warning_text is None:
-            warning_text = extraction.warning_text
-            warning_image = extraction.image_index
-            typography = extraction.warning_typography
+    # The warning is chosen across every image at once rather than by taking the first
+    # one that had any (LP-217). A front label with a decorative fragment and a back
+    # label with the whole statement would otherwise be judged on the fragment.
+    sighting = warn.select_sighting(warning_sightings(extractions))
+    if sighting is not None:
+        warning_image = sighting.image_index
+        typography = sighting.typography
 
     return merged, warning_image, typography, provenance
 
 
+def warning_sightings(extractions: list[Extraction]) -> list[warn.WarningSighting]:
+    """One reading of the warning per image, including the images that showed none.
+
+    The extractor reports the warning twice — as `warning_text` with its typography, and
+    as an ordinary field with a confidence and a region. Both are folded in here, because
+    the choice of which image to judge the application on has to be made once, on the
+    whole picture, rather than differently in two places.
+    """
+    sightings: list[warn.WarningSighting] = []
+    for extraction in extractions:
+        field = extraction.fields.get(FieldName.GOVERNMENT_WARNING)
+        sightings.append(
+            warn.WarningSighting(
+                image_index=extraction.image_index,
+                text=extraction.warning_text or (field.value if field else None),
+                legible=field.legible if field else True,
+                confidence=field.confidence if field else 0.0,
+                typography=extraction.warning_typography,
+            )
+        )
+    return sightings
+
+
 def _warning_result(
+    extractions: list[Extraction],
     merged: dict[FieldName, ExtractedField],
-    typography: WarningTypography,
     net_contents_ml: float | None,
     warning_image: int | None = None,
 ) -> FieldResult:
+    """The warning row, judged across every image before Missing is declared (LP-217)."""
+    sightings = warning_sightings(extractions)
+    result = warn.evaluate_across_images(sightings, net_contents_ml=net_contents_ml)
+    chosen = warn.select_sighting(sightings)
     field = merged.get(FieldName.GOVERNMENT_WARNING)
-    result = warn.evaluate(
-        field.value if field else None,
-        typography,
-        legible=field.legible if field else True,
-        net_contents_ml=net_contents_ml,
-    )
 
     return FieldResult(
         field=FieldName.GOVERNMENT_WARNING,
         verdict=result.verdict,
-        extracted=field.value if field else None,
+        extracted=chosen.text if chosen else None,
         # The canonical statement, not a description of it. This is the left-hand side of
         # the diff the UI renders (WARN-8); a placeholder sentence there produces a
         # word-level comparison between the regulation's name and its text, which is
         # noise dressed up as evidence.
         expected=canon.CANONICAL_WARNING,
-        confidence=field.confidence if field else 0.0,
+        confidence=chosen.confidence if chosen else 0.0,
         rationale=result.rationale,
         evidence=(
             Evidence(image_index=warning_image or 0, bbox=field.bbox)
@@ -150,7 +173,7 @@ def verify(
         )
 
     compare_started = time.perf_counter()
-    merged, warning_image, typography, _provenance = merge_extractions(response.extractions)
+    merged, warning_image, _typography, _provenance = merge_extractions(response.extractions)
 
     context = LabelContext(
         is_import=application.is_import,
@@ -186,7 +209,7 @@ def verify(
             application.country_of_origin,
             is_import=application.is_import,
         ),
-        _warning_result(merged, typography, net.ml, warning_image),
+        _warning_result(response.extractions, merged, net.ml, warning_image),
     ]
 
     aggregate = agg.recommend(results)

@@ -352,6 +352,124 @@ def test_absent_warning_is_missing_not_mismatch(text: str | None) -> None:
     assert any(f.severity == "critical" for f in result.findings)
 
 
+# --- LP-217 / TC-16: one application, several images ----------------------------------
+
+def _sighting(index: int, text: str | None, **kw: object) -> warning.WarningSighting:
+    return warning.WarningSighting(
+        image_index=index, text=text, typography=GOOD, **kw  # type: ignore[arg-type]
+    )
+
+
+@pytest.mark.tc("TC-16")
+def test_a_warning_on_the_back_label_is_found() -> None:
+    """The commonest layout there is. The front has no warning and that is not a defect."""
+    result = warning.evaluate_across_images(
+        [_sighting(0, None), _sighting(1, canon.CANONICAL_WARNING)]
+    )
+    assert result.verdict is Verdict.MATCH
+
+
+@pytest.mark.tc("TC-16")
+def test_missing_is_only_declared_when_every_image_came_back_empty() -> None:
+    for sightings in (
+        [_sighting(0, None)],
+        [_sighting(0, None), _sighting(1, None), _sighting(2, "  ")],
+    ):
+        assert warning.evaluate_across_images(sightings).verdict is Verdict.MISSING
+
+
+def test_the_most_complete_reading_wins_over_a_fragment() -> None:
+    """A decorative fragment on the front must not be what the application is judged on."""
+    fragment = "GOVERNMENT WARNING: (1) According to the Surgeon General"
+    chosen = warning.select_sighting(
+        [_sighting(0, fragment, confidence=0.99), _sighting(1, canon.CANONICAL_WARNING,
+                                                            confidence=0.70)]
+    )
+    assert chosen is not None
+    assert chosen.image_index == 1
+
+
+def test_a_legible_reading_beats_an_illegible_one() -> None:
+    """TC-12's glare on one image does not make the warning unreadable on the other."""
+    chosen = warning.select_sighting(
+        [
+            _sighting(0, canon.CANONICAL_WARNING, legible=False, confidence=0.9),
+            _sighting(1, canon.CANONICAL_WARNING, legible=True, confidence=0.5),
+        ]
+    )
+    assert chosen is not None and chosen.image_index == 1
+
+
+def test_an_illegible_image_is_not_an_image_with_no_warning() -> None:
+    """Glare over the warning is Unreadable, never Missing. Confusing the two is the
+    false pass this product exists to avoid."""
+    result = warning.evaluate_across_images(
+        [_sighting(0, None, legible=False), _sighting(1, None)]
+    )
+    assert result.verdict is Verdict.UNREADABLE
+
+
+def test_completeness_counts_words_of_the_required_statement() -> None:
+    assert warning.completeness(canon.CANONICAL_WARNING) == len(
+        warning.tokenize(canon.CANONICAL_WARNING)
+    )
+    assert warning.completeness(None) == 0
+    assert warning.completeness("Bottled in Bardstown, Kentucky") == 0
+
+
+def test_completeness_scores_a_fragment_below_the_whole_statement() -> None:
+    fragment = "GOVERNMENT WARNING: (1) According to the Surgeon General"
+    assert 0 < warning.completeness(fragment) < warning.completeness(
+        canon.CANONICAL_WARNING
+    )
+
+
+def test_two_images_with_different_warnings_are_flagged_not_silently_resolved() -> None:
+    """Picking the most complete reading is right, and it can hide a defective warning
+    printed elsewhere on the same label. Say so rather than choosing quietly."""
+    result = warning.evaluate_across_images(
+        [
+            _sighting(0, _retitled("Government Warning:")),
+            _sighting(1, canon.CANONICAL_WARNING),
+        ]
+    )
+    assert result.verdict is Verdict.MATCH
+    note = next(f for f in result.findings if f.code == "warning_differs_between_images")
+    assert note.severity == typography.SEVERITY_CONTEXT
+
+
+def test_the_same_warning_on_both_images_raises_no_note() -> None:
+    result = warning.evaluate_across_images(
+        [_sighting(0, canon.CANONICAL_WARNING), _sighting(1, canon.CANONICAL_WARNING)]
+    )
+    assert not any(f.code == "warning_differs_between_images" for f in result.findings)
+
+
+def test_line_wrapping_alone_does_not_count_as_a_different_warning() -> None:
+    """Two photographs of the same back label, read with different line breaks."""
+    wrapped = canon.CANONICAL_WARNING.replace(" ", "\n", 4)
+    result = warning.evaluate_across_images(
+        [_sighting(0, canon.CANONICAL_WARNING), _sighting(1, wrapped)]
+    )
+    assert not any(f.code == "warning_differs_between_images" for f in result.findings)
+
+
+def test_no_images_at_all_is_missing_not_a_crash() -> None:
+    assert warning.evaluate_across_images([]).verdict is Verdict.MISSING
+
+
+def test_selection_is_deterministic_when_two_readings_tie() -> None:
+    """Two identical readings must not make the answer depend on dict ordering."""
+    sightings = [
+        _sighting(1, canon.CANONICAL_WARNING, confidence=0.9),
+        _sighting(0, canon.CANONICAL_WARNING, confidence=0.9),
+    ]
+    first = warning.select_sighting(sightings)
+    second = warning.select_sighting(list(reversed(sightings)))
+    assert first is not None and second is not None
+    assert first.image_index == second.image_index == 0
+
+
 # --- fail closed ----------------------------------------------------------------------
 
 def test_illegible_is_unreadable_and_is_never_a_match() -> None:

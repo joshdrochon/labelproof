@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import difflib
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Final
 
@@ -402,6 +403,120 @@ def type_size_finding(net_contents_ml: float | None) -> Finding:
         message=type_size_context(net_contents_ml),
         citation=canon.CITATIONS["warning_format"],
         severity=typography.SEVERITY_CONTEXT,
+    )
+
+
+# --------------------------------------------------------------------------------------
+# One application, several images (IMG-8 / LP-217 / TC-16)
+# --------------------------------------------------------------------------------------
+#
+# A front and a back photograph are one label, and the warning usually lives on the back.
+# Declaring it Missing without looking at every image would be a false finding on a
+# perfectly compliant application — and it is the finding that returns the application to
+# the applicant, so it has to be right.
+
+
+@dataclass(frozen=True)
+class WarningSighting:
+    """The warning as read off one image. One per image, including the images with none."""
+
+    image_index: int
+    text: str | None = None
+    legible: bool = True
+    confidence: float = 0.0
+    typography: WarningTypography = field(default_factory=WarningTypography)
+
+    @property
+    def has_text(self) -> bool:
+        return bool(self.text and self.text.strip())
+
+
+def completeness(text: str | None) -> int:
+    """How many words of the required statement this reading actually carries.
+
+    Used to choose between images, not to judge compliance. A front label with a
+    decorative fragment and a back label with the whole statement are both "a warning";
+    only one of them is the statement, and word count is the cheapest honest way to tell
+    them apart.
+    """
+    if not text or not text.strip():
+        return 0
+    return sum(len(seg.expected) for seg in tokenized_diff(text) if seg.op == "equal")
+
+
+def select_sighting(sightings: Sequence[WarningSighting]) -> WarningSighting | None:
+    """The reading to judge the application on, or None if no image showed a warning.
+
+    Preference order: a legible reading over an illegible one, then the reading that
+    carries most of the required statement, then the reading the extractor was most sure
+    of. Returning None is the only route to Missing, and it requires every image to have
+    come back with nothing.
+    """
+    with_text = [s for s in sightings if s.has_text]
+    if with_text:
+        return max(
+            with_text,
+            key=lambda s: (s.legible, completeness(s.text), s.confidence, -s.image_index),
+        )
+    # Nothing readable anywhere. An image that could not be read is not an image with no
+    # warning on it, so an illegible sighting still wins over silence.
+    illegible = [s for s in sightings if not s.legible]
+    return illegible[0] if illegible else None
+
+
+def conflicting_sightings_note(
+    sightings: Sequence[WarningSighting], chosen: WarningSighting | None
+) -> Finding | None:
+    """Say so when two images showed different warning text.
+
+    Choosing the most complete reading is right, and it can also hide a defective warning
+    printed elsewhere on the same label. The tool cannot resolve that from here, so it
+    says what it did rather than quietly picking a winner.
+    """
+    if chosen is None:
+        return None
+    others = {
+        collapse_layout_whitespace(s.text or "")
+        for s in sightings
+        if s.has_text and s.image_index != chosen.image_index
+    }
+    others.discard(collapse_layout_whitespace(chosen.text or ""))
+    if not others:
+        return None
+    return Finding(
+        code="warning_differs_between_images",
+        message=(
+            "More than one image carries a government warning and the wording is not the "
+            "same on each. The most complete reading was checked; look at the others "
+            "yourself."
+        ),
+        citation=canon.CITATIONS["warning_text"],
+        severity=typography.SEVERITY_CONTEXT,
+    )
+
+
+def evaluate_across_images(
+    sightings: Sequence[WarningSighting],
+    *,
+    net_contents_ml: float | None = None,
+) -> WarningResult:
+    """The whole application's warning verdict, from every image at once (LP-217)."""
+    chosen = select_sighting(sightings)
+    result = evaluate(
+        chosen.text if chosen else None,
+        chosen.typography if chosen else None,
+        legible=chosen.legible if chosen else True,
+        net_contents_ml=net_contents_ml,
+    )
+    note = conflicting_sightings_note(sightings, chosen)
+    if note is None:
+        return result
+    return WarningResult(
+        verdict=result.verdict,
+        rationale=result.rationale,
+        diff=result.diff,
+        findings=[*result.findings, note],
+        comparison=result.comparison,
     )
 
 
