@@ -132,10 +132,16 @@ def tokenized_diff(found_text: str) -> list[DiffSegment]:
 
     `delete` means the label omitted required words; `insert` means it added words that
     do not belong. Both are violations — the statement must appear word for word.
+
+    Matching is done on casefolded tokens and the segments carry the ORIGINAL ones, so an
+    all-caps statement — which is compliant, see `classify` — diffs as equal while the
+    evidence still shows the agent exactly what is printed on the label. Matching and
+    displaying are different jobs and only one of them is case-insensitive.
     """
     expected = tokenize(canon.CANONICAL_WARNING)
     found = tokenize(found_text)
-    matcher = difflib.SequenceMatcher(a=expected, b=found, autojunk=False)
+    a_tokens, b_tokens = _compare_tokens(expected, found, found_text)
+    matcher = difflib.SequenceMatcher(a=a_tokens, b=b_tokens, autojunk=False)
 
     segments: list[DiffSegment] = []
     for op, i1, i2, j1, j2 in matcher.get_opcodes():
@@ -226,6 +232,41 @@ def _bare(token: str) -> str:
     return token.strip(_PUNCTUATION_CHARS)
 
 
+def is_set_in_capitals(text: str) -> bool:
+    """Is this statement printed entirely in capitals?
+
+    Not "does it differ in case" — a uniform capital setting, which is a typographic
+    convention rather than a change to the words. Requires at least a few letters so a
+    fragment or an unreadable scrap cannot qualify by accident.
+    """
+    letters = [character for character in text if character.isalpha()]
+    return len(letters) >= 20 and all(character.isupper() for character in letters)
+
+
+def _compare_tokens(expected: list[str], found: list[str], found_text: str) -> tuple[list[str], list[str]]:
+    """The token lists to MATCH on — never the ones to display.
+
+    Case is folded only when the label sets the whole statement in capitals. That is a
+    printing convention 16.22 does not govern: the regulation requires capitals on the
+    heading and says nothing about the case of the statement that follows. Real labels
+    do this constantly — a shipping Fireball bottle (Sazerac, 750mL) sets the entire
+    warning in caps, and comparing case-sensitively called it `warning_text_casing` and
+    drove the application to Return for correction. Rejecting a compliant label is the
+    failure that stops an agent trusting the tool.
+
+    Folding is deliberately NOT applied to a selective case difference. "surgeon general"
+    where the statement reads "Surgeon General" is not a convention, it is one word
+    altered, and it stays a finding. The narrow rule is the whole point: it forgives the
+    thing every printer does and forgives nothing else.
+
+    The heading is untouched either way — `check_header_caps` compares it directly and
+    raises `warning_header_not_all_caps`, which is what catches TC-03.
+    """
+    if not is_set_in_capitals(found_text):
+        return expected, found
+    return [t.casefold() for t in expected], [t.casefold() for t in found]
+
+
 def _is_truncation(expected: list[str], found: list[str]) -> bool:
     """Does the label carry the opening of the statement and then stop?
 
@@ -265,9 +306,30 @@ class TextComparison:
 
 
 def classify(found_text: str) -> TextComparison:
-    """Diff the label's warning and say what kind of difference it is."""
-    expected = tokenize(canon.CANONICAL_WARNING)
-    found = tokenize(found_text)
+    """Diff the label's warning and say what kind of difference it is.
+
+    **Case is compared insensitively, and that is a regulatory reading, not a shortcut.**
+
+    27 CFR 16.22(a)(2) requires the words "GOVERNMENT WARNING" to appear in capital
+    letters and bold type. It says nothing about the case of the statement that follows,
+    and 16.21 gives the wording without prescribing its typography. Real labels commonly
+    set the whole statement in caps — a photograph of a shipping Fireball bottle
+    (Sazerac, 750mL) does exactly that, and this function used to call it
+    `warning_text_casing` and drive the application to Return for correction.
+
+    Rejecting a compliant label is the failure that stops an agent trusting the tool. And
+    the heading — the part the regulation *does* govern — has never depended on this
+    function: `check_header_caps` compares it directly and raises
+    `warning_header_not_all_caps`, which is what catches TC-03, the title-case heading a
+    reviewer caught by eye. That check is unaffected here.
+
+    So a pure case difference in the body is not a defect and no longer reported as one.
+    Every other class of difference — omission, addition, reordering, rewording,
+    truncation, punctuation — is still detected word for word, on casefolded tokens.
+    """
+    expected, found = _compare_tokens(
+        tokenize(canon.CANONICAL_WARNING), tokenize(found_text), found_text
+    )
     segments = tokenized_diff(found_text)
 
     missing = [w for s in segments if s.op in ("delete", "replace") for w in s.expected]
