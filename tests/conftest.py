@@ -6,13 +6,27 @@ enforcing it is a convention — it holds until someone adds one live call to de
 something and forgets to take it out. Then CI is green on a laptop with wifi and red
 behind the customer's firewall, which is the exact failure the PRD opens with.
 
-So this refuses the connection instead of trusting the discipline. Any attempt to open a
-socket to a non-loopback address fails the test that made it, names the address, and says
-what to use instead.
+So this refuses the traffic instead of trusting the discipline. Any attempt to reach a
+non-loopback address fails, names the address, and says what to use instead.
 
-CI wraps the whole run in a network namespace as well (.github/workflows/ci.yml). That is
-the stronger proof, and it is Linux-only; this guard is the one that also runs on a
-developer's machine, where the mistake actually gets made.
+**Installed at import, not in a fixture.** pytest imports the root conftest before it
+collects anything, so the guard is live during collection, during module-level code in
+test files, and inside session-scoped fixtures — not only during the call phase. An
+autouse fixture covers none of those, and "the guard only runs while a test body is
+executing" is a hole shaped exactly like a module-level `requests.get(...)` at the top of
+a test file.
+
+**Every egress verb, not just `connect`.** The first version of this file patched
+`connect`, `connect_ex` and `getaddrinfo`, and claimed in its own docstring that blocking
+`connect` alone "would still leak the hostname". It then leaked hostnames two ways:
+`socket.gethostbyname()` does not go through `getaddrinfo`, and a UDP `sendto()` needs no
+`connect` at all — a DNS query over UDP sailed straight out and came back with a 61-byte
+reply. Both are covered now, and both have a test that sends a real packet's worth of
+intent at a real resolver.
+
+CI additionally wraps the whole run in a network namespace (.github/workflows/ci.yml).
+That is the stronger proof and it is Linux-only; this guard is the one that also runs on
+a developer's machine, where the mistake actually gets made.
 
 Opt out for a test that genuinely needs a socket with `@pytest.mark.allow_network`. There
 are none today, and adding one should require an argument.
@@ -27,19 +41,36 @@ from typing import Any
 
 import pytest
 
-#: Addresses a test may connect to. Loopback only — an in-process server on 127.0.0.1 is
-#: not egress, and some libraries bind one to coordinate threads.
+#: Addresses a test may reach. Loopback only — an in-process server on 127.0.0.1 is not
+#: egress, and some libraries bind one to coordinate threads.
 _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost", ""})
 
 
 class NetworkAccessDenied(RuntimeError):
-    """A test tried to open a socket to the outside world."""
+    """Something in the test session tried to reach the outside world."""
 
 
-def _describe(address: object) -> str:
-    if isinstance(address, tuple) and address:
-        return f"{address[0]}:{address[1] if len(address) > 1 else '?'}"
-    return repr(address)
+class _Policy:
+    """Whether egress is permitted right now.
+
+    A module-level flag rather than a fixture argument, because the guard has to be
+    installed before any fixture exists in order to cover collection.
+    """
+
+    allowed = False
+    context = "during collection"
+
+
+_policy = _Policy()
+
+
+def _refuse(what: str, target: str) -> NetworkAccessDenied:
+    return NetworkAccessDenied(
+        f"{_policy.context}: {what} {target}.\n"
+        "The suite runs offline by design (ENG-3): use api.provider.fake or a recorded "
+        "fixture. If a socket is genuinely required, mark the test "
+        "@pytest.mark.allow_network and say why in the docstring."
+    )
 
 
 def _host_of(address: object) -> str | None:
@@ -48,62 +79,111 @@ def _host_of(address: object) -> str | None:
     return None
 
 
-@pytest.fixture(autouse=True)
-def _no_network_egress(
-    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
-) -> Iterator[None]:
-    """Fail any test that opens a socket to a non-loopback address."""
-    if request.node.get_closest_marker("allow_network") is not None:
-        yield
-        return
+def _describe(address: object) -> str:
+    if isinstance(address, tuple) and address:
+        return f"{address[0]}:{address[1] if len(address) > 1 else '?'}"
+    return repr(address)
 
+
+def _check_socket_target(sock: socket.socket, address: Any, verb: str) -> None:
+    if _policy.allowed:
+        return
+    if sock.family not in (socket.AF_INET, socket.AF_INET6):
+        return  # AF_UNIX / socketpair: local IPC, not egress
+    host = _host_of(address)
+    if host is not None and host in _LOOPBACK_HOSTS:
+        return
+    raise _refuse(f"tried to {verb}", _describe(address))
+
+
+def _check_hostname(host: object, verb: str) -> None:
+    """Refuse to resolve a name.
+
+    A resolver query is a packet leaving the machine and it leaks the hostname, so this
+    is egress in its own right. It also makes the failure identical whether or not the
+    machine has a route out — otherwise a sandboxed CI runner raises a bare `gaierror`
+    that looks nothing like the laptop's error.
+    """
+    if _policy.allowed or not isinstance(host, str) or host in _LOOPBACK_HOSTS:
+        return
+    try:
+        ipaddress.ip_address(host)
+    except ValueError:
+        raise _refuse(f"tried to {verb}", repr(host)) from None
+
+
+def _install_guard() -> None:
+    """Patch every verb that can put a packet on the wire. Runs once, at import."""
     real_connect = socket.socket.connect
     real_connect_ex = socket.socket.connect_ex
+    real_sendto = socket.socket.sendto
+    real_sendmsg = socket.socket.sendmsg
+    real_getaddrinfo = socket.getaddrinfo
+    real_gethostbyname = socket.gethostbyname
+    real_gethostbyname_ex = socket.gethostbyname_ex
+    real_gethostbyaddr = socket.gethostbyaddr
 
-    def guard(sock: socket.socket, address: Any) -> None:
-        if sock.family not in (socket.AF_INET, socket.AF_INET6):
-            return  # AF_UNIX / socketpair: local IPC, not egress
-        host = _host_of(address)
-        if host is not None and host in _LOOPBACK_HOSTS:
-            return
-        raise NetworkAccessDenied(
-            f"{request.node.nodeid} tried to connect to {_describe(address)}.\n"
-            "The suite runs offline by design (ENG-3): use api.provider.fake or a "
-            "recorded fixture. If a socket is genuinely required, mark the test "
-            "@pytest.mark.allow_network and say why in the docstring."
-        )
-
-    def guarded_connect(sock: socket.socket, address: Any) -> None:
-        guard(sock, address)
+    def connect(sock: socket.socket, address: Any) -> None:
+        _check_socket_target(sock, address, "connect to")
         real_connect(sock, address)
 
-    def guarded_connect_ex(sock: socket.socket, address: Any) -> int:
-        guard(sock, address)
+    def connect_ex(sock: socket.socket, address: Any) -> int:
+        _check_socket_target(sock, address, "connect to")
         return real_connect_ex(sock, address)
 
-    real_getaddrinfo = socket.getaddrinfo
+    def sendto(sock: socket.socket, *args: Any) -> int:
+        # sendto(data, address) or sendto(data, flags, address) — the address is last.
+        if args:
+            _check_socket_target(sock, args[-1], "send a datagram to")
+        return real_sendto(sock, *args)
 
-    def guarded_getaddrinfo(host: Any, port: Any, *args: Any, **kwargs: Any) -> Any:
-        """Refuse the DNS lookup too.
+    def sendmsg(sock: socket.socket, *args: Any) -> int:
+        # sendmsg(buffers[, ancdata[, flags[, address]]])
+        if len(args) >= 4:
+            _check_socket_target(sock, args[3], "send a message to")
+        return real_sendmsg(sock, *args)
 
-        A resolver query is a packet leaving the machine, so blocking only `connect`
-        would still leak the hostname. Refusing here also makes the failure identical
-        whether or not the machine has a route out — a bare `socket.gaierror` from a
-        sandboxed CI runner would otherwise look nothing like the laptop's error.
-        """
-        if isinstance(host, str) and host not in _LOOPBACK_HOSTS:
-            try:
-                ipaddress.ip_address(host)
-            except ValueError:
-                raise NetworkAccessDenied(
-                    f"{request.node.nodeid} tried to resolve {host!r}.\n"
-                    "The suite runs offline by design (ENG-3): use api.provider.fake or "
-                    "a recorded fixture. If a socket is genuinely required, mark the "
-                    "test @pytest.mark.allow_network and say why in the docstring."
-                ) from None
+    def getaddrinfo(host: Any, port: Any, *args: Any, **kwargs: Any) -> Any:
+        _check_hostname(host, "resolve")
         return real_getaddrinfo(host, port, *args, **kwargs)
 
-    monkeypatch.setattr(socket.socket, "connect", guarded_connect)
-    monkeypatch.setattr(socket.socket, "connect_ex", guarded_connect_ex)
-    monkeypatch.setattr(socket, "getaddrinfo", guarded_getaddrinfo)
-    yield
+    def gethostbyname(host: str) -> str:
+        _check_hostname(host, "resolve")
+        return real_gethostbyname(host)
+
+    def gethostbyname_ex(host: str) -> Any:
+        _check_hostname(host, "resolve")
+        return real_gethostbyname_ex(host)
+
+    def gethostbyaddr(host: str) -> Any:
+        _check_hostname(host, "reverse-resolve")
+        return real_gethostbyaddr(host)
+
+    socket.socket.connect = connect  # type: ignore[method-assign]
+    socket.socket.connect_ex = connect_ex  # type: ignore[method-assign]
+    socket.socket.sendto = sendto  # type: ignore[method-assign]
+    socket.socket.sendmsg = sendmsg  # type: ignore[method-assign]
+    socket.getaddrinfo = getaddrinfo  # type: ignore[assignment]
+    socket.gethostbyname = gethostbyname  # type: ignore[assignment]
+    socket.gethostbyname_ex = gethostbyname_ex  # type: ignore[assignment]
+    socket.gethostbyaddr = gethostbyaddr  # type: ignore[assignment]
+
+
+_install_guard()
+
+
+def pytest_collection_finish(session: pytest.Session) -> None:
+    _policy.context = "outside a test (session fixture or import)"
+
+
+@pytest.fixture(autouse=True)
+def _no_network_egress(request: pytest.FixtureRequest) -> Iterator[None]:
+    """Name the offending test in the error, and honour `@pytest.mark.allow_network`."""
+    opted_out = request.node.get_closest_marker("allow_network") is not None
+    previous_allowed, previous_context = _policy.allowed, _policy.context
+    _policy.allowed = opted_out
+    _policy.context = request.node.nodeid
+    try:
+        yield
+    finally:
+        _policy.allowed, _policy.context = previous_allowed, previous_context
