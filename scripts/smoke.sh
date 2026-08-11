@@ -27,7 +27,12 @@
 #     scripts/smoke.sh https://labelproof.fly.dev
 #     scripts/smoke.sh                     # defaults to $SMOKE_BASE_URL
 #
-# Requires: bash, curl, jq. Exit code 0 means the release is good.
+# Requires: bash, curl, python3 — nothing that is not already needed to run the project.
+# Deliberately not jq: this script is the auto-rollback trigger, and a trigger that only
+# runs on machines with an extra tool installed is one nobody exercises by hand before
+# the day they need it.
+#
+# Exit code 0 means the release is good.
 
 set -Eeuo pipefail
 
@@ -58,13 +63,44 @@ require() {
 }
 
 require curl
-require jq
+require python3
 
 if [[ -z "$BASE_URL" ]]; then
   echo "smoke: no URL. Usage: scripts/smoke.sh https://labelproof.fly.dev" >&2
   exit 2
 fi
 BASE_URL="${BASE_URL%/}"
+
+# Read one value out of a JSON file. The second argument is evaluated against `d`, the
+# parsed document. A missing key, a malformed document or an unreadable file all yield
+# the empty string rather than an error, so every call site handles "absent" as a value
+# — which is the posture the /ready check below depends on.
+json() {
+  python3 - "$1" "$2" <<'PY'
+import json
+import sys
+
+try:
+    with open(sys.argv[1]) as handle:
+        document = json.load(handle)
+except Exception:
+    print("")
+    sys.exit(0)
+
+allowed = {"len": len, "sorted": sorted, "chr": chr, "json": json}
+try:
+    value = eval(sys.argv[2], {"__builtins__": allowed}, {"d": document})
+except Exception:
+    value = None
+
+if value is None:
+    print("")
+elif isinstance(value, bool):
+    print("true" if value else "false")
+else:
+    print(value)
+PY
+}
 
 printf '\033[1mLabelProof smoke test\033[0m  →  %s\n' "$BASE_URL"
 
@@ -123,7 +159,7 @@ ready_code="$(curl -sS -o "$ready" -w '%{http_code}' --max-time 30 "$BASE_URL/re
 if [[ "$ready_code" == "200" ]]; then
   pass "/ready 200"
 else
-  fail "/ready returned ${ready_code} — $(jq -r '.error.message // "no body"' "$ready" 2>/dev/null)"
+  fail "/ready returned ${ready_code} — $(json "$ready" "d['error']['message']")"
 fi
 
 # The assertion this whole file exists for.
@@ -133,10 +169,13 @@ fi
 # that healthy. It is not: a deployed instance in sample mode cannot read an uploaded
 # photo, and hands a compliance reviewer demonstration verdicts that are indistinguishable
 # from real ones. That is a failed deployment and it must roll back.
-simulated="$(jq -r '.simulated // "absent"' "$ready" 2>/dev/null || echo absent)"
+#
+# Fails closed on an absent field. Silence is not the same answer as "false" — if the
+# server did not say whether it is simulated, that is not permission to assume it is not.
+simulated="$(json "$ready" "d['simulated']")"
 case "$simulated" in
   false)
-    pass "provider is live — $(jq -r '.provider // "?"' "$ready") / $(jq -r '.model // "?"' "$ready")"
+    pass "provider is live — $(json "$ready" "d['provider']") / $(json "$ready" "d['model']")"
     ;;
   true)
     fail "SAMPLE MODE IN PRODUCTION — verdicts here are demonstrations, not checks"
@@ -191,9 +230,9 @@ if [[ "$sample_code" != "200" ]]; then
 fi
 pass "/sample 200"
 
-jq -c '.application' "$sample" > "$WORK_DIR/application.json"
-image_count="$(jq '.images | length' "$sample")"
-if [[ "$image_count" -ge 1 ]]; then
+json "$sample" "json.dumps(d['application'])" > "$WORK_DIR/application.json"
+image_count="$(json "$sample" "len(d['images'])")"
+if [[ -n "$image_count" && "$image_count" -ge 1 ]]; then
   pass "sample offers ${image_count} label image(s)"
 else
   fail "sample offers no images"
@@ -201,18 +240,19 @@ fi
 
 curl_args=()
 while IFS=$'\t' read -r name url; do
+  [[ -z "$name" ]] && continue
   target="$WORK_DIR/$name"
   code="$(curl -sS -o "$target" -w '%{http_code}' --max-time 30 "${BASE_URL}${url}" || echo 000)"
   if [[ "$code" == "200" && -s "$target" ]]; then
     pass "fetched ${name} ($(wc -c < "$target" | tr -d ' ') bytes)"
     # Filename is preserved: it is how fixture replay identifies a label, so a sample-mode
-    # server would answer correctly here and be caught by the /ready assertion instead of
-    # by a confusing 503.
+    # server answers correctly here and is caught by the /ready assertion above rather
+    # than by a confusing 503 down here.
     curl_args+=(-F "images=@${target};type=image/png;filename=${name}")
   else
     fail "could not fetch sample image ${name} (${code})"
   fi
-done < <(jq -r '.images[] | [.filename, .url] | @tsv' "$sample")
+done < <(json "$sample" "chr(10).join(i['filename'] + chr(9) + i['url'] for i in d['images'])")
 
 # ======================================================================================
 step "5. A real verification against production (LP-135)"
@@ -234,11 +274,11 @@ else
   elapsed_ms="$(awk -v t="${timing##* }" 'BEGIN { printf "%d", t * 1000 }')"
 
   if [[ "$verify_code" != "200" ]]; then
-    fail "/verify returned ${verify_code} — $(jq -r '.error.message // "no body"' "$verify" 2>/dev/null)"
+    fail "/verify returned ${verify_code} — $(json "$verify" "d['error']['message']")"
   else
     pass "/verify 200"
 
-    recommendation="$(jq -r '.aggregate.recommendation // empty' "$verify")"
+    recommendation="$(json "$verify" "d['aggregate']['recommendation']")"
     if [[ -n "$recommendation" ]]; then
       pass "aggregate recommendation: ${recommendation}"
     else
@@ -247,24 +287,26 @@ else
 
     # Seven mandatory label elements. Fewer means a field silently dropped out of the
     # pipeline — the kind of regression that reads as a clean pass.
-    field_count="$(jq '.fields | length' "$verify")"
-    if [[ "$field_count" -eq 7 ]]; then
+    field_count="$(json "$verify" "len(d['fields'])")"
+    if [[ -n "$field_count" && "$field_count" -eq 7 ]]; then
       pass "all 7 fields returned"
     else
-      fail "expected 7 fields, got ${field_count}"
+      fail "expected 7 fields, got ${field_count:-none}"
     fi
 
     # Every verdict must carry its rationale. An unexplained verdict is the thing the
     # PRD says this product must never produce.
-    unexplained="$(jq '[.fields[] | select((.rationale // "") == "")] | length' "$verify")"
-    if [[ "$unexplained" -eq 0 ]]; then
+    unexplained="$(json "$verify" "len([f for f in d['fields'] if not f.get('rationale')])")"
+    if [[ -z "$unexplained" ]]; then
+      fail "could not read field rationales from the response"
+    elif [[ "$unexplained" -eq 0 ]]; then
       pass "every field carries a rationale"
     else
       fail "${unexplained} field(s) returned without a rationale"
     fi
 
-    server_ms="$(jq -r '.timings_ms.total // 0' "$verify")"
-    if [[ "$server_ms" -gt 0 ]]; then
+    server_ms="$(json "$verify" "d['timings_ms']['total']")"
+    if [[ -n "$server_ms" && "$server_ms" -gt 0 ]]; then
       pass "server-reported total: ${server_ms} ms"
     else
       fail "no server-side timing in the response (OPS-1)"
