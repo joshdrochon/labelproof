@@ -1,6 +1,9 @@
 {
   "tier": "A",
-  "description": "Synthetic fixtures, deterministic and CI-gating. Tier B (real bottle photographs) is reported separately and never gates.",
+  "description": "Synthetic fixtures, deterministic and CI-gating. Tier B (real bottle photographs) lives in golden/tier_b/ and is reported separately, never gating.",
+  "rendered_with": {
+    "font_family": "Arial.ttf"
+  },
   "not_generated": {
     "TC-11": "angled photo \u2014 applied by degrade.py to a rendered label",
     "TC-12": "glare over the warning \u2014 degrade.py",

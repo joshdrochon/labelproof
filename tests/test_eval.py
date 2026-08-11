@@ -465,7 +465,7 @@ def test_documented_ci_command_matches_the_parser() -> None:
 # --- the CI run itself (LP-071) ----------------------------------------------------------------
 
 def _run(args: list[str], **env: str) -> subprocess.CompletedProcess[str]:
-    environment = dict(os.environ, PYTHONHASHSEED="0", **env)
+    environment = {**os.environ, "PYTHONHASHSEED": "0", **env}
     return subprocess.run(
         [sys.executable, *args],
         cwd=str(REPO),
@@ -544,6 +544,53 @@ def test_the_effective_threshold_is_reported(
     body = json.loads(capsys.readouterr().out)
     assert body["accuracy_floor"] == 0.99
     assert body["ops3_floor"] == ACCURACY_FLOOR
+
+
+# --- determinism (LP-123) ----------------------------------------------------------------------
+
+def test_two_runs_produce_byte_identical_text_output() -> None:
+    """ENG-3. Two interpreters, two hash seeds, one set of bytes.
+
+    A same-process double call cannot catch set- or dict-ordering drift — it shares one
+    hash seed and one set of interned strings. Two subprocesses with different
+    PYTHONHASHSEED values can, which is the whole point of running it this way.
+    """
+    first = _run(["-m", "eval.run"], PYTHONHASHSEED="0")
+    second = _run(["-m", "eval.run"], PYTHONHASHSEED="12345")
+    assert first.returncode == second.returncode == EXIT_OK
+    assert first.stdout == second.stdout
+
+
+def test_two_runs_produce_byte_identical_json_output() -> None:
+    first = _run(["-m", "eval.run", "--json"], PYTHONHASHSEED="0")
+    second = _run(["-m", "eval.run", "--json"], PYTHONHASHSEED="98765")
+    assert first.stdout == second.stdout
+
+
+def test_two_report_artifacts_are_byte_identical(tmp_path: Path) -> None:
+    a, b = tmp_path / "a.json", tmp_path / "b.json"
+    _run(["-m", "eval.run", "--report-json", str(a)], PYTHONHASHSEED="1")
+    _run(["-m", "eval.run", "--report-json", str(b)], PYTHONHASHSEED="2")
+    assert a.read_bytes() == b.read_bytes()
+
+
+def test_the_report_carries_nothing_that_changes_between_runs() -> None:
+    """No timestamp, no elapsed time, no absolute path — the three usual culprits."""
+    text = render(evaluate(CATALOG))
+    for leak in (str(REPO), "/Users/", "elapsed", "seconds", "20260", "20261"):
+        assert leak not in text, leak
+
+
+def test_the_confusion_matrix_keeps_its_shape_when_the_data_changes() -> None:
+    """A grid whose rows appear and vanish with the data cannot be diffed run over run."""
+    full = render(evaluate(CATALOG)).split("\n")
+    sparse = render(Report(tier="A", outcomes=[warning_violation()])).split("\n")
+
+    def grid(lines: list[str]) -> int:
+        start = next(i for i, line in enumerate(lines) if "Confusion matrix" in line)
+        return sum(1 for line in lines[start:start + 9] if line.startswith((" ", "!")))
+
+    assert grid(full) == grid(sparse)
 
 
 # --- expectations are honest -----------------------------------------------------------------

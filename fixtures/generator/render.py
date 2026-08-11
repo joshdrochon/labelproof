@@ -40,6 +40,16 @@ def _font_paths() -> tuple[str, str]:
     )
 
 
+def font_family() -> str:
+    """The regular face this machine renders with.
+
+    Recorded in `golden/set.json` so a hash mismatch between two machines reads as
+    "different font family" rather than "the generator is non-deterministic" — the
+    guarantee LP-123 needs is byte-identity between runs, and it holds per machine.
+    """
+    return _font_paths()[0]
+
+
 def _load(size: int, *, bold: bool) -> ImageFont.FreeTypeFont:
     regular, bold_path = _font_paths()
     return ImageFont.truetype(bold_path if bold else regular, size)
