@@ -105,6 +105,22 @@
       "expectation": "pregated",
       "why": "Directional, unlike a Gaussian, and the commoner defect in a hand-held shot. A defocus-only set would leave the blur measure untested against the blur people actually produce.",
       "sha256": "5d3d4e733dcf6017"
+    },
+    {
+      "name": "lp201_cylinder",
+      "tc": "LP-201",
+      "description": "wrapped around a bottle",
+      "expectation": "readable",
+      "why": "Curvature is not a projective distortion, so the four-point transform cannot undo it and this fixture exists to prove we do not pretend otherwise. The obligation is that the label stays legible and the pass reports no correction \u2014 an audit trail that says what did not happen.",
+      "sha256": "eeafff651cb678ab"
+    },
+    {
+      "name": "lp201_cylinder_angled",
+      "tc": "LP-201",
+      "description": "bottle photographed slightly off-axis",
+      "expectation": "readable",
+      "why": "The realistic combination: nobody photographs a bottle both curved and perfectly square to the camera. Rectification has a boundary to find here, and it must not make the curvature worse in the process.",
+      "sha256": "d52afb40f0d80cdf"
     }
   ]
 }

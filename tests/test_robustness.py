@@ -207,3 +207,43 @@ def test_the_manifest_states_the_simulation_limit() -> None:
 def test_every_condition_explains_why_it_exists() -> None:
     for condition in degrade.CONDITIONS:
         assert condition.why and condition.tc and condition.description
+
+
+# --- LP-201 · curved surfaces -----------------------------------------------------------------
+
+def test_a_bottle_curve_is_not_claimed_to_be_flattened(
+    spec: LabelSpec, clean: np.ndarray
+) -> None:
+    """Curvature is not projective, so a four-point transform cannot undo it. The report
+    saying so is the deliverable — an audit trail of what did not happen is worth more
+    than a correction that never worked."""
+    _, processed, _ = run(spec, degrade.cylinder(clean))
+    assert not processed.perspective_applied
+
+
+def test_a_curved_label_still_reads(spec: LabelSpec, clean: np.ndarray) -> None:
+    result, processed, illegible = run(spec, degrade.cylinder(clean))
+    assert processed.quality_after.verdict != "hopeless"
+    assert illegible == set()
+    assert verdict_of(result, FieldName.GOVERNMENT_WARNING) is Verdict.MATCH
+
+
+def test_correcting_an_angled_bottle_does_not_make_the_curve_worse(
+    spec: LabelSpec, clean: np.ndarray
+) -> None:
+    """Nobody photographs a bottle both curved and perfectly square to the camera. The
+    rectification has a boundary to find here, and the guard is that it leaves the label
+    at least as readable as it found it."""
+    photo = degrade.on_surface(degrade.cylinder(clean), degrees=20.0)
+    _, processed, _ = run(spec, photo)
+    assert processed.quality_after.blur >= processed.quality_before.blur - 0.1
+
+
+def test_the_centre_of_a_curved_label_stays_sharpest(clean: np.ndarray) -> None:
+    """What a cylinder actually does: the middle stays legible while the edges crowd. If
+    this ever inverts, the warp is modelling something other than a bottle."""
+    warped = degrade.cylinder(clean)
+    width = warped.shape[1]
+    centre = warped[:, int(width * 0.35) : int(width * 0.65)]
+    edge = warped[:, : int(width * 0.15)]
+    assert quality.blur_score(centre) > quality.blur_score(edge)

@@ -376,6 +376,29 @@ CONDITIONS: list[Condition] = [
             "people actually produce."
         ),
     ),
+    Condition(
+        name="lp201_cylinder",
+        tc="LP-201",
+        description="wrapped around a bottle",
+        expectation="readable",
+        why=(
+            "Curvature is not a projective distortion, so the four-point transform cannot "
+            "undo it and this fixture exists to prove we do not pretend otherwise. The "
+            "obligation is that the label stays legible and the pass reports no "
+            "correction — an audit trail that says what did not happen."
+        ),
+    ),
+    Condition(
+        name="lp201_cylinder_angled",
+        tc="LP-201",
+        description="bottle photographed slightly off-axis",
+        expectation="readable",
+        why=(
+            "The realistic combination: nobody photographs a bottle both curved and "
+            "perfectly square to the camera. Rectification has a boundary to find here, "
+            "and it must not make the curvature worse in the process."
+        ),
+    ),
 ]
 
 #: Fixture name -> one-line description. Kept as a flat mapping because it is the shape
@@ -418,6 +441,8 @@ def apply_preset(image: np.ndarray, preset: str) -> np.ndarray:
             return motion_blur(image)
         case "lp201_cylinder":
             return cylinder(image)
+        case "lp201_cylinder_angled":
+            return on_surface(cylinder(image), degrees=20.0)
         case _:
             raise KeyError(f"unknown degradation preset {preset!r}")
 
