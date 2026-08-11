@@ -7,8 +7,14 @@ toward proving the tool does NOT pass things it should catch.
 import pytest
 
 from api import canon
-from api.models import Verdict, WarningTypography
-from api.rules import typography, warning
+from api.models import (
+    FieldName,
+    FieldResult,
+    Recommendation,
+    Verdict,
+    WarningTypography,
+)
+from api.rules import aggregate, typography, warning
 
 #: A label the extractor read confidently and completely: every 16.22 signal answered,
 #: and answered the compliant way. This is the only shape of input that can reach Match.
@@ -611,6 +617,83 @@ def test_warning_comparison_is_case_sensitive() -> None:
 
 def test_punctuation_differences_are_not_folded_away() -> None:
     assert not warning.is_verbatim(canon.CANONICAL_WARNING.replace(":", ";"))
+
+
+# --- LP-214: the warning is the row an agent sees first --------------------------------
+#
+# MATCH-10 and WARN-6. The ranking rule is implemented in aggregate.py and mirrored in
+# web/src/triage.ts; these assert the property from the warning's side, because the
+# verdicts this module now produces are what feed it — and one of them, Unreadable on a
+# verbatim warning with unconfirmed type styling, did not exist before this wave.
+
+
+def _row(field: FieldName, verdict: Verdict) -> FieldResult:
+    return FieldResult(
+        field=field, verdict=verdict, extracted=None, expected=None,
+        confidence=1.0, rationale="",
+    )
+
+
+@pytest.mark.parametrize(
+    "warning_verdict",
+    [Verdict.MISSING, Verdict.MISMATCH, Verdict.UNREADABLE, Verdict.MATCH],
+)
+def test_the_warning_row_is_always_first(warning_verdict: Verdict) -> None:
+    rows = [
+        _row(FieldName.BRAND_NAME, Verdict.MISSING),
+        _row(FieldName.NET_CONTENTS, Verdict.MISMATCH),
+        _row(FieldName.GOVERNMENT_WARNING, warning_verdict),
+    ]
+    assert aggregate.triage_order(rows)[0].field is FieldName.GOVERNMENT_WARNING
+
+
+@pytest.mark.tc("TC-07")
+def test_a_missing_warning_drives_the_recommendation_on_its_own() -> None:
+    """WARN-6. Every other row matching does not dilute it."""
+    rows = [
+        _row(FieldName.BRAND_NAME, Verdict.MATCH),
+        _row(FieldName.NET_CONTENTS, Verdict.MATCH),
+        _row(FieldName.GOVERNMENT_WARNING, Verdict.MISSING),
+    ]
+    advice = aggregate.recommend(rows)
+    assert advice.recommendation is Recommendation.RETURN_FOR_CORRECTION
+    assert advice.driving_field is FieldName.GOVERNMENT_WARNING
+
+
+@pytest.mark.tc("TC-03")
+def test_jennys_catch_reaches_the_top_of_the_screen() -> None:
+    """The whole chain again, this time ending where an agent actually looks."""
+    verdict = warning.evaluate(_retitled("Government Warning:"), GOOD).verdict
+    rows = [
+        _row(FieldName.BRAND_NAME, Verdict.ACCEPTABLE_VARIATION),
+        _row(FieldName.GOVERNMENT_WARNING, verdict),
+    ]
+    advice = aggregate.recommend(rows)
+    assert advice.driving_field is FieldName.GOVERNMENT_WARNING
+    assert aggregate.attention_fields(rows)[0].field is FieldName.GOVERNMENT_WARNING
+
+
+def test_an_unconfirmed_warning_outranks_an_acceptable_variation() -> None:
+    """The new verdict this wave introduced has to sort above the soft ones, or the
+    row an agent must look at sits under the row they need not."""
+    unconfirmed = warning.evaluate(canon.CANONICAL_WARNING, WarningTypography()).verdict
+    rows = [
+        _row(FieldName.BRAND_NAME, Verdict.ACCEPTABLE_VARIATION),
+        _row(FieldName.GOVERNMENT_WARNING, unconfirmed),
+    ]
+    attention = aggregate.attention_fields(rows)
+    assert attention[0].field is FieldName.GOVERNMENT_WARNING
+    assert aggregate.recommend(rows).recommendation is Recommendation.NEEDS_REVIEW
+
+
+def test_a_clean_warning_does_not_hold_up_a_clean_label() -> None:
+    """The other half of the ranking rule: pinning it first must not pin it open."""
+    rows = [
+        _row(FieldName.BRAND_NAME, Verdict.MATCH),
+        _row(FieldName.GOVERNMENT_WARNING, warning.evaluate(canon.CANONICAL_WARNING, GOOD).verdict),
+    ]
+    assert aggregate.recommend(rows).recommendation is Recommendation.READY_TO_APPROVE
+    assert aggregate.attention_fields(rows) == []
 
 
 # --- WARN-9 honesty -------------------------------------------------------------------
