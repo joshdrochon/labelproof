@@ -21,13 +21,14 @@ from api.models import Application, FieldName, Verdict
 from api.pipeline import preprocess, quality
 from api.provider.base import ImageInput
 from api.provider.fake import SpecBackedProvider
+from api.rules import thresholds as T
 from api.verify import verify
 from fixtures.generator import degrade
 from fixtures.generator.catalog import by_name
 from fixtures.generator.layout import FIELD_BANDS
 from fixtures.generator.render import render
 from fixtures.generator.spec import LabelSpec
-from scripts import robustness_eval
+from scripts import calibrate_quality, robustness_eval
 
 CLEAN = degrade.BASE_FIXTURE
 ROBUSTNESS_DIR = Path(__file__).resolve().parents[1] / "fixtures" / "robustness"
@@ -347,16 +348,26 @@ def test_the_sweep_covers_every_kind_of_expectation() -> None:
 
 
 # --- LP-199 · the per-condition harness -----------------------------------------------------
+#
+# Each of these runs the whole 15-condition set, so they share one computed report. The
+# threshold sweeps below are an order of magnitude more expensive again — 40-odd full runs
+# — and share theirs for the same reason. CI has a ten-minute budget (LP-247) and a
+# harness that eats it is a harness people start skipping.
 
-def test_the_harness_reports_every_condition() -> None:
+
+@pytest.fixture(scope="module")
+def report() -> robustness_eval.Report:
+    return robustness_eval.evaluate()
+
+
+def test_the_harness_reports_every_condition(report: robustness_eval.Report) -> None:
     """An aggregate accuracy number hides whether the missing percent is spread evenly or
     is entirely "every photograph taken at an angle"."""
-    report = robustness_eval.evaluate()
     assert {o.condition for o in report.outcomes} == {c.name for c in degrade.CONDITIONS}
 
 
-def test_the_whole_robustness_set_currently_passes() -> None:
-    report = robustness_eval.evaluate()
+def test_the_whole_robustness_set_currently_passes(report: robustness_eval.Report) -> None:
+    """Also the claim thresholds.py records: the shipped values produce no false passes."""
     assert report.false_passes == []
     assert report.passed
 
@@ -384,64 +395,188 @@ def test_a_warning_read_through_glare_counts_as_a_false_pass() -> None:
 
 def test_a_report_with_false_passes_does_not_pass() -> None:
     """False passes fail the run on their own, regardless of anything else in it."""
-    report = robustness_eval.Report(tier="A")
-    report.outcomes.append(
+    broken = robustness_eval.Report(tier="A")
+    broken.outcomes.append(
         robustness_eval.Outcome(
             condition="x", tc="TC-14", expectation="pregated", pregated=False
         )
     )
-    assert not report.passed
+    assert not broken.passed
 
 
 def test_false_flags_alone_do_not_fail_the_run() -> None:
-    report = robustness_eval.Report(tier="A")
-    report.outcomes.append(
+    noisy = robustness_eval.Report(tier="A")
+    noisy.outcomes.append(
         robustness_eval.Outcome(
             condition="y", tc="TC-11", expectation="readable", pregated=True
         )
     )
-    assert report.passed
+    assert noisy.passed
 
 
-def test_the_report_states_the_regression_rule() -> None:
+def test_the_condition_report_states_the_regression_rule(
+    report: robustness_eval.Report,
+) -> None:
     """Printed every run so the trade cannot be made by accident."""
-    text = robustness_eval.render_table(robustness_eval.evaluate())
+    text = robustness_eval.render_table(report)
     assert "reduces flags by increasing false passes is a regression" in text
+    assert "PASS" in text
 
 
-def test_the_harness_runs_as_a_command() -> None:
-    assert robustness_eval.main([]) == 0
-    assert robustness_eval.main(["--json"]) == 0
+def test_the_condition_report_serializes(report: robustness_eval.Report) -> None:
+    payload = robustness_eval.as_dict(report)
+    assert payload["false_passes"] == 0
+    assert len(payload["conditions"]) == len(degrade.CONDITIONS)
 
 
-def test_tier_b_without_ground_truth_claims_no_accuracy(tmp_path: Path) -> None:
-    """A number computed against ground truth nobody wrote down is not a number."""
+# --- Tier B ------------------------------------------------------------------------------------
+
+@pytest.fixture(scope="module")
+def photo_dir(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """A stand-in Tier B directory. Real photographs replace it; the path does not care."""
     from PIL import Image
 
-    Image.open(ROBUSTNESS_DIR / "tc13_dim.png").save(tmp_path / "bottle.png")
-    report = robustness_eval.evaluate_photos(tmp_path)
-
-    assert report.tier == "B"
-    assert [o.expectation for o in report.outcomes] == ["unstated"]
-    assert report.false_passes == []
+    directory = tmp_path_factory.mktemp("photos")
+    Image.open(ROBUSTNESS_DIR / "tc13_dim.png").save(directory / "bottle.png")
+    Image.open(ROBUSTNESS_DIR / "tc14_blur_hopeless.png").save(directory / "shaky.png")
+    return directory
 
 
-def test_tier_b_reads_expectations_when_they_exist(tmp_path: Path) -> None:
+def test_tier_b_without_ground_truth_claims_no_accuracy(photo_dir: Path) -> None:
+    """A number computed against ground truth nobody wrote down is not a number."""
+    tier_b = robustness_eval.evaluate_photos(photo_dir)
+    assert tier_b.tier == "B"
+    assert {o.expectation for o in tier_b.outcomes} == {"unstated"}
+    assert tier_b.false_passes == []
+
+
+def test_tier_b_reads_expectations_when_they_exist(photo_dir: Path, tmp_path: Path) -> None:
     from PIL import Image
 
     Image.open(ROBUSTNESS_DIR / "tc14_blur_hopeless.png").save(tmp_path / "shaky.png")
     (tmp_path / "expectations.json").write_text(json.dumps({"shaky.png": "pregated"}))
 
-    report = robustness_eval.evaluate_photos(tmp_path)
-    assert report.outcomes[0].pregated
-    assert report.passed
+    tier_b = robustness_eval.evaluate_photos(tmp_path)
+    assert tier_b.outcomes[0].pregated
+    assert tier_b.passed
 
 
-def test_tier_b_is_never_averaged_into_tier_a(tmp_path: Path) -> None:
+def test_tier_b_is_never_averaged_into_tier_a(photo_dir: Path) -> None:
     """BUILD.md §5. A set generated by our own renderer only proves the pipeline can read
     our own renderer; blending the two would hide the number that matters."""
-    from PIL import Image
+    text = robustness_eval.render_table(robustness_eval.evaluate_photos(photo_dir))
+    assert "never averaged with Tier A" in text
 
-    Image.open(ROBUSTNESS_DIR / "tc13_dim.png").save(tmp_path / "bottle.png")
-    text = robustness_eval.render_table(robustness_eval.evaluate_photos(tmp_path))
+
+# --- LP-200 · the calibration harness -------------------------------------------------------
+
+@pytest.fixture(scope="module")
+def blur_sweep() -> calibrate_quality.Sweep:
+    return calibrate_quality.sweep_one(
+        "BLUR_HOPELESS_VARIANCE", calibrate_quality.SWEEPS["BLUR_HOPELESS_VARIANCE"]
+    )
+
+
+@pytest.fixture(scope="module")
+def glare_sweep() -> calibrate_quality.Sweep:
+    return calibrate_quality.sweep_one(
+        "GLARE_SATURATION_FRACTION",
+        calibrate_quality.SWEEPS["GLARE_SATURATION_FRACTION"],
+    )
+
+
+def test_the_sweep_moves_the_real_constant_not_a_copy() -> None:
+    """A sweep measuring a copy of the thresholds would be measuring something the
+    pipeline does not use."""
+    with calibrate_quality.threshold("HOPELESS", 0.99):
+        assert T.HOPELESS == 0.99
+    assert T.HOPELESS != 0.99
+
+
+def test_a_sweep_puts_the_threshold_back(blur_sweep: calibrate_quality.Sweep) -> None:
+    """A sweep that leaked its last value into the process would silently retune the
+    pipeline for every test that ran after it."""
+    assert blur_sweep.current == T.BLUR_HOPELESS_VARIANCE
+
+
+def test_loosening_the_gate_shows_up_as_false_passes(
+    blur_sweep: calibrate_quality.Sweep,
+) -> None:
+    """The whole point. Dropping the blur floor lets images through that nobody can read,
+    and the table has to say so rather than just showing a lower flag count."""
+    loosest = blur_sweep.levels[0]
+    assert loosest.false_passes > 0
+    assert loosest.regression
+    assert loosest.false_flags == 0  # cheaper on flags, and worse — the trap
+
+
+def test_a_level_that_gates_nothing_is_outside_the_clean_band(
+    blur_sweep: calibrate_quality.Sweep,
+) -> None:
+    """A level with zero flags because it gates nothing is the failure this exists to
+    prevent, so it must not be reported as clean."""
+    band = blur_sweep.safe_band
+    assert band is not None
+    assert band[0] > blur_sweep.levels[0].value
+
+
+def test_the_shipped_value_sits_inside_its_clean_band(
+    blur_sweep: calibrate_quality.Sweep, glare_sweep: calibrate_quality.Sweep
+) -> None:
+    for sweep in (blur_sweep, glare_sweep):
+        band = sweep.safe_band
+        assert band is not None and band[0] <= sweep.current <= band[1], sweep.name
+
+
+def test_the_report_names_the_margin_to_the_nearest_false_pass(
+    glare_sweep: calibrate_quality.Sweep,
+) -> None:
+    """A threshold one step from a false pass is lucky, not calibrated, and real optics
+    will spend that luck."""
+    assert glare_sweep.margin >= 1
+    assert "margin" in glare_sweep.verdict or "step" in glare_sweep.verdict
+
+
+def test_tightening_too_far_shows_up_as_false_flags(
+    glare_sweep: calibrate_quality.Sweep,
+) -> None:
+    """The other end of the trade. Over-tight and readable labels get rejected."""
+    assert glare_sweep.levels[0].false_flags > 0
+
+
+def test_every_swept_threshold_exists_and_declares_its_direction() -> None:
+    """Without a direction the table shows a number moving and not what moving it costs."""
+    for name, knob in calibrate_quality.SWEEPS.items():
+        assert hasattr(T, name), name
+        assert knob.stricter in ("higher", "lower"), name
+        assert knob.effect
+
+
+def test_the_calibration_report_states_the_regression_rule(
+    blur_sweep: calibrate_quality.Sweep,
+) -> None:
+    text = calibrate_quality.render([blur_sweep])
+    assert "reduces flags by letting a bad label through is a" in text
+    assert "Clean band" in text
+
+
+def test_the_calibration_report_serializes(blur_sweep: calibrate_quality.Sweep) -> None:
+    payload = calibrate_quality.as_dict([blur_sweep])
+    assert payload["sweeps"][0]["threshold"] == "BLUR_HOPELESS_VARIANCE"
+    assert payload["sweeps"][0]["clean_band"]
+
+
+def test_calibrating_against_photos_uses_the_photo_set(photo_dir: Path) -> None:
+    """The Tier B path — the one that decides these values once real photographs land."""
+    sweep = calibrate_quality.sweep_one(
+        "HOPELESS", calibrate_quality.SWEEPS["HOPELESS"], photos=photo_dir
+    )
+    assert sweep.tier == "B"
+    assert len(sweep.levels) == len(calibrate_quality.SWEEPS["HOPELESS"].values)
+
+
+def test_tier_b_calibration_says_it_is_the_honest_number(photo_dir: Path) -> None:
+    text = calibrate_quality.render(
+        calibrate_quality.sweep_all(["HOPELESS"], photos=photo_dir)
+    )
     assert "never averaged with Tier A" in text

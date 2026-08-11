@@ -33,6 +33,7 @@ import argparse
 import json
 import sys
 from dataclasses import dataclass, field
+from functools import cache
 from pathlib import Path
 from typing import Any
 
@@ -128,8 +129,8 @@ class Report:
         return not self.false_passes
 
 
-def run_condition(spec: LabelSpec, base: np.ndarray, condition: degrade.Condition) -> Outcome:
-    processed = preprocess.preprocess(condition.apply(base))
+def run_condition(spec: LabelSpec, image: np.ndarray, condition: degrade.Condition) -> Outcome:
+    processed = preprocess.preprocess(image)
     pregated = quality.should_skip_extraction(processed.quality_before)
 
     outcome = Outcome(
@@ -158,12 +159,24 @@ def run_condition(spec: LabelSpec, base: np.ndarray, condition: degrade.Conditio
     return outcome
 
 
+@cache
+def _degraded(name: str) -> np.ndarray:
+    """The base label with one degradation applied, rendered once per process.
+
+    Cached because the threshold sweep re-runs the whole set at every level, and
+    rendering plus warping the same fixture forty times is forty times the work for
+    identical pixels. Nothing here depends on a threshold — the degradations are the
+    input, the thresholds only change how it is judged.
+    """
+    base = np.array(render(by_name(degrade.BASE_FIXTURE)))
+    return next(c for c in degrade.CONDITIONS if c.name == name).apply(base)
+
+
 def evaluate(conditions: list[degrade.Condition] | None = None) -> Report:
     spec = by_name(degrade.BASE_FIXTURE)
-    base = np.array(render(spec))
     report = Report(tier="A")
     for condition in conditions or degrade.CONDITIONS:
-        report.outcomes.append(run_condition(spec, base, condition))
+        report.outcomes.append(run_condition(spec, _degraded(condition.name), condition))
     return report
 
 

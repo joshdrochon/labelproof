@@ -40,6 +40,31 @@ ESCALATION_TRIGGER: Final[float] = 0.60
 # --------------------------------------------------------------------------------------
 #
 # All scores are 0..1 where 1 is best, so they compose and read consistently.
+#
+# **How these were chosen (LP-200).** `python -m scripts.calibrate_quality` sweeps each
+# value below across a range and reports, at every level, false passes (something
+# illegible treated as legible) and false flags (something legible treated as illegible).
+# The rule it exists to enforce: *a threshold change that reduces flags by letting a bad
+# label through is a regression, not an improvement.*
+#
+# Recorded from the run against the 15-condition robustness set. "Margin" is how many
+# sweep steps the value sits from the nearest level that produces a false pass:
+#
+#     HOPELESS                   0.20    clean band 0.15–0.40    margin 2
+#     DEGRADED                   0.45    clean band 0.30–0.70    margin 8 (no false pass in range)
+#     SHARP_GRADIENT_VARIANCE    6000    clean band 2000–16000   margin 6 (no false pass in range)
+#     BLUR_HOPELESS_VARIANCE      120    clean band 90–400       margin 2
+#     EXPOSURE_FLOOR               90    clean band 50–160       margin 6 (no false pass in range)
+#     GLARE_SATURATION_FRACTION  0.25    clean band 0.10–0.35    margin 2
+#     MIN_LONG_EDGE_PX           1200    clean band 600–2000     margin 5 (no false pass in range)
+#
+# Several bands are wide because the generated set is coarse, not because the thresholds
+# are robust. A wide band on synthetic fixtures is an absence of evidence, not evidence of
+# safety — the sweep exists so that distinction stays visible.
+#
+# **Still calibrated against rendered fixtures, not photographs.** Real optics differ and
+# this is the most likely place for the pipeline to be wrong. Re-run the sweep with
+# `--photos` when Tier B lands; that run decides these values (LP-292).
 
 #: Below this on any dimension, the image is hopeless: return Unreadable with a retake
 #: reason and make ZERO model calls (LP-321). The pre-gate can only ever spend less and
