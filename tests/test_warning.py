@@ -777,6 +777,60 @@ def test_the_warning_row_points_at_a_region_on_the_picture() -> None:
     assert row.evidence.bbox is not None
 
 
+# --- LP-216: the warning fixture set, exercised end to end -----------------------------
+#
+# Fixtures that exist but are never run against the rules engine prove nothing. Each of
+# these takes a rendered label through the whole pipeline and asserts the verdict and the
+# finding the golden set claims for it.
+
+
+@pytest.mark.parametrize(
+    ("fixture", "verdict", "code"),
+    [
+        ("tc01_old_tom_clean", Verdict.MATCH, None),
+        ("tc03_title_case_warning", Verdict.MISMATCH, "warning_header_not_all_caps"),
+        ("tc03b_non_bold_warning_header", Verdict.MISMATCH, "warning_header_not_bold"),
+        ("tc04_bold_warning_body", Verdict.MISMATCH, "warning_body_is_bold"),
+        ("tc05_reworded_warning", Verdict.MISMATCH, "warning_text_rewording"),
+        ("tc05b_truncated_warning", Verdict.MISMATCH, "warning_text_truncated"),
+        ("tc06_buried_warning", Verdict.UNREADABLE, "warning_less_prominent"),
+        ("tc07_missing_warning", Verdict.MISSING, "warning_missing"),
+    ],
+)
+def test_each_warning_fixture_produces_what_the_golden_set_claims(
+    fixture: str, verdict: Verdict, code: str | None
+) -> None:
+    row = _warning_row(fixture)
+    assert row.verdict is verdict
+    if code is not None:
+        assert code in {f.code for f in row.findings}
+
+
+def test_the_bold_half_of_warn_2_has_a_fixture_of_its_own() -> None:
+    """TC-03 covers capitals. Without this one, a checker that ignored the bold signal
+    entirely would have passed the whole fixture set."""
+    row = _warning_row("tc03b_non_bold_warning_header")
+    assert "warning_header_not_all_caps" not in {f.code for f in row.findings}
+    assert row.extracted == canon.CANONICAL_WARNING  # the wording is correct
+
+
+def test_the_truncated_fixture_is_a_truncation_and_not_a_rewording() -> None:
+    """LP-210's two cases are different corrections for the applicant to make."""
+    row = _warning_row("tc05b_truncated_warning")
+    assert row.extracted is not None
+    assert warning.classify(row.extracted).kind == warning.TRUNCATED
+
+
+@pytest.mark.tc("TC-06")
+def test_the_buried_fixture_is_verbatim_and_still_needs_a_human() -> None:
+    """The point of TC-06: nothing is wrong with the words, so this is not a correction
+    to send back — it is a judgement about a photograph."""
+    row = _warning_row("tc06_buried_warning")
+    assert row.extracted == canon.CANONICAL_WARNING
+    assert row.verdict is Verdict.UNREADABLE
+    assert row.evidence is not None and row.evidence.bbox is not None
+
+
 # --- LP-214: the warning is the row an agent sees first --------------------------------
 #
 # MATCH-10 and WARN-6. The ranking rule is implemented in aggregate.py and mirrored in

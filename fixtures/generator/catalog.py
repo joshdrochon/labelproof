@@ -71,12 +71,41 @@ CATALOG: list[LabelSpec] = [
         name="tc06_buried_warning",
         warning_scale=0.45,
         warning_contrast=0.35,
-        expect={"government_warning": "mismatch"},
-        pending="LP-211",
+        expect={"government_warning": "unreadable"},
+        expect_findings={
+            "government_warning": ["warning_less_prominent", "warning_low_contrast"]
+        },
         notes=(
             "TC-06. Warning present and verbatim but shrunk and low-contrast — the "
-            "'creative' evasion Jenny described. Prominence heuristics (LP-211) target "
-            "this; until they land the expectation may need revisiting."
+            "'creative' evasion Jenny described. The wording is right, so this is not a "
+            "correction to send back; the PRD asks for Needs review with the region "
+            "shown. Unreadable is the verdict that carries that meaning without "
+            "claiming the label is wrong (LP-211, LP-212)."
+        ),
+    ),
+
+    OLD_TOM.with_(
+        name="tc03b_non_bold_warning_header",
+        warning_header_bold=False,
+        expect={"government_warning": "mismatch"},
+        expect_findings={"government_warning": ["warning_header_not_bold"]},
+        notes=(
+            "WARN-2's other half. TC-03 covers capitals; nothing covered bold, so a "
+            "checker that ignored the bold signal entirely would have passed the whole "
+            "fixture set. Capitals are correct here and only the weight is wrong."
+        ),
+    ),
+
+    OLD_TOM.with_(
+        name="tc05b_truncated_warning",
+        warning_text=canon.WARNING_BODY[: canon.WARNING_BODY.index("(2)")].strip(),
+        expect={"government_warning": "mismatch"},
+        expect_findings={"government_warning": ["warning_text_truncated"]},
+        notes=(
+            "LP-210. The commonest partial warning in the wild: clause (1) printed and "
+            "clause (2) dropped, usually because the artwork ran out of room. Distinct "
+            "from TC-05, which rewords rather than truncates, and the correction the "
+            "applicant has to make is a different one."
         ),
     ),
 

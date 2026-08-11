@@ -147,10 +147,10 @@ def test_a_pending_fixture_that_starts_passing_is_not_reported() -> None:
     assert report.pending == []
 
 
-def test_only_tc06_is_pending_right_now() -> None:
-    """If another fixture becomes pending, that should be a deliberate act."""
-    pending = {s.name: s.pending for s in CATALOG if s.pending}
-    assert pending == {"tc06_buried_warning": "LP-211"}
+def test_nothing_is_pending_right_now() -> None:
+    """A fixture becoming pending should be a deliberate act, and TC-06 stopped being
+    one when the prominence heuristics landed (LP-211, LP-212)."""
+    assert {s.name: s.pending for s in CATALOG if s.pending} == {}
 
 
 # --- reporting -------------------------------------------------------------------------------
