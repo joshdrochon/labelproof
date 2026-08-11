@@ -32,6 +32,7 @@ from fastapi.testclient import TestClient
 from PIL import Image
 
 from api import logging as applog
+from api import main as main_mod
 from api.batch import manifest as manifest_mod
 from api.batch.models import (
     BatchItem,
@@ -78,6 +79,13 @@ def make_config(tmp_path: Path, **overrides: Any) -> Config:
         "storage_dir": str(tmp_path),
         "batch_workers": 4,
     }
+    base.update(overrides)
+    return Config(**base)
+
+
+def make_config_api(**overrides: Any) -> Config:
+    """A config with no storage directory, for the paths that never touch the store."""
+    base: dict[str, Any] = {"use_fake_provider": True}
     base.update(overrides)
     return Config(**base)
 
@@ -307,7 +315,9 @@ def multipart_stream(
     yield f"--{boundary}--\r\n".encode()
 
 
-def asgi_post(app: Any, path: str, body: Iterator[bytes]) -> tuple[int, Any]:
+def asgi_post(
+    app: Any, path: str, body: Iterator[bytes], sent_bytes: list[int] | None = None
+) -> tuple[int, Any]:
     """POST by driving the ASGI app directly, with a body that is never resident in full.
 
     TestClient cannot be used here. httpx does `b"".join(self.stream)` before it sends, so
@@ -315,7 +325,11 @@ def asgi_post(app: Any, path: str, body: Iterator[bytes]) -> tuple[int, Any]:
     server did the same and makes any measurement meaningless. Driving the app by hand is
     also the only way to send a body with NO `Content-Length`: that is the shape a
     `Transfer-Encoding: chunked` upload arrives in, and it skips the whole-request ceiling
-    in `api/main.py` entirely, so the cap has to hold without it.
+    in `api/main.py` entirely, so a cap has to hold without it.
+
+    `sent_bytes`, if given, accumulates how much the client actually handed over. That is
+    the number that matters for a disk bound: a refusal that arrives after the client has
+    finished uploading has refused nothing.
     """
     scope = {
         "type": "http",
@@ -338,9 +352,12 @@ def asgi_post(app: Any, path: str, body: Iterator[bytes]) -> tuple[int, Any]:
 
     async def receive() -> dict[str, Any]:
         try:
-            return {"type": "http.request", "body": next(body), "more_body": True}
+            chunk = next(body)
         except StopIteration:
             return {"type": "http.request", "body": b"", "more_body": False}
+        if sent_bytes is not None:
+            sent_bytes.append(len(chunk))
+        return {"type": "http.request", "body": chunk, "more_body": True}
 
     sent: list[dict[str, Any]] = []
 
@@ -362,54 +379,121 @@ def megabytes(count: int) -> Iterator[bytes]:
         yield ONE_MB
 
 
-def test_a_large_upload_is_spooled_rather_than_held(tmp_path: Path) -> None:
-    """120 MB of artwork must not cost 120 MB of RSS. BATCH-2's dump is ten times this.
+def test_a_large_multi_part_upload_is_spooled_rather_than_held(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """120 MB of artwork across 15 parts must not cost 120 MB of RSS.
 
     Measured with tracemalloc around the whole request, so what is asserted is what the
     process retained while the route ran. Before the fix this tracked the upload almost
-    exactly; the ceiling here is a small multiple of a chunk, which is what O(1) looks
-    like.
+    exactly. Every part is named by the manifest, so this exercises the ACCEPT path —
+    expansion, pairing, and 15 renames into the job directory — not just the refusal.
+
+    The worker pool is held back for the duration. It starts before `POST /batch` returns,
+    and a worker decoding an 8 MB image legitimately holds 8 MB — measured at 42 MB of
+    perfectly correct verification noise, which would have set the ceiling here by
+    accident and measured the wrong subsystem.
     """
+    monkeypatch.setattr(WorkerPool, "start", lambda self: None)
+    names = [f"f{n}.png" for n in range(15)]
     app = create_app(config=make_config(tmp_path), provider=spec_provider())
-    files = 15
     body = multipart_stream(
-        [("manifest", "manifest.csv", manifest_csv([row()]).encode())]
-        + [("files", f"f{n}.png", megabytes(8)) for n in range(files)]
+        [("manifest", "manifest.csv", manifest_csv([row(front=n) for n in names]).encode())]
+        + [("files", name, megabytes(8)) for name in names]
     )
 
     tracemalloc.start()
     tracemalloc.reset_peak()
     try:
-        status, _ = asgi_post(app, "/batch", body)
+        status, payload = asgi_post(app, "/batch", body)
         _, peak = tracemalloc.get_traced_memory()
     finally:
         tracemalloc.stop()
 
-    uploaded = files * 8 * 1024 * 1024
-    assert status in (200, 400)  # the manifest names one image; the rest are unmatched
+    assert status == 200, payload
+    assert payload["accepted"] == 15
     assert peak < 24 * 1024 * 1024, (
-        f"the route retained {peak / 1e6:.0f} MB while {uploaded / 1e6:.0f} MB was "
-        f"uploaded — the upload is being held, not spooled"
+        f"the route retained {peak / 1e6:.0f} MB while 120 MB was uploaded — the upload "
+        f"is being held, not spooled"
     )
 
 
-def test_the_batch_cap_holds_without_a_content_length(
+def test_a_single_huge_part_is_spooled_rather_than_held(tmp_path: Path) -> None:
+    """One 64 MB part, which is the real shape: an agent uploads one `labels.zip`.
+
+    The multi-part test above cannot catch per-part materialization — with 8 MB parts,
+    reading each one whole still fits under any sane ceiling. Here the single part is
+    larger than the ceiling, so `data = await upload.read()` fails outright and only
+    genuine chunking passes.
+    """
+    app = create_app(config=make_config(tmp_path), provider=spec_provider())
+    body = multipart_stream([("files", "one_big.png", megabytes(64))])
+
+    tracemalloc.start()
+    tracemalloc.reset_peak()
+    try:
+        status, payload = asgi_post(app, "/batch", body)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+
+    # Refused for being over the per-file cap — after it was streamed, which is the point.
+    assert status == 400
+    assert payload["error"]["code"] == "file_too_large"
+    assert peak < 24 * 1024 * 1024, (
+        f"the route retained {peak / 1e6:.0f} MB for a single 64 MB part — it is being "
+        f"read whole, not chunked"
+    )
+
+
+def test_a_chunked_upload_is_cut_off_at_the_wire_not_after_it_lands(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A chunked upload declares no length, so the whole-request ceiling never sees it.
+    """The disk bound, and the only test here that measures the thing that matters.
 
-    `api/main._too_large_to_read` returns None when `Content-Length` is absent, which is
-    correct — it cannot check what it was not told — but it means the ONLY bound on a
-    chunked upload is the running total counted as the bytes land. This is that bound.
+    A `Transfer-Encoding: chunked` POST sends no `Content-Length`, so the header check in
+    `api/main` is skipped by construction. Everything inside the route is downstream of
+    Starlette's multipart parser, which drains the socket into temp files before the route
+    function starts — so a cap enforced in `create_batch` fires only once the whole upload
+    is already on the volume. Measured before `_WireLimit`: cap 1 MB, 200 MB sent, 200 MB
+    written, refusal on the last byte. The volume holds `jobs.db`, so filling it takes
+    every batch on the server with it.
+
+    The assertion is therefore about how much the CLIENT got to send, not about the status
+    code — a refusal after the upload finished has refused nothing.
     """
     monkeypatch.setattr(batch_routes, "MAX_TOTAL_BYTES", 4 * 1024 * 1024)
     app = create_app(config=make_config(tmp_path), provider=spec_provider())
-    body = multipart_stream([("files", "big.png", megabytes(16))])
 
-    status, payload = asgi_post(app, "/batch", body)
+    sent: list[int] = []
+    status, payload = asgi_post(
+        app, "/batch", multipart_stream([("files", "big.png", megabytes(256))]), sent
+    )
+
     assert status == 400
     assert payload["error"]["code"] == "batch_too_large"
     assert payload["error"]["next_step"] == "reduce"
+
+    ceiling = 4 * 1024 * 1024 + main_mod._BATCH_ENVELOPE_BYTES
+    accepted = sum(sent)
+    assert accepted <= ceiling + 2 * 1024 * 1024, (
+        f"the client uploaded {accepted / 1e6:.0f} MB before being cut off, against a "
+        f"{ceiling / 1e6:.0f} MB ceiling — the body is being taken in full and refused after"
+    )
+    assert accepted < 256 * 1024 * 1024
+
+
+def test_the_wire_limit_leaves_verify_now_alone() -> None:
+    """The tight single-verify ceiling still applies on its own path, over the wire."""
+    app = create_app(config=make_config_api(max_image_bytes=1024 * 1024, max_images=2))
+    sent: list[int] = []
+    status, payload = asgi_post(
+        app, "/verify", multipart_stream([("images", "big.png", megabytes(64))]), sent
+    )
+    assert status == 400
+    assert payload["error"]["code"] == "file_too_large"
+    assert "2 images of up to 1 MB each" in payload["error"]["message"]
+    assert sum(sent) < 64 * 1024 * 1024
 
 
 def test_a_refused_upload_leaves_no_artwork_behind(tmp_path: Path) -> None:
@@ -423,11 +507,35 @@ def test_a_refused_upload_leaves_no_artwork_behind(tmp_path: Path) -> None:
 
 
 def test_accepted_artwork_is_moved_out_of_staging_not_copied(tmp_path: Path) -> None:
-    """The staged file becomes the stored file. Copying would double peak disk on a dump."""
+    """The staged file BECOMES the stored file — asserted on the inode, not on tidiness.
+
+    The previous version of this test checked that staging was empty afterwards and that
+    the image was readable. Both hold under a copy, because `staging()`'s `finally` deletes
+    the directory either way, so the property in the test's name was unasserted and
+    `source.replace(...)` -> `shutil.copyfile(...)` left the suite green. Only identity
+    distinguishes a move from a copy, and identity is what bounds peak disk on a 1.2 GB
+    dump.
+    """
     client = make_client(tmp_path, provider=spec_provider())
-    job_id = post_batch(client, [row()]).json()["job_id"]
+    store_cls = BatchStore
+    original = store_cls.adopt_image
+    staged_inode: dict[str, int] = {}
+
+    def spy(self: BatchStore, job_id: str, supplied_name: str, source: Path) -> None:
+        staged_inode[supplied_name] = source.stat().st_ino
+        original(self, job_id, supplied_name, source)
+
+    store_cls.adopt_image = spy  # type: ignore[method-assign]
+    try:
+        job_id = post_batch(client, [row()]).json()["job_id"]
+    finally:
+        store_cls.adopt_image = original  # type: ignore[method-assign]
 
     store: BatchStore = client.app.state.batch_store
+    stored = store.images_root / job_id / stored_name(GOOD_IMAGE)
+    assert staged_inode[GOOD_IMAGE] == stored.stat().st_ino, (
+        "the stored file is a different inode from the staged one — it was copied, not moved"
+    )
     assert list(store.staging_root.iterdir()) == []
     assert store.read_image(job_id, GOOD_IMAGE) == GOOD_BYTES
     drain(client)

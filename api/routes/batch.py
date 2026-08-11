@@ -12,12 +12,19 @@ not come back numbered, with the column named. Three bad rows out of 300 must no
 agent back to processing them one at a time (TC-20).
 
 **Nothing is held in memory.** A real batch is 300 applications and roughly 600
-photographs — over a gigabyte. Every part is spooled to disk a chunk at a time, the caps
-are enforced as the bytes land rather than after the upload is resident, and the files an
+photographs — over a gigabyte. Every part is copied to staging a chunk at a time, the
+per-file and per-job caps are checked on the chunk that crosses them, and the files an
 item needs are renamed into the job directory rather than read out and written back. The
 first version built `list[(name, bytes)]` and checked the total afterwards, which made
-peak memory a multiple of the upload; the only thing bounding it was a whole-request
-ceiling so low it refused every real batch, so the two had to be fixed together.
+peak memory a multiple of the upload.
+
+**What bounds memory here is not what bounds disk.** By the time this module runs, the
+body is already on disk: FastAPI resolves `list[UploadFile]` as a dependency, so
+Starlette's multipart parser has drained the socket into spooled temp files before the
+route function starts. The caps below therefore run against local files, not against the
+wire, and they bound *residency* only. Disk is bounded upstream by `api.main._WireLimit`,
+which counts bytes in `receive`. Each part's temp file is closed as soon as it has been
+staged, so the two copies do not both peak.
 
 **Archive contents are hostile.** A zip can name `../../etc/passwd`, expand a kilobyte
 into a gigabyte, or carry ten thousand entries. Names are reduced to their last segment,
@@ -31,6 +38,7 @@ BATCH-5 and the only thing that beats one-at-a-time end to end.
 
 from __future__ import annotations
 
+import contextlib
 import csv
 import io
 import time
@@ -193,21 +201,22 @@ def _too_much() -> errors.UserError:
 
 
 class _Landing:
-    """Disk-backed staging for one upload, with the total cap enforced as bytes arrive.
+    """Staging for one upload, copied a chunk at a time with the total cap checked per chunk.
 
-    This is not a convenience. `create_batch` used to build `list[(name, bytes)]` and
-    check `MAX_TOTAL_BYTES` after the list was complete, which meant the cap could only
-    fire once the whole upload was already resident — measured at 693 MB of RSS for
-    240 MB of content, because the read, the dict and any archive expansion all coexist.
-    Extrapolated to the 1.2 GB dump this feature exists for, the container is OOM-killed:
-    six workers die mid-item, and items left `processing` are only recovered on the next
-    `BatchStore` construction. Per-item isolation survives one bad image and does not
-    survive the process dying, so this is the failure that costs the whole server.
+    **This bounds memory, not disk, and the distinction cost a review round.** `create_batch`
+    used to build `list[(name, bytes)]` and check `MAX_TOTAL_BYTES` after the list was
+    complete, so the cap could only fire once the whole upload was resident — measured at
+    693 MB of RSS for 240 MB of content, because the read, the dict and any archive
+    expansion all coexist. At the 1.2 GB dump this feature exists for the container is
+    OOM-killed, six workers die mid-item, and their rows sit in `processing` until the next
+    `BatchStore` construction. Per-item isolation survives a bad image; it does not survive
+    the process dying.
 
-    Bytes now go from the socket to a file one chunk at a time and the running total is
-    checked on every chunk. That bounds resident memory to a chunk regardless of upload
-    size — and it bounds a `Transfer-Encoding: chunked` upload, which declares no length
-    and so never meets the whole-request ceiling in `api/main.py` at all.
+    What it does *not* do is bound what reaches the filesystem. `upload.read()` here is
+    reading a spooled temp file that Starlette's multipart parser already filled from the
+    socket — measured: cap set to 1 MB, 200 MB sent chunked, all 200 MB on disk before this
+    class saw a byte. That door is `api.main._WireLimit`. Each temp file is closed as soon
+    as it is staged so the two copies do not both peak, but the bound itself lives upstream.
     """
 
     def __init__(self, root: Path):
@@ -225,21 +234,37 @@ class _Landing:
             raise _too_much()
 
     async def spool(self, upload: UploadFile) -> Path:
-        """Stream one multipart part to disk, refusing the moment the batch is too big."""
+        """Copy one part into staging, refusing the moment the batch is too big.
+
+        The part's temp file is closed on the way out. Starlette holds every part open
+        until the request ends, so without this the upload exists twice over — once in
+        `$TMPDIR` and once in staging — and peak disk is double what was sent.
+        """
         path = self._slot()
-        with path.open("wb") as sink:
-            while chunk := await upload.read(_CHUNK_BYTES):
-                self._account(len(chunk))
-                sink.write(chunk)
+        try:
+            with path.open("wb") as sink:
+                while chunk := await upload.read(_CHUNK_BYTES):
+                    self._account(len(chunk))
+                    sink.write(chunk)
+        finally:
+            with contextlib.suppress(Exception):
+                await upload.close()
         return path
 
     def unpack(self, archive: zipfile.ZipFile, entry: zipfile.ZipInfo, limit: int) -> Path:
         """Decompress one entry to disk, reading at most `limit` + 1 bytes.
 
-        The +1 is the point: `entry.file_size` is a number the attacker wrote, so a bomb
-        that declares a kilobyte and expands to a gigabyte is stopped by the read bound
-        rather than by the declaration, and the extra byte is what makes the lie visible
-        to the caller's size check.
+        The bound that actually stops a zip bomb is `entry.file_size > max_image_bytes` in
+        the caller, checked before a byte is decompressed. CPython's `ZipExtFile` will not
+        return more than the declared `file_size` anyway, so an *upward* lie is refused by
+        that check and a *downward* lie truncates — producing a short, corrupt image that
+        fails ingest later and fails one batch item, in isolation, with a readable reason.
+
+        The `+1` here is therefore belt rather than braces: it is what would catch a zip
+        implementation that does not cap at the declared size, and it is what makes an
+        over-long entry visible to the caller's `size > max_image_bytes` check instead of
+        silently filling the disk. An earlier version of this docstring called it the
+        load-bearing check. It is not, and saying so was how it stayed untested.
         """
         path = self._slot()
         remaining = limit + 1
@@ -427,8 +452,9 @@ async def create_batch(
     with store.staging() as scratch:
         landing = _Landing(scratch)
 
-        # Spooled before anything is parsed, so peak memory is one chunk rather than the
-        # whole dump, and the cap fires on the chunk that crosses it.
+        # Copied into staging before anything is parsed, so peak memory is one chunk
+        # rather than the whole dump. What reaches disk at all is bounded upstream by
+        # `api.main._WireLimit`, not here.
         staged: list[tuple[str, Path]] = []
         for upload in files or []:
             staged.append((upload.filename or "", await landing.spool(upload)))

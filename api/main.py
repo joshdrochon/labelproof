@@ -18,6 +18,7 @@ brand name, and label content never reaches a log line (SEC-4).
 
 from __future__ import annotations
 
+import json
 import logging
 import time
 from collections.abc import Awaitable, Callable
@@ -30,7 +31,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException
 from starlette.exceptions import HTTPException as StarletteHTTPException
-from starlette.types import Scope
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from api import errors
 from api import logging as applog
@@ -112,6 +113,11 @@ def create_app(
 
 
 def _install_middleware(app: FastAPI) -> None:
+    # Pure ASGI, and it must be a middleware rather than anything inside a route: it wraps
+    # `receive`, and the multipart parser drains the whole body before a route function's
+    # first line runs. See `_WireLimit`.
+    app.add_middleware(_WireLimit)
+
     @app.middleware("http")
     async def request_context(
         request: Request, call_next: Callable[[Request], Awaitable[Response]]
@@ -151,7 +157,7 @@ _BATCH_ENVELOPE_BYTES = 32 * 1024 * 1024
 _VERIFY_ENVELOPE_BYTES = 1024 * 1024
 
 
-def _size_ceiling(request: Request) -> tuple[int, errors.LabelProofError]:
+def _size_ceiling(path: str, config: Config) -> tuple[int, errors.LabelProofError]:
     """The whole-request ceiling for this path, and the refusal that goes with it.
 
     The two modes accept wildly different uploads and a single ceiling cannot serve both.
@@ -165,9 +171,7 @@ def _size_ceiling(request: Request) -> tuple[int, errors.LabelProofError]:
     So the ceiling follows the path, and so does the sentence — a refusal that names the
     wrong limit sends the agent to fix something that was never wrong.
     """
-    config: Config = request.app.state.config
-
-    if request.url.path.strip("/").split("/", 1)[0] == "batch":
+    if path.strip("/").split("/", 1)[0] == "batch":
         return (
             batch.MAX_TOTAL_BYTES + _BATCH_ENVELOPE_BYTES,
             errors.UserError(
@@ -193,29 +197,111 @@ def _size_ceiling(request: Request) -> tuple[int, errors.LabelProofError]:
 
 
 def _too_large_to_read(request: Request) -> errors.LabelProofError | None:
-    """Reject an impossible upload before a byte of it is buffered.
+    """Refuse an upload whose *declared* length is already impossible.
 
-    This is a cheap first door, not the lock, and it is important to be exact about which.
-    `Content-Length` is a hint: it can be absent — a `Transfer-Encoding: chunked` upload
-    declares no length and never meets this check at all — and it can lie. So nothing here
-    bounds anything on its own.
+    One of two doors, and the weaker one. `Content-Length` is a hint: it can lie, and a
+    `Transfer-Encoding: chunked` upload does not send one at all, so this check is skipped
+    entirely for the shape an attacker would pick. It survives because it is free and it
+    answers the honest client immediately, before a byte is read.
 
-    The real bounds live downstream and are enforced as bytes arrive, not after they have
-    all arrived: `pipeline.ingest` for a single verification, and `routes.batch._Landing`
-    for a batch, which counts the running total on every chunk it spools. An earlier
-    version of this docstring said the batch route "enforces the real per-job cap", which
-    was true of disk and false of memory — that cap ran after the whole upload was already
-    resident, and this ceiling was the only thing accidentally preventing an OOM. Raising
-    the ceiling for batch removed that accident, so the two were fixed together.
+    `_WireLimit` below is the door that actually holds.
     """
     declared = request.headers.get("content-length")
     if not declared or not declared.isdigit():
         return None
 
-    ceiling, refusal = _size_ceiling(request)
+    ceiling, refusal = _size_ceiling(request.url.path, request.app.state.config)
     if int(declared) <= ceiling:
         return None
     return refusal
+
+
+class _WireLimit:
+    """Count request body bytes as they come off the wire, and stop at the ceiling.
+
+    This has to be pure ASGI and it has to be outside everything, because of where the
+    bytes actually go. FastAPI resolves `files: list[UploadFile]` as a dependency, so
+    Starlette's `MultiPartParser` consumes the ENTIRE body and spools it into
+    `SpooledTemporaryFile`s — rolling to `$TMPDIR` above 1 MB — before the route function's
+    first line runs. Everything the route does afterwards, including `_Landing`'s running
+    total, is reading a local temp file. Measured: with the batch cap set to 1 MB, a 200 MB
+    chunked upload was written to disk in full and the cap fired on the last byte.
+
+    So `_Landing` bounds *memory*, which was the OOM, and nothing bounded *disk*. An
+    unauthenticated POST of any size filled the volume — and the volume holds `jobs.db`,
+    so filling it takes every batch on the server with it. An earlier docstring here
+    claimed the running total was counted "as bytes arrive". It was not, and a claimed
+    bound that does not exist is worse than a known gap, because it is how the next person
+    stops checking.
+
+    Counting in `receive` is the only place upstream of the parser. Raising from there is
+    not enough on its own: FastAPI wraps *any* exception thrown while it is parsing a body
+    into `HTTPException(400, "There was an error parsing the body")`, so the refusal came
+    back as the generic "that request could not be handled" and the agent was told nothing
+    about size. So the response is replaced on the way out instead, which also keeps this
+    independent of that framework detail rather than hostage to it (OPS-5).
+    """
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        parent = scope.get("app")
+        if scope["type"] != "http" or parent is None:
+            await self.app(scope, receive, send)
+            return
+
+        ceiling, refusal = _size_ceiling(scope.get("path", ""), parent.state.config)
+        seen = 0
+        refused = False
+        answered = False
+
+        async def metered() -> Message:
+            nonlocal seen, refused
+            message = await receive()
+            if message["type"] == "http.request":
+                seen += len(message.get("body", b""))
+                if seen > ceiling:
+                    refused = True
+                    # Raised to unwind immediately — the point is to stop reading, not to
+                    # deliver the message. `guarded` delivers it.
+                    raise refusal
+            return message
+
+        async def guarded(message: Message) -> None:
+            nonlocal answered
+            if not refused:
+                await send(message)
+                return
+            # Whatever the app is trying to say, it is a symptom of our refusal. Say ours.
+            if message["type"] == "http.response.start" and not answered:
+                answered = True
+                await _send_error(send, refusal)
+
+        try:
+            await self.app(scope, metered, guarded)
+        except errors.LabelProofError:
+            if not refused:
+                raise
+        if refused and not answered:
+            answered = True
+            await _send_error(send, refusal)
+
+
+async def _send_error(send: Send, error: errors.LabelProofError) -> None:
+    body = json.dumps(error.to_payload()).encode("utf-8")
+    applog.log("request_failed", kind=error.kind.value, code=error.code, status=error.status_code)
+    await send(
+        {
+            "type": "http.response.start",
+            "status": error.status_code,
+            "headers": [
+                (b"content-type", b"application/json"),
+                (b"content-length", str(len(body)).encode("ascii")),
+            ],
+        }
+    )
+    await send({"type": "http.response.body", "body": body})
 
 
 def _install_error_handlers(app: FastAPI) -> None:
