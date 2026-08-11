@@ -145,6 +145,154 @@ def test_added_words_are_reported() -> None:
     assert "adds the words" in result.rationale
 
 
+# --- LP-203 / LP-209 / LP-210: what kind of difference is it? -------------------------
+
+@pytest.mark.tc("TC-05")
+def test_a_paraphrase_is_classified_as_rewording() -> None:
+    reworded = canon.CANONICAL_WARNING.replace(
+        "women should not drink alcoholic beverages during pregnancy",
+        "pregnant women should not drink alcoholic beverages",
+    )
+    result = warning.evaluate(reworded, GOOD)
+    assert result.kind == warning.REWORDING
+    assert "warning_text_rewording" in _asserted(result)
+
+
+@pytest.mark.tc("TC-05")
+def test_the_rewording_finding_forbids_paraphrase_explicitly() -> None:
+    """"But it means the same thing" is the argument this sentence has to answer."""
+    reworded = canon.CANONICAL_WARNING.replace("birth defects", "harm to the baby")
+    finding = next(
+        f for f in warning.evaluate(reworded, GOOD).findings
+        if f.code == "warning_text_rewording"
+    )
+    assert "paraphrasing" in finding.message
+    assert finding.citation == "27 CFR 16.21"
+
+
+def test_a_statement_that_stops_halfway_is_a_truncation() -> None:
+    """LP-210. The commonest partial warning: clause (1) printed, clause (2) dropped."""
+    clause_two = canon.CANONICAL_WARNING.index("(2)")
+    result = warning.evaluate(canon.CANONICAL_WARNING[:clause_two].strip(), GOOD)
+    assert result.kind == warning.TRUNCATED
+    assert "warning_text_truncated" in _asserted(result)
+
+
+def test_a_truncation_that_took_the_last_punctuation_with_it_is_still_a_truncation() -> None:
+    """Cutting a tail usually leaves a full stop the printer added. Still truncation."""
+    cut = canon.CANONICAL_WARNING.replace(" and may cause health problems", "")
+    assert warning.classify(cut).kind == warning.TRUNCATED
+
+
+def test_the_truncation_message_names_the_missing_clause() -> None:
+    clause_two = canon.CANONICAL_WARNING.index("(2)")
+    finding = next(
+        f for f in warning.evaluate(canon.CANONICAL_WARNING[:clause_two].strip()).findings
+        if f.code == "warning_text_truncated"
+    )
+    assert "second numbered part" in finding.message
+
+
+def test_words_dropped_from_the_middle_are_an_omission_not_a_truncation() -> None:
+    """The difference matters: one label stops early, the other quietly edits."""
+    edited = canon.CANONICAL_WARNING.replace("or operate machinery, ", "")
+    assert warning.classify(edited).kind == warning.OMISSION
+
+
+def test_extra_words_are_an_addition() -> None:
+    padded = canon.CANONICAL_WARNING + " Please drink responsibly."
+    result = warning.evaluate(padded, GOOD)
+    assert result.kind == warning.ADDITION
+    assert "warning_text_addition" in _asserted(result)
+
+
+def test_the_same_words_in_a_different_order_are_caught_as_reordering() -> None:
+    """The PRD names reordering as its own evasion. A bag-of-words check would pass it."""
+    scrambled = " ".join(reversed(warning.tokenize(canon.CANONICAL_WARNING)))
+    assert warning.classify(scrambled).kind == warning.REORDERING
+
+
+def test_a_case_only_difference_is_named_as_such() -> None:
+    lowered = canon.CANONICAL_WARNING.replace("Surgeon General", "surgeon general")
+    assert warning.classify(lowered).kind == warning.CASING
+
+
+def test_a_punctuation_only_difference_is_named_as_such() -> None:
+    repunctuated = canon.CANONICAL_WARNING.replace("birth defects.", "birth defects;")
+    assert warning.classify(repunctuated).kind == warning.PUNCTUATION
+
+
+def test_a_case_or_punctuation_difference_is_still_a_mismatch() -> None:
+    """Naming the difference gently is not the same as forgiving it."""
+    for altered in (
+        canon.CANONICAL_WARNING.replace("Surgeon General", "surgeon general"),
+        canon.CANONICAL_WARNING.replace("birth defects.", "birth defects;"),
+    ):
+        assert warning.evaluate(altered, GOOD).verdict is Verdict.MISMATCH
+
+
+def test_the_canonical_statement_classifies_as_verbatim() -> None:
+    comparison = warning.classify(canon.CANONICAL_WARNING)
+    assert comparison.kind == warning.VERBATIM
+    assert comparison.is_verbatim
+    assert warning.text_findings(comparison) == []
+
+
+def test_every_kind_has_a_message_and_a_finding_code() -> None:
+    """A classification with no sentence behind it is a verdict with no explanation."""
+    kinds = [
+        warning.TRUNCATED, warning.OMISSION, warning.ADDITION, warning.REORDERING,
+        warning.CASING, warning.PUNCTUATION, warning.REWORDING,
+    ]
+    for kind in kinds:
+        findings = warning.text_findings(warning.TextComparison(kind=kind))
+        assert findings[0].code == f"warning_text_{kind}"
+        assert findings[0].message.strip()
+
+
+def test_the_comparison_lists_the_words_that_moved() -> None:
+    """LP-203: the diff is evidence, so it has to be inspectable, not just renderable."""
+    comparison = warning.classify(canon.CANONICAL_WARNING.replace("birth defects", "harm"))
+    assert "defects" in " ".join(comparison.missing_words)
+    assert "harm" in " ".join(comparison.added_words)
+
+
+# --- LP-205: the heading, character for character -------------------------------------
+
+def test_the_heading_must_end_in_a_colon() -> None:
+    """27 CFR 16.21 punctuates the heading with a colon and nothing else.
+
+    16.22 quotes the phrase as `"GOVERNMENT WARNING,"` when stating the bold rule, but
+    that comma is American typography inside the closing quote — it belongs to the
+    regulation's own sentence, not to the required phrase. Verified 2026-08-11 (LP-328).
+    """
+    with_comma = canon.CANONICAL_WARNING.replace("WARNING:", "WARNING,", 1)
+    findings = warning.check_header_caps(with_comma, GOOD)
+    assert [f.code for f in findings] == ["warning_header_punctuation"]
+
+
+def test_a_heading_with_no_punctuation_at_all_is_caught() -> None:
+    bare = canon.CANONICAL_WARNING.replace("WARNING:", "WARNING", 1)
+    assert [f.code for f in warning.check_header_caps(bare, GOOD)] == [
+        "warning_header_punctuation"
+    ]
+
+
+def test_the_heading_is_found_even_when_it_is_not_the_first_thing_read() -> None:
+    """An extractor that returns a neighbouring line must not skip the caps check."""
+    with_neighbour = f"Bottled in Kentucky. {_retitled('Government Warning:')}"
+    assert "warning_header_not_all_caps" in {
+        f.code for f in warning.check_header_caps(with_neighbour, GOOD)
+    }
+
+
+def test_a_warning_with_no_heading_at_all_is_reported() -> None:
+    body_only = canon.WARNING_BODY
+    assert [f.code for f in warning.check_header_caps(body_only, GOOD)] == [
+        "warning_header_missing"
+    ]
+
+
 # --- TC-07: missing -------------------------------------------------------------------
 
 @pytest.mark.tc("TC-07")

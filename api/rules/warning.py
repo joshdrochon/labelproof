@@ -31,6 +31,7 @@ from __future__ import annotations
 import difflib
 import re
 from dataclasses import dataclass, field
+from typing import Final
 
 from api import canon
 from api.models import Finding, Verdict, WarningTypography
@@ -121,18 +122,165 @@ def is_verbatim(found_text: str) -> bool:
 
 
 # --------------------------------------------------------------------------------------
+# What kind of difference is it? (WARN-4 / LP-209, LP-210)
+# --------------------------------------------------------------------------------------
+#
+# "Mismatch" is the verdict for all of these, and it is not enough on its own. An agent
+# returning an application has to write down what the applicant must fix, and "the
+# warning does not match" is not that. A statement that stops halfway, a statement with a
+# paraphrased clause, and a statement with a marketing line bolted on are three different
+# corrections. So the diff is classified, once, into the kind of thing that went wrong.
+
+VERBATIM: Final[str] = "verbatim"
+TRUNCATED: Final[str] = "truncated"
+OMISSION: Final[str] = "omission"
+ADDITION: Final[str] = "addition"
+REORDERING: Final[str] = "reordering"
+CASING: Final[str] = "casing"
+PUNCTUATION: Final[str] = "punctuation"
+REWORDING: Final[str] = "rewording"
+
+#: Plain-language name per kind, for the finding an agent reads.
+_KIND_MESSAGE: Final[dict[str, str]] = {
+    TRUNCATED: (
+        "The warning starts correctly and then stops. The whole statement is required, "
+        "including the second numbered part."
+    ),
+    OMISSION: "Words required by the regulation are missing from the warning.",
+    ADDITION: (
+        "The warning carries the required wording plus extra words. The statement must "
+        "appear on its own, exactly as written."
+    ),
+    REORDERING: (
+        "The warning uses the required words in a different order. The statement must "
+        "appear word for word, in order."
+    ),
+    CASING: (
+        "The warning is worded correctly but capitalised differently from the required "
+        "statement."
+    ),
+    PUNCTUATION: (
+        "The warning is worded correctly but punctuated differently from the required "
+        "statement."
+    ),
+    REWORDING: (
+        "The warning has been reworded. It must appear word for word as written in the "
+        "regulation — no paraphrasing, however reasonable it reads."
+    ),
+}
+
+_PUNCTUATION_CHARS: Final[str] = ".,;:!?()[]\"'"
+
+
+def _bare(token: str) -> str:
+    return token.strip(_PUNCTUATION_CHARS)
+
+
+def _is_truncation(expected: list[str], found: list[str]) -> bool:
+    """Does the label carry the opening of the statement and then stop?
+
+    The last surviving word usually picks up a full stop the printer added when the text
+    was cut, so the final token is compared without its punctuation. Everything before it
+    must be word-for-word identical — a truncation is a statement that ends early, not a
+    statement that also says something else.
+    """
+    if not found or len(found) >= len(expected):
+        return False
+    if found == expected[: len(found)]:
+        return True
+    return (
+        found[:-1] == expected[: len(found) - 1]
+        and _bare(found[-1]) == _bare(expected[len(found) - 1])
+    )
+
+
+@dataclass(frozen=True)
+class TextComparison:
+    """The label's warning text measured against 27 CFR 16.21."""
+
+    kind: str
+    segments: list[DiffSegment] = field(default_factory=list)
+    missing_words: list[str] = field(default_factory=list)
+    added_words: list[str] = field(default_factory=list)
+
+    @property
+    def is_verbatim(self) -> bool:
+        return self.kind == VERBATIM
+
+
+def classify(found_text: str) -> TextComparison:
+    """Diff the label's warning and say what kind of difference it is."""
+    expected = tokenize(canon.CANONICAL_WARNING)
+    found = tokenize(found_text)
+    segments = tokenized_diff(found_text)
+
+    missing = [w for s in segments if s.op in ("delete", "replace") for w in s.expected]
+    added = [w for s in segments if s.op in ("insert", "replace") for w in s.found]
+
+    def result(kind: str) -> TextComparison:
+        return TextComparison(
+            kind=kind, segments=segments, missing_words=missing, added_words=added
+        )
+
+    if expected == found:
+        return result(VERBATIM)
+    if _is_truncation(expected, found):
+        return result(TRUNCATED)
+
+    ops = {s.op for s in segments if s.is_difference}
+    replacements = [s for s in segments if s.op == "replace"]
+
+    if ops == {"insert"}:
+        return result(ADDITION)
+    if ops == {"delete"}:
+        return result(OMISSION)
+    if sorted(expected) == sorted(found):
+        return result(REORDERING)
+    if replacements and ops == {"replace"}:
+        pairs = [(s.expected, s.found) for s in replacements]
+        if all(
+            [w.casefold() for w in exp] == [w.casefold() for w in got]
+            for exp, got in pairs
+        ):
+            return result(CASING)
+        if all(
+            [_bare(w) for w in exp] == [_bare(w) for w in got] for exp, got in pairs
+        ):
+            return result(PUNCTUATION)
+    return result(REWORDING)
+
+
+def text_findings(comparison: TextComparison) -> list[Finding]:
+    """The finding an agent acts on, named for the kind of difference (WARN-4)."""
+    if comparison.is_verbatim:
+        return []
+    return [
+        Finding(
+            code=f"warning_text_{comparison.kind}",
+            message=_KIND_MESSAGE[comparison.kind],
+            citation=canon.CITATIONS["warning_text"],
+            severity=typography.SEVERITY_VIOLATION,
+        )
+    ]
+
+
+# --------------------------------------------------------------------------------------
 # Typography — 27 CFR 16.22
 # --------------------------------------------------------------------------------------
 
 
-def header_as_written(found_text: str) -> str | None:
-    """The label's own rendering of the header, however it was capitalized.
+_HEADER = re.compile(r"government\s+warning\s*[:;,.]?", re.IGNORECASE)
 
-    Matched case-insensitively so a title-case header is *found* and can then be judged,
-    rather than being missed and reported as a text mismatch.
+
+def header_as_written(found_text: str) -> str | None:
+    """The label's own rendering of the heading, however it was capitalized.
+
+    Matched case-insensitively so a title-case heading is *found* and can then be judged,
+    rather than being missed and reported as a text mismatch. Searched rather than
+    anchored: an extractor that returns the warning together with a line of surrounding
+    text should still have its heading examined, not skipped.
     """
-    collapsed = collapse_layout_whitespace(found_text)
-    m = re.match(r"government\s+warning\s*[:,]?", collapsed, re.IGNORECASE)
+    m = _HEADER.search(collapse_layout_whitespace(found_text))
     return m.group(0) if m else None
 
 
@@ -165,7 +313,7 @@ def check_header_caps(
             )
         ]
 
-    words_only = header.rstrip(":, ").strip()
+    words_only = header.rstrip(":;,. ").strip()
     if not words_only.isupper():
         return [
             Finding(
@@ -175,6 +323,25 @@ def check_header_caps(
                     f'This label reads "{words_only}".'
                 ),
                 citation=canon.CITATIONS["warning_format"],
+                severity=typography.SEVERITY_VIOLATION,
+            )
+        ]
+
+    # The colon is the only punctuation the regulation actually prescribes. 16.22 quotes
+    # the phrase as `"GOVERNMENT WARNING,"` when stating the bold rule, but that comma
+    # sits inside the closing quotation mark as American typography — it belongs to the
+    # sentence in the regulation, not to the required phrase. The statement itself, in
+    # 16.21, ends the heading with a colon. Verified 2026-08-11; see LP-328.
+    if header.rstrip().endswith(canon.WARNING_HEADER[-1]) is False:
+        written = header.strip()
+        return [
+            Finding(
+                code="warning_header_punctuation",
+                message=(
+                    f'The heading must read "{canon.WARNING_HEADER}" with a colon. '
+                    f'This label reads "{written}".'
+                ),
+                citation=canon.CITATIONS["warning_text"],
                 severity=typography.SEVERITY_VIOLATION,
             )
         ]
@@ -228,6 +395,13 @@ class WarningResult:
     rationale: str
     diff: list[DiffSegment] = field(default_factory=list)
     findings: list[Finding] = field(default_factory=list)
+    comparison: TextComparison | None = None
+    """The text classification, when there was text to classify (LP-209, LP-210)."""
+
+    @property
+    def kind(self) -> str | None:
+        """What kind of text difference this was, if any."""
+        return self.comparison.kind if self.comparison else None
 
 
 def evaluate(
@@ -266,23 +440,28 @@ def evaluate(
                     code="warning_missing",
                     message="No government warning statement found.",
                     citation=canon.CITATIONS["warning_text"],
-                    severity="critical",
+                    severity=typography.SEVERITY_CRITICAL,
                 )
             ],
         )
 
-    diff = tokenized_diff(found_text)
-    text_findings = check_header_caps(found_text, signals)
+    comparison = classify(found_text)
+    diff = comparison.segments
     look = typography.assess(signals)
-    findings = text_findings + list(look.findings)
+    findings = (
+        check_header_caps(found_text, signals)
+        + text_findings(comparison)
+        + list(look.findings)
+    )
 
     # 1. The words themselves. Everything else is secondary to "does it say the thing".
-    if not is_verbatim(found_text):
+    if not comparison.is_verbatim:
         return WarningResult(
             verdict=Verdict.MISMATCH,
             rationale=diff_summary(diff),
             diff=diff,
             findings=findings,
+            comparison=comparison,
         )
 
     # 2. The label does not comply with 16.22's type-style rules. It says the right
@@ -297,6 +476,7 @@ def evaluate(
             rationale=hard_style[0].message,
             diff=diff,
             findings=findings,
+            comparison=comparison,
         )
 
     # 3. Prominence. WARN-5 puts these in front of a human rather than returning the
@@ -311,6 +491,7 @@ def evaluate(
             rationale=prominence.message,
             diff=diff,
             findings=findings,
+            comparison=comparison,
         )
 
     # 4. The wording is right and nothing is broken, but a bright line was left
@@ -326,6 +507,7 @@ def evaluate(
             ),
             diff=diff,
             findings=findings,
+            comparison=comparison,
         )
 
     return WarningResult(
@@ -333,4 +515,5 @@ def evaluate(
         rationale="The warning statement matches the required text word for word.",
         diff=diff,
         findings=findings,
+        comparison=comparison,
     )
