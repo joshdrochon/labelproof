@@ -369,3 +369,64 @@ def test_the_readme_states_the_no_content_rule_rather_than_only_implying_it() ->
     readme = (pathlib.Path(__file__).resolve().parents[1] / "README.md").read_text()
     assert "SEC-4" in readme
     assert "raises on anything else" in readme or "raises on anything" in readme
+
+
+# --- the ops runbook is executable, not aspirational (LP-125, ENG-5) ------------------
+
+def _readme() -> str:
+    import pathlib
+
+    return (pathlib.Path(__file__).resolve().parents[1] / "README.md").read_text()
+
+
+def test_every_command_the_runbook_gives_names_a_script_that_exists() -> None:
+    """A runbook that tells an operator to run something that was renamed is worse than
+    no runbook — they conclude the whole document is stale."""
+    import importlib
+    import pathlib
+    import re
+
+    root = pathlib.Path(__file__).resolve().parents[1]
+    named = set(re.findall(r"python -m scripts\.([a-z_]+)", _readme()))
+    assert named, "the ops section documents no commands at all"
+    for name in sorted(named):
+        assert (root / "scripts" / f"{name}.py").exists(), (
+            f"README.md tells an operator to run `scripts.{name}`, which does not exist"
+        )
+        assert hasattr(importlib.import_module(f"scripts.{name}"), "main")
+
+
+def test_every_event_the_runbook_greps_for_is_a_real_event() -> None:
+    """The `jq` recipes name events. A recipe for an event nothing emits returns nothing,
+    which reads as "the service is healthy"."""
+    import re
+
+    referenced = set(re.findall(r'\.event == "([a-z_]+)"', _readme()))
+    unknown = sorted(referenced - set(lp_logging.EVENTS))
+    assert not unknown, f"README.md greps for events that do not exist: {unknown}"
+
+
+def test_the_runbook_says_where_the_log_actually_is() -> None:
+    readme = _readme()
+    assert "fly logs" in readme
+    assert "stdout" in readme
+
+
+def test_the_runbook_states_the_cost_figure_is_list_price() -> None:
+    """A cost quoted without saying it is list price computed locally is a cost someone
+    will put in a budget."""
+    readme = _readme()
+    assert "list price" in readme.lower()
+    assert "not a bill" in readme.lower()
+
+
+def test_the_runbook_warns_that_sample_mode_costs_nothing() -> None:
+    assert "Sample-mode runs cost nothing" in _readme()
+
+
+def test_the_runbook_has_a_triage_table_for_when_things_are_wrong() -> None:
+    """The hardest moment to write documentation is during an incident."""
+    readme = _readme()
+    assert "When something is wrong" in readme
+    for signal in ("unhandled_exception", "provider_retry", "sample_mode"):
+        assert signal in readme

@@ -223,3 +223,149 @@ we measured" and "how long it took" is exactly the number worth having.
 `tests/test_timing.py` puts an independent stopwatch around a real HTTP request and holds
 the server's own claim to it. PRD §232: *if the number on the screen and the number on the
 stopwatch disagree, the stopwatch wins.*
+
+
+---
+
+## Ops runbook
+
+Four things an operator does with this service. Each is one command.
+
+### Read the log
+
+Locally the log is stdout. On Fly it is `fly logs`, which is the same stream.
+
+```bash
+# Follow it.
+fly logs -a labelproof
+
+# Keep a file to roll up later.
+fly logs -a labelproof --no-tail > /tmp/labelproof.jsonl
+```
+
+Every line is one JSON object, so `jq` works without any parsing:
+
+```bash
+# One request's whole story, in order. This is the id the agent reads off the
+# screen under "Check reference", and the one in the X-Request-ID header.
+jq -c 'select(.request_id == "req_9f3c1a4b7e2d8055")' /tmp/labelproof.jsonl
+
+# Only what went wrong, with the taxonomy code that explains it.
+jq -c 'select(.event | test("failed|unavailable|exception|retry"))' /tmp/labelproof.jsonl
+
+# The slowest verifications first.
+jq -c 'select(.event == "verify_complete")' /tmp/labelproof.jsonl \
+  | jq -s 'sort_by(-.duration_ms) | .[:10]'
+
+# Every stage of every request, as a table.
+jq -r 'select(.event == "stage_complete")
+       | [.request_id, .stage, .duration_ms] | @tsv' /tmp/labelproof.jsonl
+```
+
+**There is no label text in there and there cannot be** — see the field allowlist above.
+That is also why nothing logs a path or a filename: an uploaded filename can carry a brand
+name.
+
+### Read the timings
+
+```bash
+# p50/p95 per stage, plus the error summary and the cost total.
+.venv/bin/python -m scripts.rollup /tmp/labelproof.jsonl
+
+# Straight off the deployment, no intermediate file.
+fly logs -a labelproof --no-tail | .venv/bin/python -m scripts.rollup
+
+# Machine-readable, for a dashboard or a CI check.
+.venv/bin/python -m scripts.rollup /tmp/labelproof.jsonl --json
+```
+
+How to read what comes back:
+
+| Row | Means | If it is high |
+|---|---|---|
+| `preprocess` | Decode, strip, downscale, quality score. Expect tens of ms. | The uploads are arriving full-size. The client is supposed to downscale to 2576px before sending. |
+| `extract` | The vision call(s). The dominant term, by a lot. | This is the model. Concurrency across images is already `max` not `sum`; the levers left are effort, model tier and prompt caching. |
+| `compare` | The rules engine. Expect 0–2ms. | Something in `api/rules/` started doing I/O. It is not supposed to be able to. |
+| `verification (POST /verify)` | Server-side total. **This is the PERF-1 series.** | See the ladder in `BUILD.md` §8. |
+| `request (all HTTP)` | Every request including `/health`. | Only useful for spotting a slow static asset. Never quote it as the p95. |
+
+The rollup flags any percentile drawn from fewer than 20 samples. That flag is not
+decoration — a p95 over five runs is the maximum with a better name, and PERF-1 is an
+adoption gate.
+
+Server-side time is a **floor** for what a person with a stopwatch sees. It excludes
+upload, network and render. For the whole number:
+
+```bash
+# 20 runs against whatever URL, with the full sample printed.
+.venv/bin/python -m scripts.timed_run https://labelproof.fly.dev \
+  --runs 20 --note "fly iad, min_machines_running=1, warm ~4h" \
+  --out docs/perf-deployed.md
+```
+
+Commit `docs/perf-deployed.md`. That file, not a sentence in a status update, is the
+evidence for the speed claim: it carries the URL, the timestamp, the commit, the payload
+size, every individual run, and whether the server was in sample mode.
+
+Exit codes: `0` measured, `1` nothing succeeded, `2` the server's clock and the caller's
+stopwatch disagreed — see *The honesty check* below.
+
+### Read the cost
+
+Every verification writes one `verification_cost` line.
+
+```bash
+# What a run of labels cost.
+jq -s 'map(select(.event == "verification_cost"))
+       | {n: length, usd: (map(.usd) | add), mean: (map(.usd) | add / length)}' \
+  /tmp/labelproof.jsonl
+```
+
+Or let the rollup do it — the **Cost** section of its report carries the total, the mean,
+the p95, mean tokens in and out, and mean cached reads.
+
+Four things to know before quoting a cost figure:
+
+- **It is list price, computed locally.** `estimated_usd` in the provider adapter holds the
+  only copy of the price table. It is not a bill, and it does not know about discounts.
+- **Cached reads are priced separately**, at a tenth of an input token. The provider's
+  `input_tokens` excludes them, so a run with a warm prompt cache shows a low
+  `input_tokens` and a high `cache_read_tokens`. Both are on the line.
+- **Sample-mode runs cost nothing** and would drag any average down. The line carries
+  `provider`, the rollup names them, and it says so in the report rather than folding them
+  in.
+- **Cost is per verification, not per image.** One `/verify` with a front and a back is one
+  line covering both calls.
+
+### The honesty check
+
+PRD §232: *if the number on the screen and the number on the stopwatch disagree, the
+stopwatch wins.* Two mechanisms hold the service to that.
+
+`tests/test_timing.py` wraps a real `POST /verify` in an independent stopwatch and asserts
+the server's own `timings_ms.total` matches it — and, with a provider that sleeps a known
+duration, that the total actually contains the extraction rather than being computed
+before it. A fabricated total, a total measured too early, or a total that omits a stage
+all fail.
+
+`scripts/timed_run.py` does the same across a real network boundary and prints the gap per
+run. The gap is always positive: the client's stopwatch contains the server's work plus
+upload and network. If it ever goes negative the report says so in bold, withholds the
+claim, and the command exits `2`.
+
+**The elapsed time on the result card is the client's wall clock**, measured from submit to
+response, not the server's `timings_ms.total`. That is deliberate. The server's number is
+always the smaller of the two, and a product whose entire argument is speed must not report
+less time than actually passed. The server number is in the response body for anyone who
+wants the breakdown; the headline number is the one the stopwatch would agree with.
+
+### When something is wrong
+
+| Symptom | Where to look | Likely cause |
+|---|---|---|
+| `/ready` is red | `config_incomplete` lines | A missing environment variable. `/health` stays green on purpose — the process is fine. |
+| `/ready` says `sample_mode` | `verification_cost` lines with `provider: "fake:*"` | No API key. The service replays fixtures and says so on every verdict; it is not verifying uploads. |
+| p95 crept up | `extract` in the rollup | Almost always the model. Everything else is tens of milliseconds. |
+| Rising `provider_retry` | Degraded-but-handled table | An outage forming. `circuit_breaker` opening is the next line you will see. |
+| Unverified rate rising, error rate flat | Verification-outcome table | Pre-gate or budget stops. Both answer 200 — the service is up and is not checking labels. |
+| Any `unhandled_exception` | Its `request_id`, then that request's other lines | A bug. The traceback is deliberately not printed (SEC-4); the exception type is on the line and the request id tells you what it was doing. |

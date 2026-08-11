@@ -482,3 +482,70 @@ def test_a_verification_response_carries_the_commodity_it_was_asked_about() -> N
     body = post_verify(make_client()).json()
     assert body["fields"], "no fields compared, so nothing above measured a verification"
     assert json.loads(application_json())["commodity"] == Commodity.SPIRITS.value
+
+
+# --- the documented stage table matches the shipped one (LP-125) ----------------------
+
+
+def _readme_stage_table() -> dict[str, str]:
+    """The stage table under `### Timings`, as {field: description}."""
+    import pathlib
+    import re
+
+    readme = (pathlib.Path(__file__).resolve().parents[1] / "README.md").read_text()
+    section = readme[readme.index("### Timings") :]
+    # Stop at the next top-level heading. Not at "---": the table separator row is
+    # made of dashes and would truncate the section before its first data row.
+    end = section.find("\n## ")
+    section = section[:end] if end != -1 else section
+
+    rows: dict[str, str] = {}
+    for match in re.finditer(r"^\| `([a-z_]+)` \| (.+?) \|$", section, re.M):
+        rows[match.group(1)] = match.group(2)
+    return rows
+
+
+def test_the_readme_documents_every_stage_the_api_returns() -> None:
+    """An agent reading the docs must not meet a field in the response that is not there,
+    and must not go looking for one that is."""
+    documented = set(_readme_stage_table())
+    shipped = set(Timings.model_fields)
+    assert documented == shipped, (
+        f"README.md's stage table disagrees with `api.models.Timings`. "
+        f"Undocumented: {sorted(shipped - documented)}. "
+        f"Documented but not shipped: {sorted(documented - shipped)}."
+    )
+
+
+def test_the_readme_warns_that_the_stage_column_does_not_add_up() -> None:
+    """`preprocess` is a roll-up. Someone will try to sum the column; say so first."""
+    import pathlib
+
+    readme = (pathlib.Path(__file__).resolve().parents[1] / "README.md").read_text()
+    assert "do not add the column up" in readme
+    assert "double-count" in readme
+
+
+def test_the_readme_says_total_is_measured_rather_than_summed() -> None:
+    import pathlib
+
+    readme = (pathlib.Path(__file__).resolve().parents[1] / "README.md").read_text()
+    assert "measured, not derived" in readme
+
+
+def test_the_documented_example_is_arithmetically_consistent() -> None:
+    """The JSON sample in the README is the first thing anyone copies. If its own
+    numbers do not hold together, nothing after it will be believed."""
+    import json
+    import pathlib
+    import re
+
+    readme = (pathlib.Path(__file__).resolve().parents[1] / "README.md").read_text()
+    block = re.search(r'"timings_ms": (\{.*?\})', readme, re.S)
+    assert block, "README.md no longer shows an example timings block"
+    example = json.loads(re.sub(r"\s+", " ", block.group(1)))
+
+    assert example["preprocess"] == example["ingest"] + example["quality"]
+    assert example["total"] >= sum(
+        example[name] for name in timing.MEASURED_STAGES
+    )
