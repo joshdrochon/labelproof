@@ -186,21 +186,21 @@ def test_a_line_written_outside_a_request_carries_no_empty_id(_capture: io.Strin
     assert "request_id" not in _lines(_capture)[0]
 
 
-# --- the traceback hole the allowlist cannot reach (SEC-4) ----------------------------
+# --- the channel exc_info stripping does not reach (SEC-4) ---------------------------
+#
+# Process-wide containment lives in `api/security.py`; there is one record factory in this
+# process and it is that one. What is tested here is the piece exported for it to call:
+# exceptions passed as a record's message or format arguments, which carry the exception's
+# `str()` to stdout with no traceback involved.
 
-def _foreign_record(exc=None, msg="boom", args=()):  # type: ignore[no-untyped-def]
+
+def _record(msg: object = "boom", args: object = ()):  # type: ignore[no-untyped-def]
     """A record as uvicorn, asyncio or any library would create it."""
     import logging as stdlib_logging
-    import sys
 
-    exc_info = None
-    if exc is not None:
-        try:
-            raise exc
-        except BaseException:
-            exc_info = sys.exc_info()
-    factory = stdlib_logging.getLogRecordFactory()
-    return factory("uvicorn.error", stdlib_logging.ERROR, __file__, 1, msg, args, exc_info)
+    return stdlib_logging.LogRecord(
+        "uvicorn.error", stdlib_logging.ERROR, __file__, 1, msg, args, None
+    )
 
 
 def _rendered(record) -> str:  # type: ignore[no-untyped-def]
@@ -209,95 +209,113 @@ def _rendered(record) -> str:  # type: ignore[no-untyped-def]
     return stdlib_logging.Formatter("%(message)s").format(record)
 
 
-def test_a_foreign_logger_cannot_print_a_traceback() -> None:
-    """uvicorn logs `logger.error(..., exc_info=exc)`. The message is safe; the
-    traceback is the leak."""
-    lp_logging.install_stdout_guard()
-    record = _foreign_record(ValueError("brand is OLD TOM DISTILLERY"))
-    assert record.exc_info is None
-    assert record.exc_text is None
-
-
-def test_the_exceptions_own_message_never_survives() -> None:
-    """A pydantic ValidationError quotes the input that failed — here, label text."""
-    lp_logging.install_stdout_guard()
-    secret = "STONE'S THROW BOURBON"
-    assert secret not in _rendered(_foreign_record(ValueError(secret)))
+def test_an_exception_passed_as_a_format_argument_is_redacted() -> None:
+    """`logger.error("call failed: %s", exc)` — no exc_info, so traceback stripping does
+    nothing, and the exception's own message reaches stdout."""
+    secret = "BARDSTOWN, KENTUCKY"
+    record = lp_logging.scrub_exception_arguments(
+        _record(msg="call failed: %s", args=(ValueError(secret),))
+    )
+    assert secret not in _rendered(record)
+    assert "ValueError" in _rendered(record)
 
 
 def test_an_exception_passed_as_the_message_is_redacted() -> None:
-    lp_logging.install_stdout_guard()
+    """`logger.error(exc)` — the other natural spelling."""
     secret = "OLD TOM DISTILLERY"
-    assert secret not in _rendered(_foreign_record(msg=RuntimeError(secret)))
-
-
-def test_an_exception_passed_as_a_format_argument_is_redacted() -> None:
-    """`logger.error("call failed: %s", exc)` is the other common shape."""
-    lp_logging.install_stdout_guard()
-    secret = "BARDSTOWN, KENTUCKY"
-    record = _foreign_record(msg="call failed: %s", args=(ValueError(secret),))
+    record = lp_logging.scrub_exception_arguments(_record(msg=RuntimeError(secret)))
     assert secret not in _rendered(record)
+    assert "RuntimeError" in _rendered(record)
 
 
 def test_an_exception_in_a_dict_style_format_argument_is_redacted() -> None:
-    lp_logging.install_stdout_guard()
     secret = "KENTUCKY STRAIGHT BOURBON"
-    record = _foreign_record(msg="failed: %(why)s", args=({"why": ValueError(secret)},))
+    record = lp_logging.scrub_exception_arguments(
+        _record(msg="failed: %(why)s", args=({"why": ValueError(secret)},))
+    )
     assert secret not in _rendered(record)
 
 
-def test_the_suppression_is_visible_rather_than_silent() -> None:
-    """Silently deleting a traceback makes a broken service look like a quiet one."""
-    lp_logging.install_stdout_guard()
-    rendered = _rendered(_foreign_record(ValueError("x")))
-    assert lp_logging.REDACTION_NOTE in rendered
-    assert "ValueError" in rendered, "the exception type is safe and worth keeping"
+def test_a_pydantic_validation_error_is_the_case_this_exists_for() -> None:
+    """Not hypothetical: extraction responses are validated on receipt, and a
+    ValidationError renders the input that failed — which on that path is label text."""
+    import pydantic
+
+    class Extracted(pydantic.BaseModel):
+        confidence: float
+
+    try:
+        Extracted(confidence="STONE'S THROW BOURBON")  # type: ignore[arg-type]
+    except pydantic.ValidationError as exc:
+        caught: BaseException = exc
+    else:  # pragma: no cover - the model must reject this
+        raise AssertionError("expected a ValidationError")
+
+    assert "STONE'S THROW BOURBON" in str(caught), "premise of this test has changed"
+    record = lp_logging.scrub_exception_arguments(_record(msg="bad: %s", args=(caught,)))
+    assert "STONE'S THROW BOURBON" not in _rendered(record)
 
 
-def test_ordinary_foreign_lines_are_left_alone() -> None:
-    """uvicorn's startup and access lines are how an ops team knows it is alive."""
-    lp_logging.install_stdout_guard()
-    assert _rendered(_foreign_record(msg="Application startup complete.")) == (
-        "Application startup complete."
+def test_the_redaction_is_visible_rather_than_silent() -> None:
+    """Silently deleting the payload makes a broken service look like a quiet one."""
+    rendered = _rendered(
+        lp_logging.scrub_exception_arguments(_record(msg="%s", args=(ValueError("x"),)))
     )
+    assert lp_logging.REDACTION_NOTE in rendered
 
 
-def test_our_own_lines_are_unaffected_by_the_guard(_capture: io.StringIO) -> None:
-    lp_logging.install_stdout_guard()
-    lp_logging.log("verify_complete", duration_ms=1200, verdict="match")
-    assert _lines(_capture)[-1]["duration_ms"] == 1200
+def test_ordinary_log_lines_pass_through_untouched() -> None:
+    """uvicorn's startup and access lines are how an ops team knows it is alive."""
+    record = lp_logging.scrub_exception_arguments(
+        _record(msg="Application startup complete.")
+    )
+    assert _rendered(record) == "Application startup complete."
 
 
-def test_the_guard_is_installed_by_configure() -> None:
-    lp_logging.uninstall_stdout_guard()
-    lp_logging.configure(stream=io.StringIO())
-    assert _foreign_record(ValueError("secret")).exc_info is None
+def test_ordinary_format_arguments_pass_through_untouched() -> None:
+    record = lp_logging.scrub_exception_arguments(
+        _record(msg="%s - %s", args=("GET /health", 200))
+    )
+    assert _rendered(record) == "GET /health - 200"
 
 
-def test_the_guard_can_be_declined_in_code_but_never_by_environment() -> None:
-    """A compliance control an env var can switch off is not a control."""
+def test_exc_info_is_left_alone_because_it_belongs_to_the_other_layer() -> None:
+    """Two record factories both claiming to own the traceback is the bug this split
+    avoids — each captures the other as "the original"."""
+    import sys as stdlib_sys
+
+    try:
+        raise ValueError("x")
+    except ValueError:
+        info = stdlib_sys.exc_info()
+
+    import logging as stdlib_logging
+
+    record = stdlib_logging.LogRecord(
+        "uvicorn.error", stdlib_logging.ERROR, __file__, 1, "boom", (), info
+    )
+    assert lp_logging.scrub_exception_arguments(record).exc_info is info
+
+
+def test_this_module_installs_no_record_factory() -> None:
+    """One factory per process, and it is `api.security.install_log_containment`."""
     import inspect
 
-    lp_logging.uninstall_stdout_guard()
-    lp_logging.configure(stream=io.StringIO(), guard_stdout=False)
-    assert _foreign_record(ValueError("secret")).exc_info is not None
+    code = "\n".join(
+        stripped
+        for line in inspect.getsource(lp_logging).splitlines()
+        if not (stripped := line.strip()).startswith("#")
+    )
+    assert "logging.setLogRecordFactory(" not in code
+
+
+def test_the_no_content_rule_has_no_environment_switch() -> None:
+    """A compliance control an env var can turn off is not a control."""
+    import inspect
 
     source = inspect.getsource(lp_logging)
     for switch in ("os.environ", "getenv"):
-        assert switch not in source, "no environment switch on the no-content rule"
-    lp_logging.install_stdout_guard()
-
-
-def test_installing_twice_does_not_lose_the_original_factory() -> None:
-    import logging as stdlib_logging
-
-    lp_logging.uninstall_stdout_guard()
-    original = stdlib_logging.getLogRecordFactory()
-    lp_logging.install_stdout_guard()
-    lp_logging.install_stdout_guard()
-    lp_logging.uninstall_stdout_guard()
-    assert stdlib_logging.getLogRecordFactory() is original
-    lp_logging.install_stdout_guard()
+        assert switch not in source
 
 
 # --- the doc cannot drift from the code (LP-117, ENG-5) -------------------------------

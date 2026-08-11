@@ -168,24 +168,41 @@ exception's message. That is not theoretical here: the pipeline runs in a worker
 and a `pydantic.ValidationError` raised while validating an extraction quotes the label
 text that failed validation.
 
-So `api.logging.configure()` installs a `LogRecord` factory that strips `exc_info`,
-`exc_text` and `stack_info` from every record created anywhere in the process, and
-replaces any exception object passed as a message or a format argument with its class
-name. What reaches stdout instead is the exception's *type*:
+Containment is a second layer, in `api/security.py`, installed by `harden()`:
+
+| Channel | Covered by |
+|---|---|
+| `logger.error(..., exc_info=True)` from any logger | A process-wide `LogRecord` factory that strips `exc_info` and `stack_info` from every record created anywhere. |
+| An uncaught exception on the main thread | A scrubbed `sys.excepthook`. |
+| An uncaught exception on a worker thread | A scrubbed `threading.excepthook` — the batch pool's path, which writes to stderr with no logging involved. |
+| `logger.error("failed: %s", exc)` or `logger.error(exc)` | `api.logging.scrub_exception_arguments`, called from that same factory. No traceback is involved on this path, so stripping `exc_info` does nothing for it. |
+
+**There is exactly one record factory in this process, on purpose.** Two independent
+factories look like belt and braces and are a bug: each captures the other as "the
+original", so whichever is uninstalled first silently disables the other while the
+liveness check still reports true.
+
+What survives to stdout is the exception's *type*:
 
 ```
-Exception in ASGI application | exception=ValidationError (traceback withheld: SEC-4)
+Exception in ASGI application | ValidationError suppressed: traceback withheld (SEC-4)
 ```
 
 Visible, not silent — a service that is failing must not look like a service that is
 quiet.
 
-**What this does not cover, stated rather than papered over:** a third-party library that
-passes label text as a plain format argument, `logger.info("read %s", brand)`. Covering
-that would mean redacting all foreign output, which would delete uvicorn's startup and
-access lines. No code path in this repository does it. The guard can be declined in code
-(`configure(guard_stdout=False)`) and deliberately cannot be switched off by an
-environment variable.
+**What is still not covered, stated rather than papered over.** The gap is the shape of
+the guard, not an edge case: containment intercepts the logging module and the two
+exception hooks, so anything that writes to the file descriptor directly goes around it.
+
+- A bare `print()` or `sys.stdout.write()` anywhere in the process.
+- A subprocess inheriting stdout and writing to it.
+- A library that passes label text as a plain format argument with no exception involved —
+  `logger.info("read %s", brand)`. Covering that would mean redacting all foreign output,
+  which would delete the startup and access lines an ops team reads.
+
+Nothing in this repository does any of these. `LABELPROOF_DEBUG_TRACEBACKS=1` turns the
+process-wide layer off for local debugging; there is no switch on the allowlist itself.
 
 ### Timings
 

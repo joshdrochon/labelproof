@@ -141,34 +141,39 @@ _request_id: ContextVar[str] = ContextVar("request_id", default="")
 _logger = logging.getLogger("labelproof")
 
 
-def configure(
-    level: int = logging.INFO, stream: Any = None, *, guard_stdout: bool = True
-) -> None:
-    """Emit one JSON object per line to stdout. Fly captures stdout directly.
-
-    `guard_stdout` also closes the one hole the allowlist cannot reach — see
-    `install_stdout_guard`. It is a keyword argument rather than an environment variable
-    on purpose: a compliance control that can be switched off by a misspelt env var in a
-    deployment script is not a control.
-    """
+def configure(level: int = logging.INFO, stream: Any = None) -> None:
+    """Emit one JSON object per line to stdout. Fly captures stdout directly."""
     handler = logging.StreamHandler(stream or sys.stdout)
     handler.setFormatter(logging.Formatter("%(message)s"))
     _logger.handlers = [handler]
     _logger.setLevel(level)
     _logger.propagate = False
-    if guard_stdout:
-        install_stdout_guard()
 
 
 # --------------------------------------------------------------------------------------
-# The traceback hole, and the plug for it
+# The traceback hole, and the half of the plug that lives here
 # --------------------------------------------------------------------------------------
+#
+# The allowlist above governs `applog.log()` and nothing else. uvicorn, asyncio, anyio and
+# every library carry their own loggers and their own handlers, and a traceback printed by
+# one of them carries the exception's message — which on this pipeline can be label text
+# (a `pydantic.ValidationError` renders the input that failed validation).
+#
+# **Process-wide containment lives in `api/security.py`** (`install_log_containment`,
+# installed by `harden()`): a `logging.setLogRecordFactory` hook that strips `exc_info` and
+# `stack_info` from every record created anywhere in the process, plus scrubbed
+# `sys.excepthook` and `threading.excepthook`. There is deliberately **one** record factory
+# in this process. Two independent factories look like belt and braces and are a bug: each
+# captures the other as "the original", so whichever is uninstalled first silently disables
+# the other and leaves `containment_active()` reporting true.
+#
+# What lives here is the piece that hook does not cover, exported so it can be called from
+# inside it.
 
-#: Marker appended in place of a suppressed traceback, so an operator reading stdout can
-#: tell "nothing went wrong" apart from "something went wrong and we are not printing it".
-REDACTION_NOTE = "traceback withheld: SEC-4"
 
-_original_factory: Any = None
+#: Marker left in place of a redacted exception, so a reader can tell "nothing went wrong"
+#: apart from "something went wrong and we are not printing it".
+REDACTION_NOTE = "redacted: SEC-4"
 
 
 def _safe_repr(value: object) -> object:
@@ -179,92 +184,41 @@ def _safe_repr(value: object) -> object:
     class name is a code identifier and can carry nothing from an upload.
     """
     if isinstance(value, BaseException):
-        return f"<{type(value).__name__} redacted>"
+        return f"<{type(value).__name__} {REDACTION_NOTE}>"
     return value
 
 
-def redact(record: logging.LogRecord) -> logging.LogRecord:
-    """Strip every channel through which an exception's text reaches a handler.
+def scrub_exception_arguments(record: logging.LogRecord) -> logging.LogRecord:
+    """Redact exception objects passed as a record's message or format arguments.
 
-    Mutates and returns the record. Exposed separately from the factory so the behaviour
-    is testable without installing anything globally.
+    Mutates and returns the record.
+
+    This is the channel `exc_info` stripping does not reach. Stripping the traceback
+    handles `logger.error("failed", exc_info=True)`; it does nothing for the other two
+    natural spellings, where the exception *is* the payload:
+
+        logger.error("call failed: %s", exc)       # args
+        logger.error(exc)                          # msg
+
+    Both render the exception's `str()` straight to stdout with no traceback involved.
+
+    Deliberately narrow: it touches only `BaseException` instances, so ordinary log
+    messages — uvicorn's startup and access lines, which are the signal an ops team reads —
+    pass through byte-identical. It does not touch `exc_info`; that belongs to the
+    containment factory in `api/security.py`, and doing it in two places is how two
+    factories start fighting.
+
+    Call it unconditionally from that factory, not only on the `exc_info` branch — the
+    whole point is the records that have no `exc_info` to test.
     """
-    leaked: str | None = None
-
-    if record.exc_info:
-        exc = record.exc_info[1]
-        kind = type(exc) if exc is not None else record.exc_info[0]
-        leaked = getattr(kind, "__name__", "Exception")
-        record.exc_info = None
-    if record.exc_text:
-        record.exc_text = None
-        leaked = leaked or "Exception"
-    if record.stack_info:
-        record.stack_info = None
-
     if isinstance(record.msg, BaseException):
-        leaked = type(record.msg).__name__
-        record.msg = f"<{leaked} redacted>"
+        record.msg = _safe_repr(record.msg)
         record.args = None
     if isinstance(record.args, tuple):
         record.args = tuple(_safe_repr(arg) for arg in record.args)
     elif isinstance(record.args, dict):
         record.args = {key: _safe_repr(value) for key, value in record.args.items()}
-
-    if leaked and isinstance(record.msg, str):
-        # No '%' in the marker: `msg` may be a format string and `args` may be non-empty.
-        record.msg = f"{record.msg} | exception={leaked} ({REDACTION_NOTE})"
-
     return record
-
-
-def install_stdout_guard() -> None:
-    """Stop any logger in the process from printing a traceback to stdout (SEC-4).
-
-    The allowlist in this module governs *our* log calls and nothing else. uvicorn,
-    asyncio, anyio and every library carry their own loggers and their own handlers, and
-    the one thing they reliably write is a traceback — which contains the exception's
-    message. That is not a theoretical leak here: the pipeline runs in
-    `asyncio.to_thread`, a `pydantic.ValidationError` raised while validating an
-    extraction quotes the label text that failed validation, and an exception escaping a
-    worker thread is logged by the framework, not by us.
-
-    The plug is a `LogRecord` factory rather than a filter on a handler, because:
-
-      * uvicorn sets `propagate = False` on its loggers, so a filter on root never sees
-        those records;
-      * a filter added to every logger present at startup misses every logger and handler
-        created afterwards;
-      * the record factory runs for every record created anywhere in the process, before
-        any handler can format it, and it is a documented stdlib hook.
-
-    What is deliberately *not* done: foreign log messages are left intact. Redacting them
-    wholesale would delete uvicorn's startup and access lines, which are what an ops team
-    reads to know the service is alive. The residual gap is a third-party library that
-    passes label text as a plain format argument — `logger.info("read %s", brand)`. No
-    code path in this repository does that, and the README says so rather than claiming
-    the guard is total.
-
-    Idempotent; `uninstall_stdout_guard()` reverses it.
-    """
-    global _original_factory
-    if _original_factory is not None:
-        return
-    _original_factory = logging.getLogRecordFactory()
-
-    def factory(*args: Any, **kwargs: Any) -> logging.LogRecord:
-        return redact(_original_factory(*args, **kwargs))
-
-    logging.setLogRecordFactory(factory)
-
-
-def uninstall_stdout_guard() -> None:
-    """Restore the previous record factory. For tests and for local debugging."""
-    global _original_factory
-    if _original_factory is None:
-        return
-    logging.setLogRecordFactory(_original_factory)
-    _original_factory = None
 
 
 def new_request_id() -> str:
