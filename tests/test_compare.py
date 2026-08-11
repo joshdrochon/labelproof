@@ -3,7 +3,7 @@ the product, not an implementation detail, so it is tested directly."""
 
 import pytest
 
-from api.models import Commodity, ExtractedField, FieldName, Verdict
+from api.models import Commodity, ExtractedField, Verdict
 from api.rules import compare
 from api.rules.commodity import LabelContext
 
@@ -81,9 +81,23 @@ def test_producer_mismatch_on_different_city() -> None:
     assert r.verdict is Verdict.MISMATCH
 
 
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "KNOWN GAP (LP-045). expand_state_abbreviations() rewrites any standalone word "
+        "matching a state code, so 'Gin or Vodka' becomes 'gin oregon vodka' and "
+        "'Made in Kentucky' becomes 'made indiana kentucky'. It is not a live false pass "
+        "today because the normalizer is applied to BOTH sides of every comparison, so "
+        "the corruption is symmetric; it becomes one the moment either side is expanded "
+        "differently. The real fix needs address position (a code is a state only after "
+        "a comma, or before a ZIP), which is a comparator decision this branch does not "
+        "own. strict=True so this flips red the day someone fixes it and forgets to "
+        "delete the marker."
+    ),
+)
 def test_state_expansion_is_word_bounded() -> None:
     """`or` is Oregon's code but also an English word — must not corrupt other text."""
-    assert "oregon" not in compare.expand_state_abbreviations("Gin or Vodka").replace("oregon", "X") or True
+    assert "oregon" not in compare.expand_state_abbreviations("Gin or Vodka")
     expanded = compare.expand_state_abbreviations("Portland, OR")
     assert "oregon" in expanded
 
@@ -104,7 +118,9 @@ def test_domestic_without_origin_is_not_applicable() -> None:
 
 
 def test_import_with_matching_origin() -> None:
-    r = compare.compare_country_of_origin(E("Product of France"), "Product of France", is_import=True)
+    r = compare.compare_country_of_origin(
+        E("Product of France"), "Product of France", is_import=True
+    )
     assert r.verdict is Verdict.MATCH
 
 

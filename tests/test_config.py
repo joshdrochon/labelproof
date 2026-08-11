@@ -40,7 +40,7 @@ def test_provider_timeout_must_fit_inside_the_request_budget(
     monkeypatch.setenv("LABELPROOF_FAKE_PROVIDER", "1")
     monkeypatch.setenv("LABELPROOF_PROVIDER_TIMEOUT_MS", "6000")
     monkeypatch.setenv("LABELPROOF_REQUEST_BUDGET_MS", "5000")
-    with pytest.raises(ConfigError, match="request budget|REQUEST_BUDGET"):
+    with pytest.raises(ConfigError, match=r"request budget|REQUEST_BUDGET"):
         Config.from_env()
 
 
@@ -132,8 +132,8 @@ def test_non_numeric_value_is_rejected_with_the_variable_name(
 
 def test_env_example_documents_every_variable() -> None:
     """LP-011: .env.example must list every variable the app reads."""
-    from pathlib import Path
     import re
+    from pathlib import Path
 
     root = Path(__file__).resolve().parents[1]
     documented = set(re.findall(r"^([A-Z_]+)=", (root / ".env.example").read_text(), re.M))

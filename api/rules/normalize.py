@@ -24,7 +24,13 @@ _QUOTE_MAP = str.maketrans(
         "″": '"',
         "‐": "-", "‑": "-", "‒": "-", "–": "-",
         "—": "-", "―": "-", "−": "-",
-        " ": " ", " ": " ", " ": " ", "​": "",
+        # Invisible characters are written as escapes on purpose: a literal U+00A0
+        # in source looks exactly like a space, so a reviewer cannot see what this
+        # line does. The visible glyphs above stay literal for the same reason.
+        "\u00a0": " ",  # no-break space
+        "\u2007": " ",  # figure space
+        "\u202f": " ",  # narrow no-break space
+        "\u200b": "",  # zero-width space - deleted, never turned into a space
     }
 )
 

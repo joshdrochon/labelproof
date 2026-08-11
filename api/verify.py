@@ -19,15 +19,14 @@ from api.models import (
     Aggregate,
     Application,
     Cost,
-    Extraction,
     ExtractedField,
+    Extraction,
     FieldName,
     FieldResult,
-    ImageReport,
     Recommendation,
     Timings,
-    VerificationResult,
     Verdict,
+    VerificationResult,
     WarningTypography,
 )
 from api.provider.base import (

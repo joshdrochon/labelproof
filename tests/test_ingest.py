@@ -168,7 +168,7 @@ def test_too_many_images_is_rejected(config: Config) -> None:
 
 def test_corrupt_image_reports_an_image_error_not_a_crash(config: Config) -> None:
     corrupt = b"\x89PNG\r\n\x1a\n" + b"\x00" * 200
-    with pytest.raises(errors.ImageError, match="damaged|could not be opened"):
+    with pytest.raises(errors.ImageError, match=r"damaged|could not be opened"):
         ingest.ingest_one(corrupt, config)
 
 

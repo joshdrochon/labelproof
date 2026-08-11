@@ -57,7 +57,9 @@ def test_origin_required_for_imports(c: Commodity) -> None:
 # --- TC-17: table wine ----------------------------------------------------------------
 
 @pytest.mark.tc("TC-17")
-@pytest.mark.parametrize("designation", ["Table Wine", "table wine", "LIGHT WINE", "Red Table Wine"])
+@pytest.mark.parametrize(
+    "designation", ["Table Wine", "table wine", "LIGHT WINE", "Red Table Wine"]
+)
 def test_low_alcohol_wine_may_omit_alcohol_content(designation: str) -> None:
     ctx = LabelContext(class_type=designation, application_abv=12.5)
     assert not com.is_required(Commodity.WINE, FieldName.ALCOHOL_CONTENT, ctx)

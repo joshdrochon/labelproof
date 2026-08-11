@@ -148,7 +148,12 @@ def main(argv: list[str] | None = None) -> int:
 
             if not samples:
                 report["runs"].append(  # type: ignore[union-attr]
-                    {"fixture": fixture, "shape": shape, "effort": effort, "error": "all runs failed"}
+                    {
+                        "fixture": fixture,
+                        "shape": shape,
+                        "effort": effort,
+                        "error": "all runs failed",
+                    }
                 )
                 continue
 

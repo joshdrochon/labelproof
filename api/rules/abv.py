@@ -53,9 +53,7 @@ def parse(text: str | None) -> AlcoholContent:
     abv: float | None = None
     proof: float | None = None
 
-    if m := _PERCENT.search(text):
-        abv = float(m.group(1))
-    elif m := _BARE_WITH_CONTEXT.search(text):
+    if (m := _PERCENT.search(text)) or (m := _BARE_WITH_CONTEXT.search(text)):
         abv = float(m.group(1))
 
     if m := _PROOF.search(text):

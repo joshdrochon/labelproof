@@ -80,7 +80,10 @@ def diff_summary(segments: list[DiffSegment]) -> str:
             case "delete":
                 return f'The label is missing the words "{" ".join(seg.expected)}".'
             case "insert":
-                return f'The label adds the words "{" ".join(seg.found)}", which are not part of the required statement.'
+                return (
+                    f'The label adds the words "{" ".join(seg.found)}", which are not '
+                    "part of the required statement."
+                )
     return "The warning statement matches the required text word for word."
 
 
@@ -176,7 +179,7 @@ def check_typography(signals: WarningTypography) -> list[Finding]:
                 Finding(
                     code="warning_body_is_bold",
                     message=(
-                        "Only the words \"GOVERNMENT WARNING\" may be bold. The rest of "
+                        'Only the words "GOVERNMENT WARNING" may be bold. The rest of '
                         "the statement must not be in bold type, and on this label it is."
                     ),
                     citation=canon.CITATIONS["warning_format"],

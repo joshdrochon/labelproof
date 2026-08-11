@@ -100,8 +100,8 @@ def recommend(results: list[FieldResult]) -> Aggregate:
         return Aggregate(
             recommendation=Recommendation.RETURN_FOR_CORRECTION,
             rationale=(
-                f"Recommend returning this application for correction because a "
-                f"required element is not on the label. The final decision is yours."
+                "Recommend returning this application for correction because a "
+                "required element is not on the label. The final decision is yours."
             ),
             driving_field=first.field,
         )

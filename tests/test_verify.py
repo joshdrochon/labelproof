@@ -3,14 +3,13 @@
 import pytest
 
 from api.models import Application, Commodity, FieldName, Recommendation, Verdict
-from api.provider.base import ExtractionRequest, ImageInput
+from api.provider.base import ImageInput, ProviderError
 from api.provider.fake import (
     FailingProvider,
     NonLabelProvider,
     SpecBackedProvider,
     spec_name_for_image,
 )
-from api.provider.base import ProviderError
 from api.verify import verify
 from fixtures.generator.catalog import by_name
 

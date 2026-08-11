@@ -131,5 +131,5 @@ class stage:
             stage=self.name,
             duration_ms=self.duration_ms,
             ok=exc_type is None,
-            **self.fields,
+            **self.fields,  # type: ignore[arg-type]  # **object could bind log()'s level: int
         )

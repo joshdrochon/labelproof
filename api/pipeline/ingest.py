@@ -83,7 +83,7 @@ def _describe(data: bytes) -> str:
         return "web page"
     if data.lstrip().startswith(b"<svg") or b"<svg" in data[:512].lower():
         return "SVG image"
-    if data.startswith(b"\x7fELF") or data.startswith(b"MZ"):
+    if data.startswith((b"\x7fELF", b"MZ")):
         return "program"
     return "file of an unrecognised type"
 
@@ -139,7 +139,7 @@ def _from_pdf(data: bytes, config: Config, start_index: int) -> list[IngestedIma
     """
     try:
         document = pypdfium2.PdfDocument(data)
-    except Exception as exc:  # noqa: BLE001 — any parse failure is a user-facing error
+    except Exception as exc:
         raise errors.UserError(
             "That PDF could not be opened. Save it again, or upload the label as an "
             "image instead.",
@@ -199,7 +199,7 @@ def ingest_one(data: bytes, config: Config, index: int = 0) -> list[IngestedImag
             clean, downscaled = _sanitize(opened, config)
     except errors.LabelProofError:
         raise
-    except Exception as exc:  # noqa: BLE001 — a corrupt image is a user-facing error
+    except Exception as exc:
         raise errors.ImageError(
             "That image could not be opened. It may be damaged — try saving it again, "
             "or request a new image.",

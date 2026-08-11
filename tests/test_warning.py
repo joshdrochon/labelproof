@@ -45,7 +45,9 @@ def test_title_case_header_is_a_violation() -> None:
 
 
 @pytest.mark.tc("TC-03")
-@pytest.mark.parametrize("header", ["Government Warning:", "government warning:", "GoVeRnMeNt WaRnInG:"])
+@pytest.mark.parametrize(
+    "header", ["Government Warning:", "government warning:", "GoVeRnMeNt WaRnInG:"]
+)
 def test_any_non_uppercase_header_is_caught(header: str) -> None:
     result = warning.evaluate(_retitled(header), GOOD)
     assert result.verdict is not Verdict.MATCH
