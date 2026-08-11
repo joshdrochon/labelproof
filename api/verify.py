@@ -108,6 +108,8 @@ def prepare_images(
     config: Config,
     *,
     roles: Sequence[str] | None = None,
+    job_id: str | None = None,
+    item_id: str | None = None,
 ) -> PreparedImages:
     """Ingest, score, and pre-gate. The one copy of the path to the model.
 
@@ -118,6 +120,17 @@ def prepare_images(
 
     Both entry points call this, so the gate cannot hold on one path and quietly not on
     the other.
+
+    `job_id` and `item_id` say whose images these are, and batch has to pass them. On the
+    interactive path the request ID travels by ContextVar and every line is attributed for
+    free; a worker thread inherits no ContextVar, so a batch line carries no request ID.
+    With six workers interleaving, 600 lines whose only identifier is `image_index` — which
+    is 0 or 1 — cannot answer the single question they exist for: which application was
+    pre-gated, and on what defect. Both names are on the SEC-4 allowlist and neither can
+    carry label text.
+
+    They are logged as null rather than omitted on the interactive path, so one query
+    shape reads both modes.
     """
     ingest_started = time.perf_counter()
     ingested = ingest_mod.ingest(list(payloads), config)
@@ -143,6 +156,8 @@ def prepare_images(
             glare=report.quality.glare,
             skew_deg=report.quality.skew_deg,
             quality=report.quality.verdict,
+            job_id=job_id,
+            item_id=item_id,
         )
 
     usable = [

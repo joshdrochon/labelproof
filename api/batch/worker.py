@@ -170,7 +170,12 @@ def verify_item(
             code="image_missing",
         )
 
-    prepared = prepare_images(payloads, config)
+    # A worker thread inherits no ContextVar, so the request ID that attributes every
+    # interactive log line is empty here. Without these two the per-image lines from six
+    # concurrent workers are indistinguishable from one another.
+    prepared = prepare_images(
+        payloads, config, job_id=item.job_id, item_id=item.item_id
+    )
 
     if prepared.pregated:
         return unverified(

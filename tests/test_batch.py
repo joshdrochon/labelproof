@@ -1358,6 +1358,56 @@ def test_a_failed_item_exports_its_reason(tmp_path: Path) -> None:
 # --- logging (SEC-4) ------------------------------------------------------------------
 
 
+def test_every_image_line_says_which_item_it_belongs_to(tmp_path: Path) -> None:
+    """Six workers interleaving, `image_index` only ever 0 or 1 — attribution or nothing.
+
+    These lines exist to answer one question: which application was pre-gated, and on
+    which defect. A worker thread inherits no ContextVar, so the request ID that
+    attributes every interactive line is empty here; without job_id and item_id the whole
+    stream is unreadable and the lines are pure noise (OPS-1).
+    """
+    client = make_client(tmp_path, provider=spec_provider())
+    stream = io.StringIO()
+    applog.configure(stream=stream)
+
+    job_id = post_batch(client, [row(), row()]).json()["job_id"]
+    drain(client)
+
+    scored = [
+        json.loads(line)
+        for line in stream.getvalue().splitlines()
+        if line and json.loads(line).get("event") == "image_scored"
+    ]
+    assert len(scored) == 2
+    assert {entry["job_id"] for entry in scored} == {job_id}
+    assert len({entry["item_id"] for entry in scored}) == 2, "two items, two item_ids"
+
+
+def test_the_interactive_path_still_attributes_by_request_id(tmp_path: Path) -> None:
+    """The complement: Verify Now needs no `owner`, because the ContextVar carries it."""
+    client = make_client(tmp_path, provider=spec_provider())
+    stream = io.StringIO()
+    applog.configure(stream=stream)
+
+    response = client.post(
+        "/verify",
+        files=[("images", (GOOD_IMAGE, GOOD_BYTES, "image/png"))],
+        data={"application": json.dumps(old_tom())},
+    )
+    assert response.status_code == 200
+
+    scored = [
+        json.loads(line)
+        for line in stream.getvalue().splitlines()
+        if line and json.loads(line).get("event") == "image_scored"
+    ]
+    assert scored and all(
+        entry["request_id"] == response.headers["X-Request-ID"] for entry in scored
+    )
+    # Present and null rather than absent, so one query shape reads both modes.
+    assert all(entry["job_id"] is None and entry["item_id"] is None for entry in scored)
+
+
 def test_running_a_batch_puts_no_label_text_in_the_logs(tmp_path: Path) -> None:
     client = make_client(tmp_path, provider=spec_provider())
     # After `create_app`, which installs its own handler.
