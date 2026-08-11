@@ -405,7 +405,10 @@ def test_unknown_routes_answer_in_the_taxonomy() -> None:
     app, not an error, or reloading the page mid-workflow looks like a crash.
     """
     response = make_client().get("/sample/nope")
-    assert response.status_code == 400
+    # 404, not 400: an unknown address now keeps its own status. `kind` still groups by
+    # who can act (this is the caller's to fix), but the status line is the status line.
+    # See tests/regression/test_routing_defects.py.
+    assert response.status_code == 404
     assert "error" in response.json()
 
 
@@ -418,11 +421,14 @@ def test_unknown_non_api_routes_render_the_app_not_an_error() -> None:
         assert response.status_code == 200
         assert "text/html" in response.headers["content-type"]
     else:
-        assert response.status_code == 400
+        assert response.status_code == 404
 
 def test_a_get_on_verify_is_explained() -> None:
     response = make_client().get("/verify")
-    assert response.status_code == 400
+    # 405, not 400. `_install_spa` raises 405 deliberately to say "wrong verb, not wrong
+    # URL"; the handler used to discard it. Both halves are asserted: the status for
+    # machines, the code for the error renderer.
+    assert response.status_code == 405
     assert response.json()["error"]["code"] == "method_not_allowed"
 
 

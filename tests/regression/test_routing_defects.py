@@ -1,4 +1,4 @@
-"""OPEN DEFECTS in routing: batch is unreachable, and four status codes are collapsed.
+"""ROUTING DEFECTS: batch is unreachable (open), four statuses were collapsed (fixed).
 
 **Defect one — `create_app` never mounts the batch router.** `api/routes/batch.py` is
 629 lines implementing `POST /batch`, `GET /batch/{id}`, retry and CSV export, and
@@ -13,25 +13,28 @@ pinned here rather than merely written down because the batch test suite mounts 
 router *itself*, which is exactly why 624 tests were green while the endpoint did not
 exist. A documented gap with no failing test is a gap that ships.
 
-**Defect two — the error taxonomy collapses four HTTP statuses into 400.** `_from_status`
-maps 404, 405, 413 and 429 onto `UserError`, whose `kind` is `user`, whose status is 400.
-The `code` field keeps the distinction; the status code does not. So the SPA fallback
-carefully raises `HTTPException(405)` to preserve "wrong verb, not wrong URL" — with a
-comment saying exactly that — and the handler flattens it to 400 on the way out.
+**Defect two — the error taxonomy collapsed four HTTP statuses into 400. FIXED.**
+`_from_status` mapped 404, 405, 413 and 429 onto `UserError`, whose `kind` is `user`,
+whose status is 400. The `code` field kept the distinction; the status code did not. So
+the SPA fallback carefully raised `HTTPException(405)` to preserve "wrong verb, not wrong
+URL" — with a comment saying exactly that — and the handler flattened it to 400 three
+lines later.
 
-It matters beyond tidiness. A 429 that answers 400 will not be retried by any client
-honouring `Retry-After`; a proxy or WAF cannot distinguish a missing route from a
-malformed body; and monitoring that alerts on 4xx rates loses the one split that says
-whether callers are lost or the service is shedding load. SEC-9 asks for rate limiting
-with a plain-language body — the body is right and the status is not.
+It matters beyond tidiness. A 429 that answers 400 is not retried by any client honouring
+`Retry-After`; a proxy or WAF cannot distinguish a missing route from a malformed body;
+and monitoring that alerts on 4xx rates loses the one split that says whether callers are
+lost or the service is shedding load. SEC-9 asks for rate limiting with a plain-language
+body — the body was right and the status was not.
 
-This one is a judgment call rather than an obvious bug: the taxonomy's `kind` deliberately
-groups by *who can act*, and all four of these are "the caller". The counter-argument is
-that `main.py`'s own code goes out of its way to preserve 404-versus-405 and then loses
-it. Flagged for the owner rather than asserted as settled.
+I first pinned this as a judgment call, on the grounds that `kind` deliberately groups by
+*who can act* and all four are "the caller". A reviewer pushed back and was right: that
+argument justifies the `kind`, not the discarded status, and the codebase had already
+made the decision in `_install_spa` before the handler undid it. `LabelProofError` now
+takes an explicit `status_code` that overrides the kind default, `kind` keeps grouping by
+who can act, and the tests below are live assertions rather than pins.
 
-Both are `xfail(strict=True)`: wiring the router or splitting the statuses turns these
-red, which is the signal that the gap closed.
+Defect one is still `xfail(strict=True)`: mounting the router turns those red, which is
+the signal that the gap closed.
 """
 
 from __future__ import annotations
@@ -145,10 +148,10 @@ def test_the_shipped_app_exposes_no_batch_route_at_all() -> None:
 
 
 def test_the_error_envelope_itself_is_correct(client: TestClient) -> None:
-    """Established first: only the status code is in question.
+    """The taxonomy was never the problem, and the fix leaves it alone.
 
-    The body carries `kind`, `code`, `message` and `next_step`, all correct and all
-    written for an agent. Nothing below is a complaint about the taxonomy.
+    The body still carries `kind: user` for all four, because all four *are* the
+    caller's to fix. Only the status line changed.
     """
     body = client.get("/no-such-address").json()["error"]
     assert body["kind"] == "user"
@@ -171,45 +174,34 @@ def test_the_distinction_survives_in_the_code_field(status: int, code: str) -> N
     assert main_module._from_status(status).code == code
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "DEFECT (open, judgment call — flagged for the owner): _from_status maps 404, "
-        "405, 413 and 429 onto UserError, whose kind 'user' maps to HTTP 400. The "
-        "distinction survives in `code` but not in the status line, so a 429 is not "
-        "retried by clients honouring Retry-After, a proxy cannot tell a missing route "
-        "from a malformed body, and 4xx dashboards lose the split. main.py's SPA "
-        "fallback raises 405 specifically to preserve 'wrong verb, not wrong URL' and "
-        "this undoes it. Fix: let LabelProofError carry an explicit status_code that "
-        "overrides the kind mapping, keeping `kind` as the who-can-act grouping. "
-        "Owner: api/errors.py, api/main.py."
-    ),
-)
 @pytest.mark.parametrize("status", [404, 405, 413, 429])
 def test_the_http_status_matches_the_status_it_was_built_from(status: int) -> None:
+    """FIXED. These four used to collapse to 400 because `kind` chose the status.
+
+    `LabelProofError` now accepts an explicit `status_code` that overrides the kind
+    default, and `_from_status` passes each one through. `kind` keeps doing the job it
+    is good at — grouping by who can act, which is what selects the message — and the
+    status line keeps doing its own.
+    """
     assert main_module._from_status(status).status_code == status
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "DEFECT (open): the same collapse, seen over the wire. An unknown address "
-        "answers 400 rather than 404. Owner: api/errors.py, api/main.py."
-    ),
-)
 def test_an_unknown_address_answers_404_over_the_wire(client: TestClient) -> None:
+    """FIXED. Over the wire, not just in the constructor.
+
+    A scanner, a proxy and a browser all read the status line and none of them read
+    `code`, so this is the assertion that matters.
+    """
     assert client.get("/no-such-address").status_code == 404
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "DEFECT (open): the same collapse. A GET on the POST-only /verify answers 400 "
-        "rather than 405, so the deliberate wrong-verb signal never reaches the client. "
-        "Owner: api/errors.py, api/main.py."
-    ),
-)
 def test_a_wrong_verb_answers_405_over_the_wire(client: TestClient) -> None:
+    """FIXED. `_install_spa` raises 405 on purpose; it now survives the handler.
+
+    The comment there says the distinction matters because "one means the URL is wrong,
+    the other means the caller is close and using the wrong verb". It was true of the
+    raise and false of the response.
+    """
     assert client.get("/verify").status_code == 405
 
 
