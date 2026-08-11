@@ -344,7 +344,9 @@ def test_the_call_carries_our_timeout_and_no_sdk_retries() -> None:
 
     options = client.options[0]
     assert options["max_retries"] == 0
-    assert 0 < options["timeout"] <= 4.0
+    # Bounded by the configured timeout, which now follows the model's measured latency
+    # (LP-330) rather than a fixed 4s that no model could actually finish inside.
+    assert 0 < options["timeout"] <= provider.config.provider_timeout_ms / 1000
 
 
 def test_an_unsupported_image_format_never_reaches_the_provider() -> None:
@@ -369,6 +371,19 @@ def test_the_schema_is_sent_as_the_output_format() -> None:
     fmt = client.calls[0]["output_config"]["format"]
     assert fmt["type"] == "json_schema"
     assert fmt["schema"] == EXTRACTION_SCHEMA
+
+
+def test_every_call_pins_inference_to_the_united_states() -> None:
+    """NET-1 — data residency has to be a request parameter, not a README paragraph.
+
+    Without `inference_geo` the request follows the workspace default, which is `global`.
+    The customer is a US federal agency and the README claims label images never leave the
+    country; this is the line that makes the claim true. Verified against the live API.
+    """
+    provider, client = a_provider(responds_with(a_label()))
+    provider.extract(a_request())
+
+    assert client.calls[0]["inference_geo"] == "us"
 
 
 def test_a_thinking_capable_model_gets_thinking_and_effort() -> None:
