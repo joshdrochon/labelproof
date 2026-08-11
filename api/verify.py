@@ -98,6 +98,7 @@ def warning_sightings(extractions: list[Extraction]) -> list[warn.WarningSightin
                 legible=field.legible if field else True,
                 confidence=field.confidence if field else 0.0,
                 typography=extraction.warning_typography,
+                bbox=field.bbox if field else None,
             )
         )
     return sightings
@@ -105,15 +106,12 @@ def warning_sightings(extractions: list[Extraction]) -> list[warn.WarningSightin
 
 def _warning_result(
     extractions: list[Extraction],
-    merged: dict[FieldName, ExtractedField],
     net_contents_ml: float | None,
-    warning_image: int | None = None,
 ) -> FieldResult:
     """The warning row, judged across every image before Missing is declared (LP-217)."""
     sightings = warning_sightings(extractions)
     result = warn.evaluate_across_images(sightings, net_contents_ml=net_contents_ml)
     chosen = warn.select_sighting(sightings)
-    field = merged.get(FieldName.GOVERNMENT_WARNING)
 
     return FieldResult(
         field=FieldName.GOVERNMENT_WARNING,
@@ -126,9 +124,12 @@ def _warning_result(
         expected=canon.CANONICAL_WARNING,
         confidence=chosen.confidence if chosen else 0.0,
         rationale=result.rationale,
+        # Region and image both come off the chosen sighting. Taking the box from the
+        # merged field and the index from somewhere else drew image 0's rectangle over
+        # image 1's photograph — on the row the PRD most wants outlined.
         evidence=(
-            Evidence(image_index=warning_image or 0, bbox=field.bbox)
-            if field is not None and field.bbox is not None
+            Evidence(image_index=chosen.image_index, bbox=chosen.bbox)
+            if chosen is not None and chosen.bbox is not None
             else None
         ),
         findings=list(result.findings),
@@ -173,7 +174,9 @@ def verify(
         )
 
     compare_started = time.perf_counter()
-    merged, warning_image, _typography, _provenance = merge_extractions(response.extractions)
+    merged, _warning_image, _typography, _provenance = merge_extractions(
+        response.extractions
+    )
 
     context = LabelContext(
         is_import=application.is_import,
@@ -209,7 +212,7 @@ def verify(
             application.country_of_origin,
             is_import=application.is_import,
         ),
-        _warning_result(response.extractions, merged, net.ml, warning_image),
+        _warning_result(response.extractions, net.ml),
     ]
 
     aggregate = agg.recommend(results)

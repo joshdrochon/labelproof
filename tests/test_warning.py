@@ -1083,6 +1083,36 @@ def test_a_missing_warning_still_shows_the_agent_what_was_required() -> None:
     assert row.extracted is None
 
 
+def test_the_outlined_region_belongs_to_the_photograph_it_names() -> None:
+    """The box used to come from the highest-confidence reading and the image index from
+    the most complete one, so a two-image application drew image 0's rectangle over
+    image 1's photograph — on the row the PRD most wants outlined."""
+    from api.models import ExtractedField, Extraction
+    from api.verify import warning_sightings
+
+    front_box = BoundingBox(x0=0.0, y0=0.0, x1=0.2, y1=0.2)
+    back_box = BoundingBox(x0=0.1, y0=0.7, x1=0.9, y1=0.95)
+    fragment = "GOVERNMENT WARNING: (1) According to the Surgeon General"
+    extractions = [
+        Extraction(
+            image_index=0,
+            fields={FieldName.GOVERNMENT_WARNING: ExtractedField(
+                value=fragment, confidence=0.99, bbox=front_box)},
+            warning_text=fragment,
+        ),
+        Extraction(
+            image_index=1,
+            fields={FieldName.GOVERNMENT_WARNING: ExtractedField(
+                value=canon.CANONICAL_WARNING, confidence=0.70, bbox=back_box)},
+            warning_text=canon.CANONICAL_WARNING,
+        ),
+    ]
+    chosen = warning.select_sighting(warning_sightings(extractions))
+    assert chosen is not None
+    assert chosen.image_index == 1          # the complete reading wins
+    assert chosen.bbox == back_box          # and it brings its own rectangle
+
+
 def test_the_warning_row_points_at_a_region_on_the_picture() -> None:
     """LP-212 asks for the region, and the row an agent most needs outlined was the one
     field arriving with no evidence at all."""
