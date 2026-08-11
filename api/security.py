@@ -241,7 +241,7 @@ def _exception_name(exc_info: object) -> str:
     return "Exception"
 
 
-def _safe_arg(value: object) -> object:
+def _safe_arg(value: object, path: frozenset[int] = frozenset()) -> object:
     """Replace an exception passed as a log argument with its class name.
 
     This is the gap the traceback scrubbing alone did not close, and it is the most
@@ -251,17 +251,45 @@ def _safe_arg(value: object) -> object:
 
     No `exc_info`, so nothing about that record looks like a traceback — and `str(exc)` on a
     pydantic `ValidationError` is `input_value=...`, which on the extraction path is the
-    label. So exception *objects* are replaced wherever they appear as arguments,
-    unconditionally, on every record. It costs an `isinstance` per argument.
+    label.
+
+    **Containers are walked, not just the top level.** I claimed this was unconditional
+    after handling `dict`, and it was not: a list or tuple of exceptions went through
+    untouched, and
+
+        logger.error("failures: %s", errors)
+
+    with a list of per-item exceptions is an ordinary batch-worker line — `WorkerPool`
+    collects exactly that, one per failed item, each carrying a brand name.
+
+    **The recursion is bounded by cycle detection, not by a depth cap.** My first attempt
+    capped it at four levels and returned the value untouched below that, which is a leak
+    wearing a safety belt: `[exc, [exc, [exc, …]]]` printed in full past the bound. A depth
+    cap has to fail open at the bottom to be useful, and failing open is what this function
+    exists to prevent. Tracking the current path terminates on genuine cycles and never
+    stops looking on the way down.
     """
     if isinstance(value, BaseException):
         return f"<{type(value).__name__}>"
+    if not isinstance(value, (dict, list, tuple, set, frozenset)):
+        return value
+
+    marker = id(value)
+    if marker in path:
+        return "<cycle>"
+    inner = path | {marker}
+
     if isinstance(value, dict):
         # `logger.info("%(what)s", {"what": exc})`. `LogRecord.__init__` unwraps a lone
         # mapping argument, so by the time anything else sees it the exception is nested one
-        # level down — which is exactly how this vector got past the first version.
-        return {key: _safe_arg(item) for key, item in value.items()}
-    return value
+        # level down — which is how that vector got past the first version.
+        return {key: _safe_arg(item, inner) for key, item in value.items()}
+    if isinstance(value, tuple):
+        return tuple(_safe_arg(item, inner) for item in value)
+    # Sets are rebuilt as lists: the scrubbed placeholders are strings and would collapse
+    # two exceptions of the same class into one member, which is a lie about how many
+    # things failed.
+    return [_safe_arg(item, inner) for item in value]
 
 
 def _safe_args(args: object) -> object:

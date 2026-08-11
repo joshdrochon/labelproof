@@ -661,6 +661,73 @@ def test_an_exception_passed_as_a_log_argument_is_scrubbed(capfd: Any) -> None:
     assert "extraction failed" in combined
 
 
+@pytest.mark.parametrize(
+    "container",
+    [
+        [RuntimeError(LABEL_TEXT)],
+        (RuntimeError(LABEL_TEXT),),
+        {RuntimeError(LABEL_TEXT)},
+        [[RuntimeError(LABEL_TEXT)]],
+        {"failures": [RuntimeError(LABEL_TEXT)]},
+        [{"why": RuntimeError(LABEL_TEXT)}],
+    ],
+)
+def test_exceptions_inside_containers_are_scrubbed_too(capfd: Any, container: Any) -> None:
+    """I claimed this was unconditional after handling `dict`. It was not.
+
+        logger.error("failures: %s", errors)
+
+    with a list of per-item exceptions is an ordinary batch-worker line — `WorkerPool`
+    collects exactly that, one per failed item, each carrying a brand name — and a list went
+    through untouched.
+    """
+    security.install_log_containment()
+    logger = _uvicorn_error_logger()
+
+    logger.error("failures: %s", container)
+
+    combined = capfd.readouterr().out
+    assert LABEL_TEXT not in combined, f"leaked out of {type(container).__name__}"
+    assert "<RuntimeError>" in combined
+    assert "failures:" in combined
+
+
+def test_scrubbing_a_self_referencing_argument_terminates(capfd: Any) -> None:
+    """A cyclic structure must not hang the log call, and must not leak on the way out.
+
+    My first bound was a four-level depth cap that returned the value untouched below it,
+    so `[exc, [exc, [exc, …]]]` printed in full past the bound — a leak wearing a safety
+    belt. A depth cap has to fail open at the bottom to be useful. Cycle detection does not.
+    """
+    security.install_log_containment()
+    logger = _uvicorn_error_logger()
+
+    cycle: list[Any] = [RuntimeError(LABEL_TEXT)]
+    cycle.append(cycle)
+
+    logger.error("failures: %s", cycle)
+
+    combined = capfd.readouterr().out
+    assert LABEL_TEXT not in combined
+    assert "<RuntimeError>" in combined
+
+
+def test_a_deeply_nested_exception_is_still_found(capfd: Any) -> None:
+    """Ten levels down, which is past any depth cap I would have picked."""
+    security.install_log_containment()
+    logger = _uvicorn_error_logger()
+
+    nested: Any = RuntimeError(LABEL_TEXT)
+    for _ in range(10):
+        nested = [nested]
+
+    logger.error("failures: %s", nested)
+
+    combined = capfd.readouterr().out
+    assert LABEL_TEXT not in combined
+    assert "<RuntimeError>" in combined
+
+
 def test_a_stack_info_record_keeps_its_message(capfd: Any) -> None:
     """`logger.warning("slow request", stack_info=True)` is not an exception report.
 
