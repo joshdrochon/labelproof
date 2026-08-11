@@ -50,6 +50,50 @@ def perspective(image: np.ndarray, degrees: float) -> np.ndarray:
     )
 
 
+def on_surface(
+    image: np.ndarray,
+    *,
+    degrees: float = 0.0,
+    margin: float = 0.15,
+    surface: tuple[int, int, int] = (64, 62, 60),
+) -> np.ndarray:
+    """Photograph the label lying on a surface, optionally from off to one side.
+
+    `perspective` warps the label but replicates the border, so the result fills the frame
+    edge to edge and has *no visible boundary*. That is a faithful model of a scanned
+    print proof and a useless one for testing perspective correction: with no boundary
+    there are no corners, and rectification has nothing to work from.
+
+    This composites the warped label onto a plain background instead, which is what a
+    phone photo actually looks like and what LP-189's corner detection needs to exercise.
+    The surface is a flat mid-dark grey rather than a texture — a textured desk would test
+    contour detection against clutter, which is a different and much weaker claim than
+    "the corners are found and the label is squared up".
+    """
+    h, w = image.shape[:2]
+    pad_x, pad_y = int(w * margin), int(h * margin)
+    canvas = np.full((h + 2 * pad_y, w + 2 * pad_x, 3), surface, dtype=np.uint8)
+    height, width = canvas.shape[:2]
+
+    shift = np.tan(np.radians(min(abs(degrees), 60.0))) * h * 0.25
+    source = np.float32([[0, 0], [w, 0], [w, h], [0, h]])
+    if degrees >= 0:
+        dest = np.float32([[shift, 0], [w, 0], [w, h], [shift * 0.4, h]])
+    else:
+        dest = np.float32([[0, 0], [w - shift, 0], [w - shift * 0.4, h], [0, h]])
+    dest = dest + np.float32([pad_x, pad_y])
+
+    matrix = cv2.getPerspectiveTransform(source, dest)
+    warped = cv2.warpPerspective(image, matrix, (width, height), flags=cv2.INTER_LINEAR)
+    mask = cv2.warpPerspective(
+        np.full((h, w), 255, np.uint8), matrix, (width, height), flags=cv2.INTER_NEAREST
+    )
+
+    out = canvas.copy()
+    out[mask > 0] = warped[mask > 0]
+    return out
+
+
 def cylinder(image: np.ndarray, strength: float = 0.35) -> np.ndarray:
     """Wrap the label around a bottle (LP-201).
 
@@ -104,8 +148,8 @@ def glare(
     falloff = falloff * (1.0 + _rng(seed).normal(0, 0.03, falloff.shape))
     falloff = np.clip(falloff, 0.0, 1.0)[..., None]
 
-    白 = np.full_like(image, 255, dtype=np.float32)
-    blended = image.astype(np.float32) * (1 - falloff) + 白 * falloff
+    white = np.full_like(image, 255, dtype=np.float32)
+    blended = image.astype(np.float32) * (1 - falloff) + white * falloff
     return np.clip(blended, 0, 255).astype(np.uint8)
 
 

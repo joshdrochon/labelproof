@@ -27,7 +27,7 @@ def _to_gray(image: np.ndarray) -> np.ndarray:
     return cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
 
 
-def blur_score(image: np.ndarray) -> float:
+def blur_score(image: np.ndarray, mask: np.ndarray | None = None) -> float:
     """Laplacian variance on a log scale.
 
     Log rather than linear because the measure spans four orders of magnitude on real
@@ -40,12 +40,34 @@ def blur_score(image: np.ndarray) -> float:
     Stretching to full range before measuring decouples the two, so "too dark" and "too
     blurry" are reported as the separate problems they are, and each retake reason names
     what the agent actually needs to fix.
+
+    `mask` restricts the measurement to part of the frame, and exists because variance is
+    diluted by flat area. A rotation that expands the canvas adds a wide band of uniform
+    fill, which drops the score even though not one pixel of text got softer — measured
+    on our fixtures as a 0.09 loss for a rotation that a masked measurement scores at
+    0.02. Without the mask the correction pass would keep reverting rotations that were
+    fine. It is also what makes per-region readability (LP-192) possible at all: the
+    warning statement's own legibility, not the whole picture's.
     """
     gray = _to_gray(image).astype(np.float32)
-    low, high = float(gray.min()), float(gray.max())
+
+    selection: np.ndarray | None = None
+    if mask is not None:
+        # Erode first: the Laplacian straddles the mask edge and would read the step
+        # between real content and fill as detail.
+        eroded = cv2.erode((mask > 0).astype(np.uint8), np.ones((5, 5), np.uint8))
+        selection = eroded > 0
+        if not selection.any():
+            return 0.0
+        low, high = float(gray[selection].min()), float(gray[selection].max())
+    else:
+        low, high = float(gray.min()), float(gray.max())
+
     if high - low > 1.0:
-        gray = (gray - low) * (255.0 / (high - low))
-    variance = float(cv2.Laplacian(gray.astype(np.uint8), cv2.CV_64F).var())
+        gray = np.clip((gray - low) * (255.0 / (high - low)), 0.0, 255.0)
+
+    laplacian = cv2.Laplacian(gray.astype(np.uint8), cv2.CV_64F)
+    variance = float(laplacian[selection].var() if selection is not None else laplacian.var())
     if variance <= T.BLUR_HOPELESS_VARIANCE:
         return 0.0
     span = np.log10(T.SHARP_LAPLACIAN_VARIANCE / T.BLUR_HOPELESS_VARIANCE)
@@ -83,22 +105,14 @@ def glare_score(image: np.ndarray) -> float:
 def skew_degrees(image: np.ndarray) -> float:
     """Dominant text-line angle, in degrees off horizontal.
 
-    Hough over detected edges. Returns 0.0 when no dominant orientation is found, which
-    is the honest answer for an image with no strong lines — not a claim of squareness.
+    Delegates to `deskew.estimate_skew` so the number reported to the agent and the number
+    the correction pass acts on are the same number. Two implementations would drift, and
+    a quality report that disagreed with what preprocessing actually did would be worse
+    than no report at all.
     """
-    gray = _to_gray(image)
-    edges = cv2.Canny(gray, 50, 150, apertureSize=3)
-    lines = cv2.HoughLines(edges, 1, np.pi / 180, threshold=200)
-    if lines is None:
-        return 0.0
+    from api.pipeline.deskew import estimate_skew
 
-    angles: list[float] = []
-    for line in lines[:60]:
-        theta = float(line[0][1])
-        degrees = np.degrees(theta) - 90.0
-        if -45.0 <= degrees <= 45.0:
-            angles.append(degrees)
-    return round(float(np.median(angles)), 2) if angles else 0.0
+    return estimate_skew(image)
 
 
 def assess(image: np.ndarray) -> ImageQuality:
