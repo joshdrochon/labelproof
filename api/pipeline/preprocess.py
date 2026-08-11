@@ -33,7 +33,7 @@ from dataclasses import dataclass, field
 import cv2
 import numpy as np
 
-from api.models import ImageQuality
+from api.models import BoundingBox, ImageQuality
 from api.pipeline import deskew as deskew_mod
 from api.pipeline import quality as quality_mod
 
@@ -79,7 +79,20 @@ class Preprocessed:
     exposure_normalized: bool = False
     glare_enhanced: bool = False
     glare_fraction: float = 0.0
+    geometry: deskew_mod.Deskewed | None = None
+    """The geometric pass, kept so callers can follow their coordinates through it."""
+
     notes: list[str] = field(default_factory=list)
+
+    def map_box(self, box: BoundingBox) -> BoundingBox:
+        """Carry a box from the uploaded frame into the preprocessed one.
+
+        Only geometry moves pixels; lifting exposure and recovering glare change values in
+        place. So this is the deskew pass's mapping and nothing else, and it is the
+        difference between an evidence box that points at the government warning and one
+        that points at the blank stock beside it.
+        """
+        return self.geometry.map_box(box) if self.geometry else box
 
     @property
     def changed(self) -> bool:
@@ -211,5 +224,6 @@ def preprocess(image: np.ndarray, *, allow_perspective: bool = True) -> Preproce
         exposure_normalized=exposure_normalized,
         glare_enhanced=glare_enhanced,
         glare_fraction=round(fraction, 4),
+        geometry=geometry,
         notes=notes,
     )

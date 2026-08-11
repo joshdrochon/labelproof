@@ -110,7 +110,7 @@ def measure() -> Report:
             )
             continue
 
-        cropped = deskew.rectify(image, quad)
+        cropped, _ = deskew.rectify(image, quad)
         report.measurements.append(
             Measurement(
                 condition=condition.name,

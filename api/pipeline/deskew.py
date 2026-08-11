@@ -37,6 +37,7 @@ from dataclasses import dataclass
 import cv2
 import numpy as np
 
+from api.models import BoundingBox
 from api.rules import thresholds as T
 
 #: Hough accumulator votes required, as a fraction of the image's long edge. Relative
@@ -79,10 +80,57 @@ class Deskewed:
     rotation_deg: float = 0.0
     perspective_applied: bool = False
     note: str = "no correction needed"
+    transform: np.ndarray | None = None
+    """3x3 homography from input pixels to output pixels, or None when nothing moved.
+
+    Carried because a correction that changes geometry silently invalidates every
+    coordinate anyone already holds. BUILD.md §6 handles that for evidence boxes by
+    declaring them normalized against the *preprocessed* image — which works only as long
+    as nothing ever needs to go the other way. Anything holding a box in the original
+    frame needs this to follow the pixels, and without it the drift is invisible: the box
+    still looks plausible, it just points at the wrong part of the label."""
+
+    source_size: tuple[int, int] = (0, 0)
+    """(height, width) of the image this pass was handed."""
 
     @property
     def applied(self) -> bool:
         return self.perspective_applied or self.rotation_deg != 0.0
+
+    def map_box(self, box: BoundingBox) -> BoundingBox:
+        """Carry a normalized box from the original frame into the corrected one.
+
+        Returns the axis-aligned bounds of the transformed quadrilateral, which is the
+        honest answer: a rectangle photographed off-axis is not a rectangle any more, and
+        the smallest box that still contains all of it is the only one guaranteed not to
+        clip evidence. It grows rather than shrinks, and growing is the safe direction —
+        a box that lost part of the government warning would report it as legible on the
+        strength of the half we could still see.
+        """
+        if self.transform is None or not self.source_size[0]:
+            return box
+
+        h, w = self.source_size
+        corners = np.array(
+            [
+                [box.x0 * w, box.y0 * h, 1.0],
+                [box.x1 * w, box.y0 * h, 1.0],
+                [box.x1 * w, box.y1 * h, 1.0],
+                [box.x0 * w, box.y1 * h, 1.0],
+            ],
+            dtype=np.float64,
+        )
+        moved = corners @ np.asarray(self.transform, dtype=np.float64).T
+        denominator = np.where(np.abs(moved[:, 2]) < 1e-9, 1e-9, moved[:, 2])
+        xs, ys = moved[:, 0] / denominator, moved[:, 1] / denominator
+
+        out_h, out_w = self.image.shape[:2]
+        return BoundingBox(
+            x0=float(np.clip(xs.min() / out_w, 0.0, 1.0)),
+            y0=float(np.clip(ys.min() / out_h, 0.0, 1.0)),
+            x1=float(np.clip(xs.max() / out_w, 0.0, 1.0)),
+            y1=float(np.clip(ys.max() / out_h, 0.0, 1.0)),
+        )
 
 
 def _to_gray(image: np.ndarray) -> np.ndarray:
@@ -267,8 +315,8 @@ def ink_outside(image: np.ndarray, quad: np.ndarray) -> float:
     return (total - inside) / total
 
 
-def rectify(image: np.ndarray, quad: np.ndarray) -> np.ndarray:
-    """Warp the quadrilateral back to a rectangle.
+def rectify(image: np.ndarray, quad: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Warp the quadrilateral back to a rectangle. Returns the image and its homography.
 
     Output size comes from the longest opposing edges, so the rectified label keeps the
     resolution of its least-foreshortened side rather than averaging detail away.
@@ -283,10 +331,11 @@ def rectify(image: np.ndarray, quad: np.ndarray) -> np.ndarray:
         dtype=np.float32,
     )
     matrix = cv2.getPerspectiveTransform(order_corners(quad), destination)
-    return cv2.warpPerspective(
+    warped = cv2.warpPerspective(
         image, matrix, (width, height), flags=cv2.INTER_CUBIC,
         borderMode=cv2.BORDER_REPLICATE,
     )
+    return warped, np.asarray(matrix, dtype=np.float64)
 
 
 # --------------------------------------------------------------------------------------
@@ -310,6 +359,7 @@ def correct(image: np.ndarray, *, allow_perspective: bool = True) -> Deskewed:
     working = image
     notes: list[str] = []
     perspective_applied = False
+    transform: np.ndarray | None = None
 
     if allow_perspective:
         quad = find_label_quad(working)
@@ -318,9 +368,10 @@ def correct(image: np.ndarray, *, allow_perspective: bool = True) -> Deskewed:
         elif ink_outside(working, quad) > _MAX_INK_OUTSIDE_QUAD:
             notes.append("label boundary would have cropped text — rectification refused")
         else:
-            candidate = rectify(working, quad)
+            candidate, homography = rectify(working, quad)
             if _sharpness(candidate) >= _sharpness(working) - _MAX_BLUR_SCORE_LOSS:
                 working, perspective_applied = candidate, True
+                transform = homography
                 notes.append("perspective rectified from the label boundary")
             else:
                 notes.append("rectification would have blurred the text — reverted")
@@ -336,6 +387,9 @@ def correct(image: np.ndarray, *, allow_perspective: bool = True) -> Deskewed:
             candidate, content_mask(working, skew)
         ) >= _sharpness(working) - _MAX_BLUR_SCORE_LOSS
         if improved and kept_sharp:
+            affine, _, _ = _rotation_matrix(working, skew)
+            spin = np.vstack([np.asarray(affine, dtype=np.float64), [0.0, 0.0, 1.0]])
+            transform = spin if transform is None else spin @ transform
             working, rotation = candidate, skew
             notes.append(f"rotated {skew:+.2f}° to level the text")
         else:
@@ -346,4 +400,6 @@ def correct(image: np.ndarray, *, allow_perspective: bool = True) -> Deskewed:
         rotation_deg=rotation,
         perspective_applied=perspective_applied,
         note="; ".join(notes) if notes else "no correction needed",
+        transform=transform,
+        source_size=(image.shape[0], image.shape[1]),
     )

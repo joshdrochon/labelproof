@@ -12,13 +12,14 @@ glare, which is exactly the regression worth catching.
 
 import hashlib
 import json
+import re
 from pathlib import Path
 from unittest import mock
 
 import numpy as np
 import pytest
 
-from api.models import Application, FieldName, Verdict
+from api.models import Application, BoundingBox, FieldName, Verdict
 from api.pipeline import deskew, limitations, preprocess, quality
 from api.provider.base import ImageInput
 from api.provider.fake import SpecBackedProvider
@@ -50,7 +51,27 @@ def clean(spec: LabelSpec) -> np.ndarray:
     return np.array(render(spec))
 
 
-def run(spec: LabelSpec, image: np.ndarray):  # type: ignore[no-untyped-def]
+def bands(
+    image: np.ndarray,
+    processed: preprocess.Preprocessed,
+    condition: degrade.Condition | None = None,
+) -> dict[FieldName, BoundingBox]:
+    """Field bands carried into the frame the region scorer will read.
+
+    The same two-hop mapping the harness uses, and for the same reason: bands measured on
+    the undegraded render do not describe a rotated or rectified image, and reading the
+    wrong rows is a way to be green about nothing.
+    """
+    if condition is not None:
+        return robustness_eval.bands_for(condition, image.shape, processed)
+    return {name: processed.map_box(band) for name, band in FIELD_BANDS.items()}
+
+
+def run(  # type: ignore[no-untyped-def]
+    spec: LabelSpec,
+    image: np.ndarray,
+    condition: degrade.Condition | None = None,
+):
     """Verify one degraded image, with legibility decided by the pixels themselves.
 
     `illegible_regions` reads the degraded image and returns the fields nobody could see.
@@ -59,7 +80,9 @@ def run(spec: LabelSpec, image: np.ndarray):  # type: ignore[no-untyped-def]
     damage, the extractor is told the field is fine and the assertion fails.
     """
     processed = preprocess.preprocess(image)
-    illegible = quality.illegible_regions(processed.image, FIELD_BANDS)
+    illegible = quality.illegible_regions(
+        processed.image, bands(image, processed, condition)
+    )
     provider = SpecBackedProvider(spec, illegible=illegible)
     application = Application.model_validate(spec.application())
     images = [ImageInput(index=0, data=b"", role="single")]
@@ -142,7 +165,7 @@ def test_a_clean_label_is_the_control(spec: LabelSpec, clean: np.ndarray) -> Non
 # --- the robustness set, condition by condition -------------------------------------------
 
 def apply_and_run(spec: LabelSpec, clean: np.ndarray, condition: degrade.Condition):  # type: ignore[no-untyped-def]
-    return run(spec, condition.apply(clean))
+    return run(spec, condition.apply(clean), condition)
 
 
 @pytest.mark.parametrize("condition", degrade.CONDITIONS, ids=lambda c: c.name)
@@ -604,56 +627,76 @@ def compression() -> compression_sweep.Sweep:
         return compression_sweep.sweep()
 
 
-def test_the_sweep_covers_the_qualities_the_ticket_names(
-    compression: compression_sweep.Sweep,
-) -> None:
+def test_the_sweep_covers_the_qualities_the_ticket_names() -> None:
     """q95/q85/q75, plus the shipped setting and a lossless control. Without the control
-    a small loss and a large one are indistinguishable — there is nothing to be a loss
-    *from*."""
+    there is nothing for a fidelity number to be measured against."""
     for level in (95, 85, 75, 100):
         assert level in compression_sweep.QUALITIES
 
 
-def test_compression_is_measured_on_the_warning_region(
-    compression: compression_sweep.Sweep,
+def test_fidelity_is_measured_against_the_original_not_the_compressed_image(
+    clean: np.ndarray,
 ) -> None:
-    """Not on the whole image. The warning is the smallest type on the label, so a
-    whole-image measure averages it against a 72-point brand name and reports nothing."""
-    band = FIELD_BANDS[FieldName.GOVERNMENT_WARNING]
-    clean = np.array(render(by_name(degrade.BASE_FIXTURE)))
-    assert compression_sweep.warning_legibility(clean) == quality.assess_region(clean, band).blur
+    """The error the previous proxy made. Scoring the compressed image alone with a
+    gradient measure reads encoder ringing as detail, which rated JPEG q60 above its own
+    uncompressed source and produced a 'JPEG is gentler' conclusion that was an artefact.
+    SSIM against the original cannot do that: invented edges count against it."""
+    crushed, _ = compression_sweep.encode_roundtrip(clean, "JPEG", 20)
+    assert compression_sweep.ssim(clean, crushed) < 1.0
+    assert compression_sweep.ssim(clean, clean) == pytest.approx(1.0, abs=1e-6)
 
 
 def test_harder_compression_costs_the_warning_more(
     compression: compression_sweep.Sweep,
 ) -> None:
-    """A sweep where the numbers did not move with the setting would be measuring
-    nothing."""
+    """A sweep whose numbers did not move with the setting would be measuring nothing."""
     webp = {level.quality: level for level in compression.for_format("WEBP")}
-    assert webp[85].warning_loss > webp[95].warning_loss
+    assert webp[85].worst_fidelity < webp[100].worst_fidelity
 
 
-def test_the_shipped_setting_is_inside_the_measured_safe_range(
+def test_the_shipped_client_setting_matches_the_sweep(
     compression: compression_sweep.Sweep,
 ) -> None:
-    """web/src/api.ts pins WEBP quality 0.95. This is the evidence behind that number, and
-    it goes red if the measurement ever stops supporting it."""
-    shipped = next(
-        level for level in compression.for_format("WEBP") if level.quality == 95
+    """The guard that survives a merge. Nothing else ties web/src/api.ts to the evidence
+    it cites, so a resolution that reverts the constant would leave the suite green while
+    the shipped client quietly went back to damaging the warning."""
+    source = (Path(__file__).resolve().parents[1] / "web" / "src" / "api.ts").read_text()
+    match = re.search(r"const WEBP_Q = ([0-9.]+);", source)
+    assert match, "WEBP_Q is not where this test expects it"
+
+    shipped = round(float(match.group(1)) * 100)
+    recommended = compression.recommended("WEBP")
+    assert recommended is not None
+    assert shipped == recommended.quality, (
+        f"web/src/api.ts ships WebP q{shipped} but the sweep recommends "
+        f"q{recommended.quality}"
     )
-    assert shipped.safe
-    assert shipped.false_passes == 0
 
 
 def test_the_previous_setting_was_measurably_worse(
     compression: compression_sweep.Sweep,
 ) -> None:
-    """0.90 was the shipped value before this sweep existed. Recording *why* it moved
-    matters more than the move: the number was picked, and then it was measured."""
+    """0.90 shipped before anyone measured it. Recording why it moved matters more than
+    the move."""
     previous = next(
         level for level in compression.for_format("WEBP") if level.quality == 90
     )
     assert previous.lossy_for_the_warning
+
+
+def test_a_level_is_judged_on_its_worst_condition_not_its_average() -> None:
+    """An encoder kind to thirteen fixtures and ruinous on the fourteenth has destroyed a
+    government warning, and an average hides exactly that."""
+    level = compression_sweep.Level(
+        fmt="WEBP",
+        quality=50,
+        median_bytes=1,
+        warning_fidelity=0.999,
+        worst_fidelity=0.5,
+        false_passes=0,
+        false_flags=0,
+    )
+    assert level.lossy_for_the_warning and not level.safe
 
 
 def test_a_level_with_a_false_pass_is_never_safe() -> None:
@@ -661,37 +704,70 @@ def test_a_level_with_a_false_pass_is_never_safe() -> None:
         fmt="WEBP",
         quality=10,
         median_bytes=1,
-        warning_score=0.9,
-        warning_loss=0.0,
+        warning_fidelity=1.0,
+        worst_fidelity=1.0,
         false_passes=1,
         false_flags=0,
     )
     assert not level.safe
 
 
-def test_the_recommendation_steps_back_from_the_edge(
+def test_the_recommendation_survives_a_non_monotone_column() -> None:
+    """Real encoders are not monotone. The previous version assumed the safe levels ran
+    contiguously from the top and used a bare next(), which raised StopIteration out of
+    main the moment they did not."""
+    sweep = compression_sweep.Sweep()
+    for quality_level, worst in ((100, 0.999), (95, 0.90), (90, 0.999), (85, 0.5)):
+        sweep.levels.append(
+            compression_sweep.Level(
+                fmt="WEBP",
+                quality=quality_level,
+                median_bytes=1,
+                warning_fidelity=worst,
+                worst_fidelity=worst,
+                false_passes=0,
+                false_flags=0,
+            )
+        )
+    assert sweep.recommended("WEBP") is not None
+
+
+def test_nothing_safe_returns_none_rather_than_raising() -> None:
+    sweep = compression_sweep.Sweep()
+    sweep.levels.append(
+        compression_sweep.Level(
+            fmt="WEBP",
+            quality=90,
+            median_bytes=1,
+            warning_fidelity=0.1,
+            worst_fidelity=0.1,
+            false_passes=0,
+            false_flags=0,
+        )
+    )
+    assert sweep.recommended("WEBP") is None
+
+
+def test_formats_are_compared_at_equal_bytes(
     compression: compression_sweep.Sweep,
 ) -> None:
-    """Real photographs carry sensor noise, which compresses worse. Sitting on the
-    boundary of a synthetic measurement and calling it calibrated is how the warning ends
-    up unreadable on the one upload that mattered."""
-    recommended = compression.recommended("WEBP")
-    cheapest_safe = min(
-        (level for level in compression.for_format("WEBP") if level.safe),
-        key=lambda level: level.quality,
-        default=None,
-    )
-    assert recommended and cheapest_safe
-    assert recommended.quality >= cheapest_safe.quality
+    """WebP q90 and JPEG q90 are different scales sharing a name. The only comparison that
+    answers "which format should we ship" is at the same cost."""
+    text = compression_sweep.render(compression)
+    assert "equal budget" in text
+    assert "different scales sharing a name" in text
 
 
 def test_the_report_does_not_call_the_proxy_accuracy(
     compression: compression_sweep.Sweep,
 ) -> None:
-    """A proxy named as a proxy is useful. A proxy reported as accuracy is a lie with a
+    """A fidelity proxy named as one is useful. Reported as accuracy it is a lie with a
     number attached — there is no model in this harness."""
     text = compression_sweep.render(compression)
-    assert "not model accuracy" in text
+    assert "not character accuracy" in text or "not character accuracy" in (
+        compression_sweep.__doc__ or ""
+    )
+    assert "fidelity" in text.lower()
 
 
 def test_the_sweep_runs_as_a_command() -> None:

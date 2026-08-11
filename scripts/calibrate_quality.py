@@ -67,12 +67,12 @@ SWEEPS: dict[str, Knob] = {
         effect="raising it calls more images degraded, discounting confidence sooner",
     ),
     "SHARP_GRADIENT_VARIANCE": Knob(
-        (2000, 4000, 6000, 8000, 12000, 16000),
+        (600, 900, 1200, 1600, 2200, 3000),
         stricter="higher",
         effect="raising it means less is treated as fully sharp, so blur scores drop",
     ),
     "BLUR_HOPELESS_VARIANCE": Knob(
-        (30, 60, 90, 120, 180, 240, 400),
+        (30, 60, 90, 110, 140, 180, 240),
         stricter="higher",
         effect="raising it means more images score zero blur and get pre-gated",
     ),

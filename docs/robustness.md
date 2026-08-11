@@ -31,10 +31,14 @@ a plain-language retake reason and zero model calls.
 | `tc14_blur_mild` | TC-14 | `readable` | 6 verified, 0 unreadable | The lower edge of the blur scale. A soft photograph is still worth reading, and rejecting it would be the tool making the agent slower — which is the complaint, not the fix. |
 | `tc14_blur_hopeless` | TC-14 | `pregated` | pre-gated, no model call | TC-14 proper. Nothing here can be read, so the obligation is a retake reason and zero model calls. The dangerous failure is not rejecting it — it is an extractor confidently returning plausible field values from mush. |
 | `tc14_blur_motion` | TC-14 | `pregated` | pre-gated, no model call | Directional, unlike a Gaussian, and the commoner defect in a hand-held shot. A defocus-only set would leave the blur measure untested against the blur people actually produce. |
+| `tc14_shake_diagonal_30` | TC-14 | `pregated` | pre-gated, no model call | A near-axis smear is the easy case. These three exist because a measure built from image axes is blind between them: at 45° both Sobel axes lose the same energy, neither is the destroyed one, and an unreadable label came back 'slightly soft'. A set whose only shake fixture sat at 12° could never have shown that, and neither could the calibration table built on it. |
+| `tc14_shake_diagonal_45` | TC-14 | `pregated` | pre-gated, no model call | The exact worst case for an axis-aligned measure, and the reason the blur score samples eight orientations rather than two. Rendered, the government warning is diagonal hatching. |
+| `tc14_shake_diagonal_60` | TC-14 | `pregated` | pre-gated, no model call | The far side of 45°, so the blind spot is bracketed rather than sampled once. |
+| `tc14_blur_noisy` | TC-14 | `pregated` | pre-gated, no model call | Noise is broadband, so it lifts every direction of a gradient measure at once. Before the measure was pre-smoothed, this image scored ten times its clean equivalent and was sent to the model — an out-of-focus photo taken in a dim bar, which is exactly the population this set represents. |
 | `lp201_cylinder` | LP-201 | `readable` | 6 verified, 0 unreadable | Curvature is not a projective distortion, so the four-point transform cannot undo it and this fixture exists to prove we do not pretend otherwise. The obligation is that the label stays legible and the pass reports no correction — an audit trail that says what did not happen. |
 | `lp201_cylinder_angled` | LP-201 | `readable` | 6 verified, 0 unreadable | The realistic combination: nobody photographs a bottle both curved and perfectly square to the camera. Rectification has a boundary to find here, and it must not make the curvature worse in the process. |
 
-Currently 15/15 conditions meet their obligation, with 0 false passes and 0 false flags.
+Currently 19/19 conditions meet their obligation, with 0 false passes and 0 false flags.
 
 ## Boundaries
 

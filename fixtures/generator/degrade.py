@@ -58,6 +58,31 @@ def perspective(image: np.ndarray, degrees: float) -> np.ndarray:
     )
 
 
+def on_surface_matrix(
+    shape: tuple[int, ...], *, degrees: float = 0.0, margin: float = 0.15
+) -> np.ndarray:
+    """The homography `on_surface` applies, so a caller can follow coordinates through it.
+
+    Kept beside the degradation rather than re-derived by the caller: a fixture and the
+    mapping of a region onto that fixture disagreeing is a silent way to test the wrong
+    pixels and call it a pass.
+    """
+    h, w = shape[:2]
+    pad_x, pad_y = int(w * margin), int(h * margin)
+    shift = np.tan(np.radians(min(abs(degrees), 60.0))) * h * 0.25
+    source = np.array([[0, 0], [w, 0], [w, h], [0, h]], dtype=np.float32)
+    if degrees >= 0:
+        dest = np.array(
+            [[shift, 0], [w, 0], [w, h], [shift * 0.4, h]], dtype=np.float32
+        )
+    else:
+        dest = np.array(
+            [[0, 0], [w - shift, 0], [w - shift * 0.4, h], [0, h]], dtype=np.float32
+        )
+    dest = dest + np.float32([pad_x, pad_y])
+    return np.asarray(cv2.getPerspectiveTransform(source, dest), dtype=np.float64)
+
+
 def on_surface(
     image: np.ndarray,
     *,
@@ -83,15 +108,7 @@ def on_surface(
     canvas = np.full((h + 2 * pad_y, w + 2 * pad_x, 3), surface, dtype=np.uint8)
     height, width = canvas.shape[:2]
 
-    shift = np.tan(np.radians(min(abs(degrees), 60.0))) * h * 0.25
-    source = np.float32([[0, 0], [w, 0], [w, h], [0, h]])
-    if degrees >= 0:
-        dest = np.float32([[shift, 0], [w, 0], [w, h], [shift * 0.4, h]])
-    else:
-        dest = np.float32([[0, 0], [w - shift, 0], [w - shift * 0.4, h], [0, h]])
-    dest = dest + np.float32([pad_x, pad_y])
-
-    matrix = cv2.getPerspectiveTransform(source, dest)
+    matrix = on_surface_matrix(image.shape, degrees=degrees, margin=margin)
     warped = cv2.warpPerspective(image, matrix, (width, height), flags=cv2.INTER_LINEAR)
     mask = cv2.warpPerspective(
         np.full((h, w), 255, np.uint8), matrix, (width, height), flags=cv2.INTER_NEAREST
@@ -141,6 +158,17 @@ def motion_blur(image: np.ndarray, length: int = 25, angle: float = 12.0) -> np.
     total = kernel.sum()
     kernel = kernel / total if total else kernel
     return cv2.filter2D(image, -1, kernel, borderType=cv2.BORDER_REPLICATE)
+
+
+def sensor_noise(image: np.ndarray, *, sigma: float = 8.0, seed: int = 11) -> np.ndarray:
+    """Gaussian sensor noise, as a phone produces at high ISO.
+
+    The degradation nobody thinks to simulate, and the one that broke the blur measure:
+    noise is broadband, so a gradient-based sharpness score reads it as detail in every
+    direction at once. σ 6–15 is ordinary for a hand-held shot in a dim room.
+    """
+    noisy = image.astype(np.float32) + _rng(seed).normal(0, sigma, image.shape)
+    return np.clip(noisy, 0, 255).astype(np.uint8)
 
 
 def dim(image: np.ndarray, factor: float = 0.35) -> np.ndarray:
@@ -234,6 +262,35 @@ class Condition:
 
     def apply(self, image: np.ndarray) -> np.ndarray:
         return apply_preset(image, self.name)
+
+    def geometry(self, shape: tuple[int, ...]) -> np.ndarray | None:
+        """Where this degradation moves pixels to, or None when it moves none.
+
+        Needed because the field bands are measured on the *undegraded* render, so
+        checking a region of a degraded image means carrying the band through the
+        degradation first and through preprocessing second. Skipping the first step is
+        how `tc11_angle_45` came out green while the bands sat over the wrong rows.
+
+        `cylinder` returns None deliberately: the warp compresses columns and leaves rows
+        alone, and every field band is a full-width horizontal strip, so identity is exact
+        for the boxes actually used here. That is a statement about these bands, not about
+        the warp.
+        """
+        match self.name:
+            case "tc11_angle_15":
+                return on_surface_matrix(shape, degrees=15.0)
+            case "tc11_angle_30":
+                return on_surface_matrix(shape, degrees=30.0)
+            case "tc11_angle_45":
+                return on_surface_matrix(shape, degrees=45.0)
+            case "lp201_cylinder_angled":
+                return on_surface_matrix(shape, degrees=20.0)
+            case "tc11_rotate_8":
+                h, w = shape[:2]
+                affine = cv2.getRotationMatrix2D((w / 2, h / 2), 8.0, 1.0)
+                return np.vstack([np.asarray(affine, dtype=np.float64), [0.0, 0.0, 1.0]])
+            case _:
+                return None
 
 
 CONDITIONS: list[Condition] = [
@@ -368,12 +425,55 @@ CONDITIONS: list[Condition] = [
     Condition(
         name="tc14_blur_motion",
         tc="TC-14",
-        description="camera shake — smeared in one direction",
+        description="camera shake, 12° off horizontal",
         expectation="pregated",
         why=(
             "Directional, unlike a Gaussian, and the commoner defect in a hand-held shot. "
             "A defocus-only set would leave the blur measure untested against the blur "
             "people actually produce."
+        ),
+    ),
+    Condition(
+        name="tc14_shake_diagonal_30",
+        tc="TC-14",
+        description="camera shake 30° off horizontal, past reading",
+        expectation="pregated",
+        why=(
+            "A near-axis smear is the easy case. These three exist because a measure built "
+            "from image axes is blind between them: at 45° both Sobel axes lose the same "
+            "energy, neither is the destroyed one, and an unreadable label came back "
+            "'slightly soft'. A set whose only shake fixture sat at 12° could never have "
+            "shown that, and neither could the calibration table built on it."
+        ),
+    ),
+    Condition(
+        name="tc14_shake_diagonal_45",
+        tc="TC-14",
+        description="camera shake 45° off horizontal, past reading",
+        expectation="pregated",
+        why=(
+            "The exact worst case for an axis-aligned measure, and the reason the blur "
+            "score samples eight orientations rather than two. Rendered, the government "
+            "warning is diagonal hatching."
+        ),
+    ),
+    Condition(
+        name="tc14_shake_diagonal_60",
+        tc="TC-14",
+        description="camera shake 60° off horizontal, past reading",
+        expectation="pregated",
+        why="The far side of 45°, so the blind spot is bracketed rather than sampled once.",
+    ),
+    Condition(
+        name="tc14_blur_noisy",
+        tc="TC-14",
+        description="out of focus, with high-ISO sensor noise on top",
+        expectation="pregated",
+        why=(
+            "Noise is broadband, so it lifts every direction of a gradient measure at "
+            "once. Before the measure was pre-smoothed, this image scored ten times its "
+            "clean equivalent and was sent to the model — an out-of-focus photo taken in "
+            "a dim bar, which is exactly the population this set represents."
         ),
     ),
     Condition(
@@ -439,6 +539,14 @@ def apply_preset(image: np.ndarray, preset: str) -> np.ndarray:
             return blur(image, 12.0)
         case "tc14_blur_motion":
             return motion_blur(image)
+        case "tc14_shake_diagonal_30":
+            return motion_blur(image, 51, 30.0)
+        case "tc14_shake_diagonal_45":
+            return motion_blur(image, 51, 45.0)
+        case "tc14_shake_diagonal_60":
+            return motion_blur(image, 51, 60.0)
+        case "tc14_blur_noisy":
+            return sensor_noise(blur(image, 16.0), sigma=8.0)
         case "lp201_cylinder":
             return cylinder(image)
         case "lp201_cylinder_angled":

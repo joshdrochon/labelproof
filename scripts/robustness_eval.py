@@ -39,8 +39,8 @@ from typing import Any
 
 import numpy as np
 
-from api.models import Application, FieldName, Verdict
-from api.pipeline import preprocess, quality
+from api.models import Application, BoundingBox, FieldName, Verdict
+from api.pipeline import deskew, preprocess, quality
 from api.pipeline.limitations import LIMITATIONS
 from api.provider.base import ImageInput
 from api.provider.fake import SpecBackedProvider
@@ -73,6 +73,22 @@ class Outcome:
     glare: float = 0.0
     skew_deg: float = 0.0
     note: str = ""
+    regions_scored: bool = True
+    """False when only whole-image quality could be measured.
+
+    Tier B is the case: `FIELD_BANDS` is the generator's own layout, so applying it to a
+    photograph of a real bottle reads arbitrary rows. An obligation that turns on regions
+    is then *unmeasured*, which is neither met nor failed, and reporting it as either
+    would be inventing a result.
+    """
+
+    @property
+    def region_dependent(self) -> bool:
+        return self.expectation in ("warning_illegible", "readable")
+
+    @property
+    def unmeasured(self) -> bool:
+        return self.region_dependent and not self.regions_scored
 
     @property
     def false_pass(self) -> bool:
@@ -82,6 +98,8 @@ class Outcome:
         a hopeless image that slipped the gate, or a warning under glare that came back
         verified anyway.
         """
+        if self.unmeasured:
+            return False
         match self.expectation:
             case "pregated":
                 return not self.pregated
@@ -93,6 +111,8 @@ class Outcome:
     @property
     def false_flag(self) -> bool:
         """Something legible was treated as illegible."""
+        if self.unmeasured:
+            return False
         match self.expectation:
             case "readable":
                 return self.pregated or bool(self.illegible)
@@ -103,7 +123,8 @@ class Outcome:
 
     @property
     def met(self) -> bool:
-        return not self.false_pass and not self.false_flag
+        """Unmeasured is not met. A row nobody could check does not count as a pass."""
+        return not self.unmeasured and not self.false_pass and not self.false_flag
 
 
 @dataclass
@@ -130,6 +151,51 @@ class Report:
         return not self.false_passes
 
 
+def bands_for(
+    condition: degrade.Condition,
+    degraded_shape: tuple[int, ...],
+    processed: preprocess.Preprocessed,
+) -> dict[FieldName, BoundingBox]:
+    """The field bands, carried into the frame the region scorer will actually read.
+
+    Two hops, and leaving either one out reads the wrong pixels while looking green.
+    The bands were measured on the undegraded render, so first they follow the
+    degradation — `on_surface` composites the label onto a larger canvas, which moves
+    every row. Then they follow preprocessing, because an 8° deskew expands the canvas
+    from 1400x1000 to 1525x1185 and a fixed normalized band lands on different rows
+    afterwards, reading a sliver of one line as blur.
+    """
+    forward = condition.geometry(_base_shape())
+    if forward is None:
+        staged = dict(FIELD_BANDS)
+    else:
+        staged = {
+            name: _apply_homography(band, forward, _base_shape(), degraded_shape)
+            for name, band in FIELD_BANDS.items()
+        }
+    return {name: processed.map_box(band) for name, band in staged.items()}
+
+
+@cache
+def _base_shape() -> tuple[int, ...]:
+    """Shape of the undegraded render — the frame FIELD_BANDS is expressed against."""
+    return np.array(render(by_name(degrade.BASE_FIXTURE))).shape
+
+
+def _apply_homography(
+    box: BoundingBox,
+    matrix: np.ndarray,
+    source_shape: tuple[int, ...],
+    target_shape: tuple[int, ...],
+) -> BoundingBox:
+    """Axis-aligned bounds of a normalized box carried through a homography."""
+    return deskew.Deskewed(
+        image=np.empty(target_shape[:2], dtype=np.uint8),
+        transform=matrix,
+        source_size=(source_shape[0], source_shape[1]),
+    ).map_box(box)
+
+
 def run_condition(spec: LabelSpec, image: np.ndarray, condition: degrade.Condition) -> Outcome:
     processed = preprocess.preprocess(image)
     pregated = quality.should_skip_extraction(processed.quality_before)
@@ -149,7 +215,9 @@ def run_condition(spec: LabelSpec, image: np.ndarray, condition: degrade.Conditi
         # The pre-gate's whole point: no model call, nothing verified, nothing claimed.
         return outcome
 
-    outcome.illegible = quality.illegible_regions(processed.image, FIELD_BANDS)
+    outcome.illegible = quality.illegible_regions(
+        processed.image, bands_for(condition, image.shape, processed)
+    )
     result = verify(
         Application.model_validate(spec.application()),
         [ImageInput(index=0, data=b"", role="single")],
@@ -216,9 +284,11 @@ def evaluate_photos(directory: Path) -> Report:
                 tc="Tier B",
                 expectation=expectations.get(path.name, "unstated"),
                 pregated=pregated,
-                illegible=set()
-                if pregated
-                else quality.illegible_regions(processed.image, FIELD_BANDS),
+                # No per-region scoring on a real photograph. FIELD_BANDS is the
+                # *generator's* layout, and applying it to a photo of a real bottle
+                # measures arbitrary rows and reports the result as if it meant
+                # something. Real evidence regions come from the extractor, per field.
+                regions_scored=False,
                 blur=processed.quality_before.blur,
                 exposure=processed.quality_before.exposure,
                 glare=processed.quality_before.glare,
@@ -248,6 +318,8 @@ def render_table(report: Report) -> str:
             verdict = "FALSE PASS"
         elif o.false_flag:
             verdict = "false flag"
+        elif o.unmeasured:
+            verdict = "UNMEASURED"
         elif o.expectation == "unstated":
             verdict = "measured only"
         else:
@@ -259,7 +331,13 @@ def render_table(report: Report) -> str:
         )
 
     lines.append("")
+    unmeasured = [o for o in report.outcomes if o.unmeasured]
     lines.append(f"Conditions meeting their stated obligation: {report.met}/{len(report.outcomes)}")
+    if unmeasured:
+        lines.append(
+            f"Unmeasured ({len(unmeasured)}) — whole-image quality only, no evidence "
+            f"regions to score against: " + ", ".join(o.condition for o in unmeasured)
+        )
     lines.append(f"False passes (illegible treated as legible): {len(report.false_passes)}")
     lines.append(f"False flags (legible treated as illegible):  {len(report.false_flags)}")
     lines.append("")
@@ -287,6 +365,8 @@ def as_dict(report: Report) -> dict[str, Any]:
                 "expectation": o.expectation,
                 "pregated": o.pregated,
                 "illegible": sorted(f.value for f in o.illegible),
+                "regions_scored": o.regions_scored,
+                "unmeasured": o.unmeasured,
                 "verified": o.verified,
                 "unreadable": o.unreadable,
                 "scores": {

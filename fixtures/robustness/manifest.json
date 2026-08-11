@@ -101,10 +101,42 @@
     {
       "name": "tc14_blur_motion",
       "tc": "TC-14",
-      "description": "camera shake \u2014 smeared in one direction",
+      "description": "camera shake, 12\u00b0 off horizontal",
       "expectation": "pregated",
       "why": "Directional, unlike a Gaussian, and the commoner defect in a hand-held shot. A defocus-only set would leave the blur measure untested against the blur people actually produce.",
       "sha256": "5d3d4e733dcf6017"
+    },
+    {
+      "name": "tc14_shake_diagonal_30",
+      "tc": "TC-14",
+      "description": "camera shake 30\u00b0 off horizontal, past reading",
+      "expectation": "pregated",
+      "why": "A near-axis smear is the easy case. These three exist because a measure built from image axes is blind between them: at 45\u00b0 both Sobel axes lose the same energy, neither is the destroyed one, and an unreadable label came back 'slightly soft'. A set whose only shake fixture sat at 12\u00b0 could never have shown that, and neither could the calibration table built on it.",
+      "sha256": "959e29bc6d43279d"
+    },
+    {
+      "name": "tc14_shake_diagonal_45",
+      "tc": "TC-14",
+      "description": "camera shake 45\u00b0 off horizontal, past reading",
+      "expectation": "pregated",
+      "why": "The exact worst case for an axis-aligned measure, and the reason the blur score samples eight orientations rather than two. Rendered, the government warning is diagonal hatching.",
+      "sha256": "c803d22e0666d7b9"
+    },
+    {
+      "name": "tc14_shake_diagonal_60",
+      "tc": "TC-14",
+      "description": "camera shake 60\u00b0 off horizontal, past reading",
+      "expectation": "pregated",
+      "why": "The far side of 45\u00b0, so the blind spot is bracketed rather than sampled once.",
+      "sha256": "1551f50c741a061d"
+    },
+    {
+      "name": "tc14_blur_noisy",
+      "tc": "TC-14",
+      "description": "out of focus, with high-ISO sensor noise on top",
+      "expectation": "pregated",
+      "why": "Noise is broadband, so it lifts every direction of a gradient measure at once. Before the measure was pre-smoothed, this image scored ten times its clean equivalent and was sent to the model \u2014 an out-of-focus photo taken in a dim bar, which is exactly the population this set represents.",
+      "sha256": "a74e431ead38fbde"
     },
     {
       "name": "lp201_cylinder",

@@ -31,6 +31,19 @@ import numpy as np
 from api.models import BoundingBox, ImageQuality
 from api.rules import thresholds as T
 
+#: Orientations the blur measure samples, in [0, π). Eight, at 22.5°, because a smear is
+#: only visible in the direction it acts along and the worst case has to land near a
+#: sample. Measured on a 51-pixel line PSF swept 0–90°: two axes leaves a worst case of
+#: 131, four gives 67, eight gives 58, twelve also gives 58. Eight is where it stops
+#: paying. θ and θ+π give the same variance, so half the circle is the whole story.
+_ORIENTATIONS: tuple[float, ...] = tuple(np.pi * k / 8 for k in range(8))
+
+#: Gaussian σ applied before differentiating, so broadband sensor noise is not counted as
+#: detail. Without it, an out-of-focus photo at radius 16 scored 56 clean and 556 with
+#: ordinary high-ISO noise — a tenfold inflation straight through the pre-gate. At σ=2 the
+#: pair is 42 and 40.
+_NOISE_PRESMOOTH_SIGMA = 2.0
+
 
 def _to_gray(image: np.ndarray) -> np.ndarray:
     if image.ndim == 2:
@@ -52,28 +65,45 @@ def blur_score(image: np.ndarray, mask: np.ndarray | None = None) -> float:
     problem was the lighting. Stretching to full range first keeps "too dark" and "too
     blurry" as the separate problems they are.
 
-    **The worse of the two axes, not an isotropic operator.** A Laplacian sums both
-    directions, and camera shake only destroys one: a horizontal smear wipes out vertical
-    edges and leaves horizontal ones untouched, so roughly half the energy survives.
-    Measured on the fixtures, that put a 25-pixel motion smear — text nobody could read —
-    at the same Laplacian variance as a defocus of radius 2, which is merely soft. Taking
-    the worse axis reports the direction that was actually destroyed, and camera shake is
-    the likelier defect in a hand-held photograph than a defocus is.
+    **The worst of eight directions, not two axes and not an isotropic operator.** Blur
+    destroys detail along the direction it acts in, so the measure has to be directional.
+    A Laplacian sums every direction at once and misses that entirely: a 25-pixel motion
+    smear scored the same as a defocus of radius 2, which is merely soft.
+
+    Two axes is not enough either, and the reason is worth stating because it is not
+    obvious. `min(var(gx), var(gy))` only sees a smear that happens to lie along an image
+    axis. At 45° both Sobel axes lose the *same* energy, neither is the destroyed one, and
+    the score plateaus no matter how long the smear gets — measured on a true line PSF, a
+    51-pixel smear at 45° scored 422 against a hopeless floor of 120, while the same smear
+    at 0° scored 49. An unreadable label was passed to the model with "the photo is
+    slightly soft". Fixing the isotropic blind spot by going to two axes had moved it
+    rather than removed it.
+
+    Eight orientations at 22.5° closes it: worst case over every angle drops from 131 to
+    58. Twelve orientations measured no better than eight, so eight is where this stops
+    paying. The directional derivative along θ is `gx·cosθ + gy·sinθ`, so all eight come
+    from one pair of Sobel passes.
+
+    **Pre-smoothed at σ=2 before differentiating**, which is what stops sensor noise
+    reading as detail. Noise is broadband, so it lifts every direction at once and the
+    minimum with it: an out-of-focus photo at radius 16 scored 56 clean and 556 with
+    ordinary high-ISO noise on top — a tenfold inflation, straight through the pre-gate.
+    After pre-smoothing the same pair is 42 and 40. The cost is range at the sharp end
+    (a clean label drops from 10825 to 1255), which the log scale absorbs.
 
     `mask` restricts the measurement to part of the frame, and exists because variance is
     diluted by flat area. A rotation that expands the canvas adds a wide band of uniform
     fill, which drops the score even though not one pixel of text got softer — measured
     as a 0.09 loss for a rotation a masked measurement scores at 0.02. Without it the
-    correction pass kept reverting rotations that were fine. It is also what makes
-    per-region readability (LP-192) work: the warning's own legibility, not the picture's.
+    correction pass kept reverting rotations that were fine.
     """
     gray = _to_gray(image).astype(np.float32)
 
     selection: np.ndarray | None = None
     if mask is not None:
-        # Erode first: the gradient straddles the mask edge and would read the step
-        # between real content and fill as detail.
-        eroded = cv2.erode((mask > 0).astype(np.uint8), np.ones((5, 5), np.uint8))
+        # Eroded by enough to clear both the pre-smoothing kernel and the Sobel, so the
+        # step between real content and fill is never read as detail.
+        eroded = cv2.erode((mask > 0).astype(np.uint8), np.ones((11, 11), np.uint8))
         selection = eroded > 0
         if not selection.any():
             return 0.0
@@ -84,11 +114,18 @@ def blur_score(image: np.ndarray, mask: np.ndarray | None = None) -> float:
     if high - low > 1.0:
         gray = np.clip((gray - low) * (255.0 / (high - low)), 0.0, 255.0)
 
-    horizontal = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=3)
-    vertical = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3)
+    gray = np.asarray(
+        cv2.GaussianBlur(gray, (0, 0), _NOISE_PRESMOOTH_SIGMA), dtype=np.float32
+    )
+    gx = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=3)
+    gy = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3)
     if selection is not None:
-        horizontal, vertical = horizontal[selection], vertical[selection]
-    variance = min(float(horizontal.var()), float(vertical.var()))
+        gx, gy = gx[selection], gy[selection]
+
+    variance = min(
+        float((gx * np.cos(theta) + gy * np.sin(theta)).var())
+        for theta in _ORIENTATIONS
+    )
 
     if variance <= T.BLUR_HOPELESS_VARIANCE:
         return 0.0

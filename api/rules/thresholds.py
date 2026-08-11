@@ -47,24 +47,34 @@ ESCALATION_TRIGGER: Final[float] = 0.60
 # The rule it exists to enforce: *a threshold change that reduces flags by letting a bad
 # label through is a regression, not an improvement.*
 #
-# Recorded from the run against the 15-condition robustness set. "Margin" is how many
+# Recorded from the run against the 19-condition robustness set. "Margin" is how many
 # sweep steps the value sits from the nearest level that produces a false pass:
 #
-#     HOPELESS                   0.20    clean band 0.15–0.40    margin 2
-#     DEGRADED                   0.45    clean band 0.30–0.70    margin 8 (no false pass in range)
-#     SHARP_GRADIENT_VARIANCE    6000    clean band 2000–16000   margin 6 (no false pass in range)
-#     BLUR_HOPELESS_VARIANCE      120    clean band 90–400       margin 2
-#     EXPOSURE_FLOOR               90    clean band 50–160       margin 6 (no false pass in range)
+#     HOPELESS                   0.20    clean band 0.10–0.25    margin 3
+#     DEGRADED                   0.45    clean band 0.30–0.70    margin 8 (none in range)
+#     SHARP_GRADIENT_VARIANCE    1200    clean band 600–1600     margin 6 (none in range)
+#     BLUR_HOPELESS_VARIANCE      110    clean band 60–110       margin 3
+#     EXPOSURE_FLOOR               90    clean band 50–160       margin 6 (none in range)
 #     GLARE_SATURATION_FRACTION  0.25    clean band 0.10–0.35    margin 2
-#     MIN_LONG_EDGE_PX           1200    clean band 600–2000     margin 5 (no false pass in range)
+#     MIN_LONG_EDGE_PX           1200    clean band 600–2000     margin 5 (none in range)
 #
-# Several bands are wide because the generated set is coarse, not because the thresholds
-# are robust. A wide band on synthetic fixtures is an absence of evidence, not evidence of
-# safety — the sweep exists so that distinction stays visible.
+# **How much weaker this is than it looks, specifically.** "Calibrated against rendered
+# fixtures" is too vague to act on, so here is what is actually missing:
 #
-# **Still calibrated against rendered fixtures, not photographs.** Real optics differ and
-# this is the most likely place for the pipeline to be wrong. Re-run the sweep with
-# `--photos` when Tier B lands; that run decides these values (LP-292).
+# 1. *The false-pass column is computed over 9 of the 19 conditions.* A condition whose
+#    obligation is `readable` has nothing illegible to miss, so it can only ever produce a
+#    false flag. Only the eight `pregated` cases and the one `warning_illegible` case can
+#    move the column that decides these values.
+# 2. *Rendered labels have no sensor noise*, and noise is what broke the previous blur
+#    measure — it inflated an unreadable photo tenfold and put it through the gate. There
+#    is now one noisy fixture, built by adding Gaussian noise, which is not the same thing
+#    as a real sensor at high ISO.
+# 3. *A band being wide is not the same as a threshold being robust.* DEGRADED, EXPOSURE
+#    FLOOR and MIN_LONG_EDGE_PX show no false pass anywhere in range, which means this set
+#    does not exercise them, not that they are safe.
+#
+# Re-run the sweep with `--photos` when Tier B lands; that run decides these values
+# (LP-292).
 
 #: Below this on any dimension, the image is hopeless: return Unreadable with a retake
 #: reason and make ZERO model calls (LP-321). The pre-gate can only ever spend less and
@@ -75,23 +85,23 @@ HOPELESS: Final[float] = 0.20
 #: suspect and confidence should be discounted.
 DEGRADED: Final[float] = 0.45
 
-#: Edge-gradient variance in the worse of the two axes, treated as fully sharp. Scoring is
-#: LOGARITHMIC between the two bounds below, because the measure spans four orders of
-#: magnitude on real content. Measured on the robustness set: a sharp rendered label sits
-#: near 10800, a defocus of radius 2 near 2300, radius 6 near 430, radius 12 near 114, and
-#: a 25-pixel motion smear near 180.
+#: Directional edge-gradient variance, minimised over eight orientations and measured
+#: after a σ=2 pre-smooth, treated as fully sharp. Scoring is LOGARITHMIC between the two
+#: bounds below because the measure spans two and a half decades on real content.
 #:
-#: The worse *axis* rather than an isotropic Laplacian, because camera shake destroys one
-#: direction and leaves the other intact — the isotropic measure scored a smear nobody
-#: could read the same as a photograph that was merely soft.
+#: Measured on the robustness set at this operator: clean 1255, defocus radius 2 at 926,
+#: radius 6 at 297, radius 12 at 87, radius 16 at 42. A 51-pixel motion smear lands
+#: between 24 and 58 depending on angle, and a 25-pixel smear between 77 and 147.
 #:
-#: Calibrated against rendered fixtures, not photographs. `scripts/calibrate_quality.py`
-#: retunes them against Tier B and reports what each change does to false passes.
-SHARP_GRADIENT_VARIANCE: Final[float] = 6000.0
+#: Set to 1200 rather than 1255 so a *dark but sharp* label still scores a full 1.0 — it
+#: measures 1236, and the whole point of normalising contrast away first is that "too
+#: dark" and "too blurry" stay separate problems.
+SHARP_GRADIENT_VARIANCE: Final[float] = 1200.0
 
-#: At or below this, treated as fully blurred. Set between the radius-12 defocus (114) and
-#: the 25-pixel motion smear (178), both of which are past reading.
-BLUR_HOPELESS_VARIANCE: Final[float] = 120.0
+#: At or below this, treated as fully blurred. Sits above the radius-12 defocus (87) and
+#: above every 51-pixel motion smear at every angle (24–58), both of which are past
+#: reading, and below the radius-6 defocus (297) which is merely degraded.
+BLUR_HOPELESS_VARIANCE: Final[float] = 110.0
 
 #: Fraction of pixels at or near saturation before glare is considered total.
 GLARE_SATURATION_FRACTION: Final[float] = 0.25
