@@ -11,9 +11,25 @@ under a second, no held connection. Everything else is fetched afterwards.
 not come back numbered, with the column named. Three bad rows out of 300 must not send an
 agent back to processing them one at a time (TC-20).
 
+**Nothing is held in memory.** A real batch is 300 applications and roughly 600
+photographs — over a gigabyte. Every part is copied to staging a chunk at a time, the
+per-file and per-job caps are checked on the chunk that crosses them, and the files an
+item needs are renamed into the job directory rather than read out and written back. The
+first version built `list[(name, bytes)]` and checked the total afterwards, which made
+peak memory a multiple of the upload.
+
+**What bounds memory here is not what bounds disk.** By the time this module runs, the
+body is already on disk: FastAPI resolves `list[UploadFile]` as a dependency, so
+Starlette's multipart parser has drained the socket into spooled temp files before the
+route function starts. The caps below therefore run against local files, not against the
+wire, and they bound *residency* only. Disk is bounded upstream by `api.main._WireLimit`,
+which counts bytes in `receive`. Each part's temp file is closed as soon as it has been
+staged, so the two copies do not both peak.
+
 **Archive contents are hostile.** A zip can name `../../etc/passwd`, expand a kilobyte
 into a gigabyte, or carry ten thousand entries. Names are reduced to their last segment,
-every entry is size-capped before it is read, and the entry count is capped too (SEC-5).
+every entry is size-capped before it is read *and* bounded again as it is decompressed —
+the declared size is the attacker's number — and the entry count is capped too (SEC-5).
 
 **The reader never waits on the writer.** `GET /batch/{id}` reads whatever has landed —
 finished items are readable while the rest of the job runs, which is the entire point of
@@ -22,6 +38,7 @@ BATCH-5 and the only thing that beats one-at-a-time end to end.
 
 from __future__ import annotations
 
+import contextlib
 import csv
 import io
 import zipfile
@@ -32,6 +49,7 @@ from typing import Annotated, cast
 
 from fastapi import APIRouter, FastAPI, File, Request, UploadFile
 from fastapi.responses import PlainTextResponse, Response
+from starlette.concurrency import run_in_threadpool
 
 from api import errors
 from api import logging as applog
@@ -40,6 +58,7 @@ from api.batch.models import (
     EXPORT_FIELDS,
     BatchAccepted,
     BatchItem,
+    BatchJob,
     BatchStatus,
     ItemState,
     JobCounts,
@@ -49,7 +68,7 @@ from api.batch.models import (
     summarize,
     worst_first,
 )
-from api.batch.store import BatchStore
+from api.batch.store import BatchStore, is_expired
 from api.batch.worker import ProviderBudget, WorkerPool
 from api.config import Config
 from api.models import FieldName
@@ -165,22 +184,121 @@ def _safe_name(name: str) -> str:
     return Path(name.replace("\\", "/")).name.strip()
 
 
-def _expand(uploads: list[tuple[str, bytes]], config: Config) -> dict[str, bytes]:
-    """Flatten the upload into `name -> bytes`, expanding any archives (LP-150, LP-151).
+#: Bytes moved per read while a part is spooled to disk. Big enough that a gigabyte is not
+#: a million syscalls, small enough that resident memory is a rounding error whatever the
+#: upload weighs.
+_CHUNK_BYTES = 1024 * 1024
+
+
+def _too_much() -> errors.UserError:
+    return errors.UserError(
+        f"That upload holds more than this tool accepts in one batch. Split it into "
+        f"batches of up to {MAX_ROWS} applications and upload them separately. Nothing "
+        f"has been checked.",
+        next_step="reduce",
+        code="batch_too_large",
+    )
+
+
+class _Landing:
+    """Staging for one upload, copied a chunk at a time with the total cap checked per chunk.
+
+    **This bounds memory, not disk, and the distinction cost a review round.** `create_batch`
+    used to build `list[(name, bytes)]` and check `MAX_TOTAL_BYTES` after the list was
+    complete, so the cap could only fire once the whole upload was resident — measured at
+    693 MB of RSS for 240 MB of content, because the read, the dict and any archive
+    expansion all coexist. At the 1.2 GB dump this feature exists for the container is
+    OOM-killed, six workers die mid-item, and their rows sit in `processing` until the next
+    `BatchStore` construction. Per-item isolation survives a bad image; it does not survive
+    the process dying.
+
+    What it does *not* do is bound what reaches the filesystem. `upload.read()` here is
+    reading a spooled temp file that Starlette's multipart parser already filled from the
+    socket — measured: cap set to 1 MB, 200 MB sent chunked, all 200 MB on disk before this
+    class saw a byte. That door is `api.main._WireLimit`. Each temp file is closed as soon
+    as it is staged so the two copies do not both peak, but the bound itself lives upstream.
+    """
+
+    def __init__(self, root: Path):
+        self.root = root
+        self.total = 0
+        self._sequence = 0
+
+    def _slot(self) -> Path:
+        self._sequence += 1
+        return self.root / f"{self._sequence:07d}"
+
+    def _account(self, size: int) -> None:
+        self.total += size
+        if self.total > MAX_TOTAL_BYTES:
+            raise _too_much()
+
+    async def spool(self, upload: UploadFile) -> Path:
+        """Copy one part into staging, refusing the moment the batch is too big.
+
+        The part's temp file is closed on the way out. Starlette holds every part open
+        until the request ends, so without this the upload exists twice over — once in
+        `$TMPDIR` and once in staging — and peak disk is double what was sent.
+        """
+        path = self._slot()
+        try:
+            with path.open("wb") as sink:
+                while chunk := await upload.read(_CHUNK_BYTES):
+                    self._account(len(chunk))
+                    sink.write(chunk)
+        finally:
+            with contextlib.suppress(Exception):
+                await upload.close()
+        return path
+
+    def unpack(self, archive: zipfile.ZipFile, entry: zipfile.ZipInfo, limit: int) -> Path:
+        """Decompress one entry to disk, reading at most `limit` + 1 bytes.
+
+        The bound that actually stops a zip bomb is `entry.file_size > max_image_bytes` in
+        the caller, checked before a byte is decompressed. CPython's `ZipExtFile` will not
+        return more than the declared `file_size` anyway, so an *upward* lie is refused by
+        that check and a *downward* lie truncates — producing a short, corrupt image that
+        fails ingest later and fails one batch item, in isolation, with a readable reason.
+
+        The `+1` here is therefore belt rather than braces: it is what would catch a zip
+        implementation that does not cap at the declared size, and it is what makes an
+        over-long entry visible to the caller's `size > max_image_bytes` check instead of
+        silently filling the disk. An earlier version of this docstring called it the
+        load-bearing check. It is not, and saying so was how it stayed untested.
+        """
+        path = self._slot()
+        remaining = limit + 1
+        with archive.open(entry) as source, path.open("wb") as sink:
+            while remaining > 0:
+                chunk = source.read(min(_CHUNK_BYTES, remaining))
+                if not chunk:
+                    break
+                remaining -= len(chunk)
+                self._account(len(chunk))
+                sink.write(chunk)
+        return path
+
+
+def _expand(
+    staged: Sequence[tuple[str, Path]], landing: _Landing, config: Config
+) -> dict[str, Path]:
+    """Flatten the upload into `name -> path on disk`, expanding any archives (LP-150, LP-151).
 
     Multi-select and a zip land in the same place on purpose: an agent who cannot make a
     zip on a locked-down desktop should not be blocked from batch mode, and one who can
     should not have to select 600 files (UX-7).
-    """
-    files: dict[str, bytes] = {}
-    total = 0
 
-    def add(name: str, data: bytes) -> None:
-        nonlocal total
+    Names are reduced to their last segment, so two files in different folders can collide
+    on one name. That is refused rather than resolved — see `add`.
+    """
+    files: dict[str, Path] = {}
+
+    def add(name: str, path: Path) -> None:
         clean = _safe_name(name)
         if not clean or clean.startswith("."):
             return
-        if len(data) > config.max_image_bytes:
+        size = path.stat().st_size
+        if size > config.max_image_bytes:
             raise errors.UserError(
                 f"“{clean}” is larger than "
                 f"{config.max_image_bytes // (1024 * 1024)} MB. Save the label images at "
@@ -188,34 +306,51 @@ def _expand(uploads: list[tuple[str, bytes]], config: Config) -> dict[str, bytes
                 next_step="resize",
                 code="file_too_large",
             )
-        total += len(data)
-        if total > MAX_TOTAL_BYTES or len(files) >= MAX_FILES:
+        if clean in files:
+            # `files[clean] = path` used to just overwrite. A zip laid out `front/x.png`
+            # and `back/x.png` — an ordinary DAM export — silently kept whichever came last
+            # in the central directory, `unmatched_files` stayed empty, and the agent was
+            # shown a verdict about a picture they did not send. There is no correct choice
+            # to make here: the manifest addresses images by name, so two files under one
+            # name means the manifest is genuinely ambiguous, and guessing is the one
+            # outcome this product must never produce.
             raise errors.UserError(
-                f"That upload holds more than this tool accepts in one batch. Split it "
-                f"into batches of up to {MAX_ROWS} applications and upload them "
-                f"separately.",
-                next_step="reduce",
-                code="batch_too_large",
+                f"Two different files in that upload are both named “{clean}”. The "
+                f"manifest refers to label images by file name, so there is no way to tell "
+                f"which one a row means. Rename them so every image has its own name and "
+                f"upload the batch again. Nothing has been checked.",
+                next_step="fix_request",
+                code="duplicate_file_name",
             )
-        files[clean] = data
+        if len(files) >= MAX_FILES:
+            raise _too_much()
+        files[clean] = path
 
-    for name, data in uploads:
+    for name, path in staged:
         if _safe_name(name).lower().endswith(_ARCHIVE_SUFFIX):
-            for inner_name, inner_data in _read_archive(name, data, config):
-                add(inner_name, inner_data)
+            for inner_name, inner_path in _read_archive(name, path, landing, config):
+                add(inner_name, inner_path)
         else:
-            add(name, data)
+            add(name, path)
 
     return files
 
 
 def _read_archive(
-    name: str, data: bytes, config: Config
-) -> list[tuple[str, bytes]]:
-    """Read a zip defensively: capped entries, capped sizes, names reduced to basenames."""
+    name: str, path: Path, landing: _Landing, config: Config
+) -> list[tuple[str, Path]]:
+    """Read a zip defensively: capped entries, capped sizes, names reduced to basenames.
+
+    Opened from the path rather than from `BytesIO`, so a 2 GB archive is read through the
+    filesystem's own buffer instead of being resident in full before the first entry is
+    even listed.
+    """
     try:
-        archive = zipfile.ZipFile(io.BytesIO(data))
-    except zipfile.BadZipFile as exc:
+        archive = zipfile.ZipFile(path)
+    except Exception as exc:
+        # Broader than BadZipFile on purpose. A half-copied archive can raise EOFError or
+        # OSError from the central-directory read just as easily, and every one of those
+        # is the same fact for the agent: this file did not open.
         raise errors.UserError(
             f"“{_safe_name(name)}” could not be opened as a zip file. Re-create "
             f"the archive, or upload the images individually.",
@@ -233,34 +368,75 @@ def _read_archive(
             code="batch_too_large",
         )
 
-    out: list[tuple[str, bytes]] = []
-    for entry in entries:
-        if entry.is_dir():
-            continue
-        clean = _safe_name(entry.filename)
-        if not clean or clean.startswith(".") or "__MACOSX" in entry.filename:
-            continue
-        # The declared size is checked before a byte is decompressed, so a zip bomb is
-        # refused rather than expanded and then measured.
-        if entry.file_size > config.max_image_bytes:
-            raise errors.UserError(
-                f"“{clean}” inside that archive is larger than "
-                f"{config.max_image_bytes // (1024 * 1024)} MB. Save the label images at "
-                f"a smaller size and upload the batch again.",
-                next_step="resize",
-                code="file_too_large",
-            )
-        with archive.open(entry) as handle:
-            out.append((clean, handle.read(config.max_image_bytes + 1)))
+    out: list[tuple[str, Path]] = []
+    with archive:
+        for entry in entries:
+            if entry.is_dir():
+                continue
+            clean = _safe_name(entry.filename)
+            if not clean or clean.startswith(".") or "__MACOSX" in entry.filename:
+                continue
+            # The declared size is checked before a byte is decompressed, so an honest
+            # oversized entry is refused rather than expanded and then measured. A
+            # dishonest one is caught by the read bound inside `unpack`.
+            if entry.file_size > config.max_image_bytes:
+                raise errors.UserError(
+                    f"“{clean}” inside that archive is larger than "
+                    f"{config.max_image_bytes // (1024 * 1024)} MB. Save the label images at "
+                    f"a smaller size and upload the batch again.",
+                    next_step="resize",
+                    code="file_too_large",
+                )
+            try:
+                out.append((clean, landing.unpack(archive, entry, config.max_image_bytes)))
+            except errors.LabelProofError:
+                # The batch is over its size cap. That is our refusal, not a bad entry.
+                raise
+            except Exception as exc:
+                # Decompression is where a damaged archive actually fails, and it fails in
+                # a different way every time: BadZipFile for a bad CRC, EOFError for a
+                # truncated stream, RuntimeError for an encrypted entry,
+                # NotImplementedError for WinZip AES. Every one of them used to leave here
+                # as a 500 saying "something went wrong on our side" with next_step=retry —
+                # advice that is both wrong and infinitely repeatable, for a fault that is
+                # in the agent's file and fixable by re-exporting it. A 1.2 GB dump copied
+                # off a flaky share hits this routinely.
+                raise errors.UserError(
+                    f"“{clean}” inside that archive could not be read. The archive is "
+                    f"damaged, or that file is compressed in a way this tool cannot open — "
+                    f"encrypted archives are not supported. Re-create the archive from the "
+                    f"original images, or upload them individually. Nothing has been "
+                    f"checked.",
+                    next_step="replace",
+                    code="unreadable_archive_entry",
+                ) from exc
     return out
 
 
 def _manifest_text(
-    supplied: UploadFile | None, supplied_bytes: bytes | None, files: dict[str, bytes]
+    supplied: Path | None, files: dict[str, Path], config: Config
 ) -> str:
-    """The manifest, whether it arrived as its own part or inside the archive."""
-    if supplied is not None and supplied_bytes:
-        return supplied_bytes.decode("utf-8-sig", errors="replace")
+    """The manifest, whether it arrived as its own part or inside the archive.
+
+    Read into memory, because parsing a CSV is not a streaming operation — but only after
+    the same per-file cap every other part gets, so "the manifest" is not a way to hand
+    this process a gigabyte of text.
+    """
+
+    def text_of(path: Path) -> str:
+        if path.stat().st_size > config.max_image_bytes:
+            raise errors.UserError(
+                f"That manifest is larger than "
+                f"{config.max_image_bytes // (1024 * 1024)} MB, which is far larger than a "
+                f"list of {MAX_ROWS} applications. Send the manifest as a spreadsheet "
+                f"exported to CSV.",
+                next_step="fix_manifest",
+                code="file_too_large",
+            )
+        return path.read_bytes().decode("utf-8-sig", errors="replace")
+
+    if supplied is not None and supplied.stat().st_size:
+        return text_of(supplied)
 
     candidates = [
         name
@@ -268,7 +444,7 @@ def _manifest_text(
         if name.lower().endswith(_MANIFEST_SUFFIXES)
     ]
     if len(candidates) == 1:
-        return files.pop(candidates[0]).decode("utf-8-sig", errors="replace")
+        return text_of(files.pop(candidates[0]))
     if len(candidates) > 1:
         raise errors.UserError(
             "That upload holds more than one spreadsheet, so there is no way to tell "
@@ -310,17 +486,57 @@ async def create_batch(
 
     # Retention runs at the one moment we know the process is alive and doing batch work.
     # A sweeper thread would be a second thing to supervise for a job that has a natural
-    # hook right here (SEC-2, LP-152).
+    # hook right here (SEC-2, LP-152). The read paths refuse an expired job in the
+    # meantime, so this is a disk sweep and not the guarantee itself.
+    # `purge_expired` sweeps abandoned staging directories too, so this one call covers
+    # both and the timed sweeper in `api/retention.py` inherits the staging sweep without
+    # knowing the directory exists.
     if purged := store.purge_expired():
         applog.log("batch_purged", count=len(purged))
 
-    uploads: list[tuple[str, bytes]] = []
-    for upload in files or []:
-        uploads.append((upload.filename or "", await upload.read()))
+    with store.staging() as scratch:
+        landing = _Landing(scratch)
 
-    manifest_bytes = await manifest.read() if manifest is not None else None
-    supplied = _expand(uploads, config)
-    text = _manifest_text(manifest, manifest_bytes, supplied)
+        # Copied into staging before anything is parsed, so peak memory is one chunk
+        # rather than the whole dump. What reaches disk at all is bounded upstream by
+        # `api.main._WireLimit`, not here.
+        staged: list[tuple[str, Path]] = []
+        for upload in files or []:
+            staged.append((upload.filename or "", await landing.spool(upload)))
+        manifest_path = await landing.spool(manifest) if manifest is not None else None
+
+        # Off the event loop. Everything past this point is blocking — zip decompression,
+        # CSV parsing, renames, SQLite — and a 300-entry archive took 848 ms of it in one
+        # uninterrupted stretch from a 2.8 MB request. During that stretch nothing else in
+        # the process runs, including `GET /health` and including the verification the
+        # 5-second gate is written for. `ProviderBudget` cannot help: it hands out model
+        # slots, and the loop being dead is not a slot problem. So a 2.8 MB upload defeated
+        # the whole PERF-5/BATCH-9 priority rule (LP-165).
+        accepted = await run_in_threadpool(
+            _assemble, store, config, landing, staged, manifest_path
+        )
+
+    get_pool(request).start()
+
+    applog.log(
+        "batch_queued",
+        job_id=accepted.job_id,
+        count=accepted.accepted,
+        status=len(accepted.row_errors),
+    )
+    return accepted
+
+
+def _assemble(
+    store: BatchStore,
+    config: Config,
+    landing: _Landing,
+    staged: Sequence[tuple[str, Path]],
+    manifest_path: Path | None,
+) -> BatchAccepted:
+    """Expand, pair, and queue. Blocking from end to end — call it off the event loop."""
+    supplied = _expand(staged, landing, config)
+    text = _manifest_text(manifest_path, supplied, config)
 
     try:
         parsed = manifest_mod.parse(text)
@@ -357,11 +573,13 @@ async def create_batch(
         retention_hours=config.retention_hours,
     )
 
+    # Renamed, not copied: the staged file *becomes* the stored one. Files nobody's
+    # row named are never moved and go out with the staging directory.
     referenced: set[str] = set()
     for row in queueable:
         for name in pairing.resolved[row.row]:
             if name not in referenced:
-                store.save_image(job.job_id, name, supplied[name])
+                store.adopt_image(job.job_id, name, supplied[name])
                 referenced.add(name)
 
     store.add_items(
@@ -369,14 +587,6 @@ async def create_batch(
         [(row.row, row.application, pairing.resolved[row.row]) for row in queueable],
     )
 
-    get_pool(request).start()
-
-    applog.log(
-        "batch_queued",
-        job_id=job.job_id,
-        count=len(queueable),
-        status=len(row_errors),
-    )
     return BatchAccepted(
         job_id=job.job_id,
         accepted=len(queueable),
@@ -433,9 +643,34 @@ def _nothing_queueable_message(
 # --- reading --------------------------------------------------------------------------
 
 
-def _require_job(store: BatchStore, job_id: str, retention_hours: int) -> None:
-    if store.get_job(job_id) is not None:
-        return
+def _require_job(
+    store: BatchStore, job_id: str, retention_hours: int, *, now: float | None = None
+) -> BatchJob:
+    """The job, or the same refusal for "never existed" and "past its life".
+
+    The expiry half of this is not belt-and-braces. Purging is driven by `POST /batch`,
+    so a server that takes one importer dump and then goes quiet never sweeps — and
+    without this check every read path went on serving that job: full status, every item,
+    and an export carrying 300 applications' brand names, addresses and extracted label
+    text. Not merely retained past the promise, but actively handed back, while the
+    message two lines below told the caller the data was deleted hours ago. A false
+    statement to a government user about what we still hold is a worse failure than the
+    disk usage (SEC-2, LP-152).
+
+    So expiry is enforced where it is read, not where it is swept. Deleting the bytes is
+    still the sweeper's job — this only guarantees nobody is served them in the meantime,
+    which is the part that has to be true at every instant rather than eventually.
+
+    Expired and absent answer identically on purpose. They are the same fact from the
+    agent's seat — the batch is gone and a new one is needed — and the existing message
+    already says retention is why.
+
+    The predicate is imported, not written here. See `api.batch.store.is_expired`, and the
+    merge note on it about where the canonical definition will live.
+    """
+    job = store.get_job(job_id)
+    if job is not None and not is_expired(job.expires_at, now=now):
+        return job
     raise errors.UserError(
         f"No batch with that reference is on this server. Batches and their images are "
         f"deleted {retention_hours} hours after they are started, so this one may have "
@@ -474,10 +709,7 @@ def batch_status(
     """Counts, summary, and the finished items so far — while the job runs (BATCH-5)."""
     config = get_config(request)
     store = get_store(request)
-    _require_job(store, job_id, config.retention_hours)
-
-    job = store.get_job(job_id)
-    assert job is not None  # _require_job just proved it
+    job = _require_job(store, job_id, config.retention_hours)
     counts = store.counts(job_id)
     everything = store.items(job_id)
 

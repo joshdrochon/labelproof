@@ -18,6 +18,7 @@ brand name, and label content never reaches a log line (SEC-4).
 
 from __future__ import annotations
 
+import json
 import logging
 import time
 from collections.abc import Awaitable, Callable
@@ -30,13 +31,14 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException
 from starlette.exceptions import HTTPException as StarletteHTTPException
-from starlette.types import Scope
+from starlette.formparsers import MultiPartException
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from api import errors
 from api import logging as applog
 from api.config import Config, load
 from api.provider.base import ExtractionProvider, ProviderError
-from api.routes import health, sample, verify
+from api.routes import batch, health, sample, verify
 
 _WEB_DIST = Path(__file__).resolve().parents[1] / "web" / "dist"
 
@@ -95,6 +97,15 @@ def create_app(
     app.include_router(health.router)
     app.include_router(sample.router)
     app.include_router(verify.router)
+    # Batch must be mounted BEFORE the SPA. `_install_spa` registers a `GET /{path:path}`
+    # catch-all, and a catch-all registered first out-ranks a real route — `GET /batch/{id}`
+    # would answer 404 from the SPA guard while the endpoint sat there unreachable.
+    app.include_router(batch.router)
+
+    # Without this the shared provider budget never learns that a Verify Now request is in
+    # flight, so batch never stands aside and BATCH-9/PERF-5 is dead code that still passes
+    # its unit tests. Marking only — it can never slow a verification down.
+    batch.install_verify_priority(app)
 
     _install_spa(app)
 
@@ -103,6 +114,11 @@ def create_app(
 
 
 def _install_middleware(app: FastAPI) -> None:
+    # Pure ASGI, and it must be a middleware rather than anything inside a route: it wraps
+    # `receive`, and the multipart parser drains the whole body before a route function's
+    # first line runs. See `_WireLimit`.
+    app.add_middleware(_WireLimit)
+
     @app.middleware("http")
     async def request_context(
         request: Request, call_next: Callable[[Request], Awaitable[Response]]
@@ -131,32 +147,162 @@ def _install_middleware(app: FastAPI) -> None:
         return response
 
 
-def _too_large_to_read(request: Request) -> errors.LabelProofError | None:
-    """Reject an impossible upload before a byte of it is buffered.
+#: Headroom above the batch content ceiling for multipart framing, the manifest, and the
+#: filename of every part. `MAX_FILES` is 4000 and each part costs a couple of hundred
+#: bytes of boundary and headers, so a megabyte would be too tight by an order of
+#: magnitude; 32 MB is generous and still nowhere near "unbounded".
+_BATCH_ENVELOPE_BYTES = 32 * 1024 * 1024
 
-    `ingest` enforces the real per-file cap, but only once the whole body has been spooled
-    to disk — which is a long, expensive way to say no to a 2GB post. The declared length
-    is only a hint (it can be absent, and it can lie), so this is a cheap first door, not
-    the lock. The ceiling is derived from the configured caps so raising them raises this
-    too.
+#: Slack above the Verify Now content ceiling for multipart framing and the application
+#: JSON, which ride alongside at most four images.
+_VERIFY_ENVELOPE_BYTES = 1024 * 1024
+
+
+def _size_ceiling(path: str, config: Config) -> tuple[int, errors.LabelProofError]:
+    """The whole-request ceiling for this path, and the refusal that goes with it.
+
+    The two modes accept wildly different uploads and a single ceiling cannot serve both.
+    Verify Now takes at most four images: anything past that is a mistake, and the tight
+    cap is what makes a 2 GB post cost a header read. A real batch is 300 applications and
+    roughly 600 photographs — over a gigabyte — and deriving its ceiling from the
+    single-verify caps refused every genuine importer dump before it reached a route, with
+    a message telling the agent to "send at most 4 images". The prototype only looked
+    healthy because the fixtures are kilobytes.
+
+    So the ceiling follows the path, and so does the sentence — a refusal that names the
+    wrong limit sends the agent to fix something that was never wrong.
+    """
+    if path.strip("/").split("/", 1)[0] == "batch":
+        return (
+            batch.MAX_TOTAL_BYTES + _BATCH_ENVELOPE_BYTES,
+            errors.UserError(
+                f"That batch upload is larger than this tool accepts at once — the limit "
+                f"is {batch.MAX_TOTAL_BYTES // (1024**3)} GB of artwork per upload, and up "
+                f"to {batch.MAX_ROWS} applications. Split it into smaller batches and "
+                f"upload them separately. Nothing has been checked.",
+                next_step="reduce",
+                code="batch_too_large",
+            ),
+        )
+
+    return (
+        config.max_images * config.max_image_bytes + _VERIFY_ENVELOPE_BYTES,
+        errors.UserError(
+            f"That upload is larger than this tool accepts. Send at most "
+            f"{config.max_images} images of up to "
+            f"{config.max_image_bytes // (1024 * 1024)} MB each.",
+            next_step="resize",
+            code="file_too_large",
+        ),
+    )
+
+
+def _too_large_to_read(request: Request) -> errors.LabelProofError | None:
+    """Refuse an upload whose *declared* length is already impossible.
+
+    One of two doors, and the weaker one. `Content-Length` is a hint: it can lie, and a
+    `Transfer-Encoding: chunked` upload does not send one at all, so this check is skipped
+    entirely for the shape an attacker would pick. It survives because it is free and it
+    answers the honest client immediately, before a byte is read.
+
+    `_WireLimit` below is the door that actually holds.
     """
     declared = request.headers.get("content-length")
     if not declared or not declared.isdigit():
         return None
 
-    config: Config = request.app.state.config
-    # Multipart framing and the application JSON ride alongside the images.
-    ceiling = config.max_images * config.max_image_bytes + 1024 * 1024
+    ceiling, refusal = _size_ceiling(request.url.path, request.app.state.config)
     if int(declared) <= ceiling:
         return None
+    return refusal
 
-    return errors.UserError(
-        f"That upload is larger than this tool accepts. Send at most "
-        f"{config.max_images} images of up to "
-        f"{config.max_image_bytes // (1024 * 1024)} MB each.",
-        next_step="resize",
-        code="file_too_large",
+
+class _WireLimit:
+    """Count request body bytes as they come off the wire, and stop at the ceiling.
+
+    This has to be pure ASGI and it has to be outside everything, because of where the
+    bytes actually go. FastAPI resolves `files: list[UploadFile]` as a dependency, so
+    Starlette's `MultiPartParser` consumes the ENTIRE body and spools it into
+    `SpooledTemporaryFile`s — rolling to `$TMPDIR` above 1 MB — before the route function's
+    first line runs. Everything the route does afterwards, including `_Landing`'s running
+    total, is reading a local temp file. Measured: with the batch cap set to 1 MB, a 200 MB
+    chunked upload was written to disk in full and the cap fired on the last byte.
+
+    So `_Landing` bounds *memory*, which was the OOM, and nothing bounded *disk*. An
+    unauthenticated POST of any size filled the volume — and the volume holds `jobs.db`,
+    so filling it takes every batch on the server with it. An earlier docstring here
+    claimed the running total was counted "as bytes arrive". It was not, and a claimed
+    bound that does not exist is worse than a known gap, because it is how the next person
+    stops checking.
+
+    Counting in `receive` is the only place upstream of the parser. Raising from there is
+    not enough on its own: FastAPI wraps *any* exception thrown while it is parsing a body
+    into `HTTPException(400, "There was an error parsing the body")`, so the refusal came
+    back as the generic "that request could not be handled" and the agent was told nothing
+    about size. So the response is replaced on the way out instead, which also keeps this
+    independent of that framework detail rather than hostage to it (OPS-5).
+    """
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        parent = scope.get("app")
+        if scope["type"] != "http" or parent is None:
+            await self.app(scope, receive, send)
+            return
+
+        ceiling, refusal = _size_ceiling(scope.get("path", ""), parent.state.config)
+        seen = 0
+        refused = False
+        answered = False
+
+        async def metered() -> Message:
+            nonlocal seen, refused
+            message = await receive()
+            if message["type"] == "http.request":
+                seen += len(message.get("body", b""))
+                if seen > ceiling:
+                    refused = True
+                    # Raised to unwind immediately — the point is to stop reading, not to
+                    # deliver the message. `guarded` delivers it.
+                    raise refusal
+            return message
+
+        async def guarded(message: Message) -> None:
+            nonlocal answered
+            if not refused:
+                await send(message)
+                return
+            # Whatever the app is trying to say, it is a symptom of our refusal. Say ours.
+            if message["type"] == "http.response.start" and not answered:
+                answered = True
+                await _send_error(send, refusal)
+
+        try:
+            await self.app(scope, metered, guarded)
+        except errors.LabelProofError:
+            if not refused:
+                raise
+        if refused and not answered:
+            answered = True
+            await _send_error(send, refusal)
+
+
+async def _send_error(send: Send, error: errors.LabelProofError) -> None:
+    body = json.dumps(error.to_payload()).encode("utf-8")
+    applog.log("request_failed", kind=error.kind.value, code=error.code, status=error.status_code)
+    await send(
+        {
+            "type": "http.response.start",
+            "status": error.status_code,
+            "headers": [
+                (b"content-type", b"application/json"),
+                (b"content-length", str(len(body)).encode("ascii")),
+            ],
+        }
     )
+    await send({"type": "http.response.body", "body": body})
 
 
 def _install_error_handlers(app: FastAPI) -> None:
@@ -187,6 +333,8 @@ def _install_error_handlers(app: FastAPI) -> None:
     @app.exception_handler(StarletteHTTPException)
     async def http_error(request: Request, exc: Exception) -> JSONResponse:
         assert isinstance(exc, StarletteHTTPException)
+        if exc.status_code == 400 and (unusable := _unusable_upload(request, exc)):
+            return _payload(unusable)
         return _payload(_from_status(exc.status_code))
 
     @app.exception_handler(Exception)
@@ -196,6 +344,51 @@ def _install_error_handlers(app: FastAPI) -> None:
         return JSONResponse(
             status_code=500, content=errors.InternalError().to_payload()
         )
+
+
+def _unusable_upload(
+    request: Request, exc: StarletteHTTPException
+) -> errors.LabelProofError | None:
+    """Turn a multipart parse failure into advice, when we can tell that is what it was.
+
+    Starlette caps a multipart body at 1000 parts. That is *below* the batch route's own
+    `MAX_FILES`, so it always binds first for multi-select — and FastAPI wraps it, like
+    every other body-parsing failure, into a bare `HTTPException(400)`. An agent who
+    ctrl-A'd 1200 label images was told "That address is not part of this tool. Go back to
+    the verification page and try again": no limit, no number, and not even the right
+    category of problem.
+
+    The original exception is still on `__cause__`, so the specific message can be
+    recovered when it is there. When it is not, a 400 on `/batch` with no route-level
+    explanation is still an unreadable upload, and saying so with the real limit beats the
+    navigation advice.
+    """
+    if request.url.path.strip("/").split("/", 1)[0] != "batch":
+        return None
+
+    cause = exc.__cause__
+    too_many = isinstance(cause, MultiPartException) and "Too many" in str(cause)
+    if cause is not None and not isinstance(cause, MultiPartException):
+        return None
+
+    detail = (
+        f"That upload holds more separate files than one form submission can carry "
+        f"({_MAX_MULTIPART_PARTS} is the limit)."
+        if too_many or cause is None
+        else "That upload could not be read as a batch submission."
+    )
+    return errors.UserError(
+        f"{detail} Put the label images in a zip file and upload that with the manifest — "
+        f"an archive can hold the whole batch. Nothing has been checked.",
+        next_step="reduce",
+        code="too_many_files",
+    )
+
+
+#: Starlette's own multipart part limit. Named here because it binds before
+#: `routes.batch.MAX_FILES` (4000) for multi-select and the agent has to be told a number
+#: that is actually true. It is not configurable through FastAPI's `File()` dependency.
+_MAX_MULTIPART_PARTS = 1000
 
 
 def _as_user_error(exc: RequestValidationError) -> errors.UserError:

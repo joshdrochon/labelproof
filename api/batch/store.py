@@ -17,6 +17,12 @@ it six times. `RETURNING` would be shorter but pins a SQLite version; this does 
 **Image bytes live on the filesystem, not in a column.** 600 images of a few hundred KB
 each is not what SQLite is for, and a directory is what the TTL sweep already knows how to
 delete (SEC-2).
+
+**An upload lands on disk before it lands anywhere else.** `staging()` hands the route a
+scratch directory on the same filesystem as the store, so a 1.2 GB importer dump is spooled
+rather than held, and the files an item actually needs are then *renamed* into the job
+directory by `adopt_image` instead of being read out and written back. A rename is atomic
+and free; reading 1.2 GB into memory to write it out again is neither.
 """
 
 from __future__ import annotations
@@ -25,6 +31,7 @@ import hashlib
 import json
 import shutil
 import sqlite3
+import tempfile
 import threading
 import time
 import uuid
@@ -83,6 +90,27 @@ def new_item_id() -> str:
     return f"itm_{uuid.uuid4().hex[:16]}"
 
 
+def is_expired(expires_at: float, *, now: float | None = None) -> bool:
+    """Is this batch past its retention? One definition, imported rather than copied.
+
+    ⚠️ **MERGE NOTE — delete this and import the canonical one.** `api/retention.py` on
+    `wave/security` owns this predicate and its docstring says outright that read paths
+    must import it rather than keep a copy, because "the failure mode of two copies is
+    that the API keeps serving something the sweeper believes is gone and nobody notices
+    until a reviewer asks". That module is not on `build/phase-1` yet, so importing it here
+    would make this branch red, and committing red is not on the table. The resolution when
+    the two branches meet is two lines: delete this function and
+    `from api.retention import is_expired`. Semantics are identical by construction —
+    `expires_at <= now`, matching `purge_expired` exactly — and
+    `test_the_expiry_predicate_agrees_with_retentions` fails the moment they diverge.
+
+    `claim()` cannot call this at all: it needs the comparison inside a SQL predicate so
+    the check is part of the same `BEGIN IMMEDIATE` that picks the row. That copy is
+    flagged in its own docstring.
+    """
+    return expires_at <= (time.time() if now is None else now)
+
+
 def stored_name(supplied: str) -> str:
     """The on-disk name for an uploaded file.
 
@@ -104,6 +132,10 @@ class BatchStore:
         self.db_path = self.root / "jobs.db"
         self.images_root = self.root / "batches"
         self.images_root.mkdir(parents=True, exist_ok=True)
+        # Deliberately a sibling of `batches` and not a system temp dir: `adopt_image`
+        # renames across it, and a rename only stays atomic and free within one filesystem.
+        self.staging_root = self.root / "staging"
+        self.staging_root.mkdir(parents=True, exist_ok=True)
         # Serialises this process's writers so `BEGIN IMMEDIATE` contention stays inside
         # a lock we control rather than inside SQLite's busy-wait, which burns CPU across
         # every batch worker at once.
@@ -198,28 +230,41 @@ class BatchStore:
         return ids
 
     def claim(self, *, job_id: str | None = None, now: float | None = None) -> BatchItem | None:
-        """Take the next queued item, or return None when there is nothing to do.
+        """Take the next queued item of a LIVE job, or None when there is nothing to do.
 
         The whole select-then-update runs inside `BEGIN IMMEDIATE`, which is what stops
         two workers from picking up the same application. Oldest job first, then manifest
         order, so a batch finishes roughly in the order the agent listed it and a second
         batch does not jump the first.
+
+        **Expiry is part of "there is nothing to do".** This selected on `state` alone,
+        which meant an expired job kept being *worked*: measured, three queued items of a
+        job past its TTL all completed, spending tokens and writing freshly extracted brand
+        names and label text to disk — for a job the API was, at the same moment, telling
+        the caller had been deleted. Refusing to serve it and refusing to produce more of
+        it are the same promise; stopping only the first is the API lying about the second.
+
+        The predicate is `expires_at > now`, the exact complement of `purge_expired`'s
+        `expires_at <= now`, so an item stops being claimable at the instant a sweep would
+        take its job — never a moment later. See `is_expired` below on why this comparison
+        is written twice and what to do about it.
         """
         moment = time.time() if now is None else now
+        live = "AND job_id IN (SELECT job_id FROM jobs WHERE expires_at > ?)"
         with self._write_lock, self._conn() as connection:
             connection.execute("BEGIN IMMEDIATE")
             try:
                 if job_id is None:
                     row = connection.execute(
-                        "SELECT * FROM items WHERE state = ? ORDER BY created_at, row "
-                        "LIMIT 1",
-                        (ItemState.QUEUED.value,),
+                        f"SELECT * FROM items WHERE state = ? {live} "
+                        f"ORDER BY created_at, row LIMIT 1",
+                        (ItemState.QUEUED.value, moment),
                     ).fetchone()
                 else:
                     row = connection.execute(
-                        "SELECT * FROM items WHERE state = ? AND job_id = ? "
-                        "ORDER BY row LIMIT 1",
-                        (ItemState.QUEUED.value, job_id),
+                        f"SELECT * FROM items WHERE state = ? AND job_id = ? {live} "
+                        f"ORDER BY row LIMIT 1",
+                        (ItemState.QUEUED.value, job_id, moment),
                     ).fetchone()
                 if row is None:
                     connection.execute("ROLLBACK")
@@ -369,10 +414,20 @@ class BatchStore:
             counts.total += int(row["n"])
         return counts
 
-    def has_work(self) -> bool:
+    def has_work(self, *, now: float | None = None) -> bool:
+        """Is there anything `claim` would actually hand out?
+
+        Must ask exactly the question `claim` answers, expiry included. When it did not,
+        an expired job left three items `queued` that no worker would ever take, so
+        `has_work` said yes forever and `drain` never returned — a pool that is finished
+        looking identical to one that is stuck.
+        """
+        moment = time.time() if now is None else now
         with self._conn() as connection:
             row = connection.execute(
-                "SELECT 1 FROM items WHERE state = ? LIMIT 1", (ItemState.QUEUED.value,)
+                "SELECT 1 FROM items WHERE state = ? "
+                "AND job_id IN (SELECT job_id FROM jobs WHERE expires_at > ?) LIMIT 1",
+                (ItemState.QUEUED.value, moment),
             ).fetchone()
         return row is not None
 
@@ -383,11 +438,68 @@ class BatchStore:
         directory.mkdir(parents=True, exist_ok=True)
         (directory / stored_name(supplied_name)).write_bytes(data)
 
+    def adopt_image(self, job_id: str, supplied_name: str, source: Path) -> None:
+        """Move an already-staged file into the job directory.
+
+        The upload path uses this rather than `save_image` because `save_image` takes
+        `bytes`, and calling it means reading the file back into memory to write it out
+        again — 600 photographs' worth, for no gain. `Path.replace` is a rename within one
+        filesystem: atomic, constant-memory, and it frees the staging copy as it goes.
+        """
+        directory = self.images_root / job_id
+        directory.mkdir(parents=True, exist_ok=True)
+        source.replace(directory / stored_name(supplied_name))
+
     def read_image(self, job_id: str, supplied_name: str) -> bytes | None:
         path = self.images_root / job_id / stored_name(supplied_name)
         if not path.is_file():
             return None
         return path.read_bytes()
+
+    # --- staging ---------------------------------------------------------------------
+
+    @contextmanager
+    def staging(self) -> Iterator[Path]:
+        """A scratch directory for one upload, removed however this call ends.
+
+        The route spools every incoming part in here before anything is parsed, so
+        resident memory stays flat whatever the upload weighs. The `finally` matters as
+        much as the directory: a refused upload — a bad zip, an unreadable manifest, a
+        batch over the cap — must not leave a gigabyte of someone's label artwork behind
+        on the way out (SEC-2).
+        """
+        directory = Path(tempfile.mkdtemp(prefix="up_", dir=self.staging_root))
+        try:
+            yield directory
+        finally:
+            shutil.rmtree(directory, ignore_errors=True)
+
+    def purge_staging(self, *, older_than_seconds: float = 3600.0, now: float | None = None) -> int:
+        """Drop staging directories a killed process could not clean up itself.
+
+        `staging()` removes its own on every ordinary path, so this only ever finds the
+        leavings of a SIGKILL or an OOM — which is exactly when a gigabyte of label
+        artwork is most likely to be sitting there, and least likely to be noticed.
+
+        Never raises: it is called from inside `purge_expired`, which the retention
+        sweeper wraps in a `sqlite3.Error` handler and nothing wider. A filesystem hiccup
+        here must not be able to abort a sweep that was about to delete expired jobs.
+        """
+        moment = time.time() if now is None else now
+        removed = 0
+        try:
+            candidates = list(self.staging_root.glob("up_*"))
+        except OSError:
+            return 0
+        for directory in candidates:
+            try:
+                if moment - directory.stat().st_mtime <= older_than_seconds:
+                    continue
+            except OSError:
+                continue
+            shutil.rmtree(directory, ignore_errors=True)
+            removed += 1
+        return removed
 
     # --- retention -------------------------------------------------------------------
 
@@ -398,8 +510,18 @@ class BatchStore:
         batch is 300 applications' worth of brand names and addresses sitting on a disk
         nobody is thinking about, which is the retention problem the security review
         names.
+
+        **Abandoned staging goes with it**, and that placement is deliberate. The timed
+        sweeper in `api/retention.py` walks `MANAGED_SUBDIRS = ("batches", "uploads",
+        "results")` — it has never heard of `staging/`, so a directory a SIGKILL left
+        behind would be swept only when a new `POST /batch` happened to arrive, which is
+        exactly the traffic-dependence the timed sweeper exists to remove. Calling it from
+        here means the sweeper picks it up for free, with no change to a file this branch
+        does not own. If `"staging"` is later added to `MANAGED_SUBDIRS` this becomes
+        harmlessly redundant rather than wrong.
         """
         moment = time.time() if now is None else now
+        self.purge_staging(now=moment)
         with self._write_lock, self._conn() as connection:
             rows = connection.execute(
                 "SELECT job_id FROM jobs WHERE expires_at <= ?", (moment,)

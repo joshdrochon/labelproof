@@ -14,12 +14,15 @@ that fails, under a provider that raises something nobody anticipated, and at fu
 
 from __future__ import annotations
 
+import asyncio
 import csv
 import io
 import json
 import threading
 import time
+import tracemalloc
 import zipfile
+from collections.abc import Iterator, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -29,7 +32,9 @@ from fastapi.testclient import TestClient
 from PIL import Image
 
 from api import logging as applog
+from api import main as main_mod
 from api.batch import manifest as manifest_mod
+from api.batch import store as store_mod
 from api.batch.models import (
     BatchItem,
     ItemFailure,
@@ -79,30 +84,22 @@ def make_config(tmp_path: Path, **overrides: Any) -> Config:
     return Config(**base)
 
 
-def _batch_is_mounted(app: Any) -> bool:
-    for route in app.router.routes:
-        if getattr(route, "original_router", None) is batch_routes.router:
-            return True
-        if str(getattr(route, "path", "")).startswith("/batch"):
-            return True
-    return False
+def make_config_api(**overrides: Any) -> Config:
+    """A config with no storage directory, for the paths that never touch the store."""
+    base: dict[str, Any] = {"use_fake_provider": True}
+    base.update(overrides)
+    return Config(**base)
 
 
 def make_client(tmp_path: Path, provider: Any = None, **overrides: Any) -> TestClient:
-    """The real app, with the batch router guaranteed to be mounted and reachable.
+    """The shipped app, exactly as `create_app` builds it.
 
-    `api/main.py` mounts an SPA catch-all last, and a catch-all registered ahead of the
-    batch routes would swallow `GET /batch/{id}`. Anything added here is therefore moved
-    to the front of the table. When main.py already mounts batch itself, this is a no-op
-    and the app under test is exactly the shipped one.
+    Nothing is added here on purpose. An earlier version of this helper mounted the batch
+    router itself when it found it missing, which made every test in this file pass
+    against an app whose batch endpoints were unreachable in production. The router is
+    mounted by `api/main.py` or these tests fail, which is the point.
     """
     app = create_app(config=make_config(tmp_path, **overrides), provider=provider)
-    if not _batch_is_mounted(app):
-        before = len(app.router.routes)
-        app.include_router(batch_routes.router)
-        added = app.router.routes[before:]
-        del app.router.routes[before:]
-        app.router.routes[0:0] = added
     return TestClient(app)
 
 
@@ -267,6 +264,415 @@ def spec_provider() -> SpecBackedProvider:
     return SpecBackedProvider("tc01_old_tom_clean")
 
 
+# --- wiring (LP-073) --------------------------------------------------------------------
+
+
+def test_the_shipped_app_mounts_the_batch_router(tmp_path: Path) -> None:
+    """Everything below this line reaches batch over HTTP, so it all depends on this line.
+
+    Stated once and by name, because a diffuse failure across forty tests reads as "batch
+    is broken" when the actual fault is one missing `include_router` in the app factory.
+    """
+    app = create_app(config=make_config(tmp_path))
+    mounted = [
+        route
+        for route in app.router.routes
+        if getattr(route, "original_router", None) is batch_routes.router
+    ]
+    assert mounted, "api/main.py does not mount api.routes.batch"
+
+
+# --- upload memory (BATCH-2, PERF-4) ----------------------------------------------------
+#
+# A real dump is 300 applications and ~600 photographs, over a gigabyte. The route used to
+# read every part into a list and check the total afterwards, so peak memory was a multiple
+# of the upload and the container was OOM-killed — which kills six workers mid-item and
+# takes per-item isolation down with them. Nothing bounded it except a 41 MB whole-request
+# ceiling that also refused every real batch, so raising that ceiling and spooling to disk
+# are one fix, not two.
+
+
+def multipart_stream(
+    parts: Sequence[tuple[str, str, bytes | Iterator[bytes]]],
+    boundary: str = "----labelproofprobe",
+) -> Iterator[bytes]:
+    """Yield a multipart body in pieces, never assembling it.
+
+    A single shared chunk object is re-yielded for bulk content on purpose: the point of
+    the measurement is what the *server* retains, so the generator must not put the upload
+    in memory on the client's behalf.
+    """
+    for field, filename, content in parts:
+        yield (
+            f"--{boundary}\r\n"
+            f'Content-Disposition: form-data; name="{field}"; filename="{filename}"\r\n'
+            f"Content-Type: application/octet-stream\r\n\r\n"
+        ).encode()
+        if isinstance(content, bytes):
+            yield content
+        else:
+            yield from content
+        yield b"\r\n"
+    yield f"--{boundary}--\r\n".encode()
+
+
+def asgi_post(
+    app: Any, path: str, body: Iterator[bytes], sent_bytes: list[int] | None = None
+) -> tuple[int, Any]:
+    """POST by driving the ASGI app directly, with a body that is never resident in full.
+
+    TestClient cannot be used here. httpx does `b"".join(self.stream)` before it sends, so
+    the whole upload lands in memory on the client side — which both hides whether the
+    server did the same and makes any measurement meaningless. Driving the app by hand is
+    also the only way to send a body with NO `Content-Length`: that is the shape a
+    `Transfer-Encoding: chunked` upload arrives in, and it skips the whole-request ceiling
+    in `api/main.py` entirely, so a cap has to hold without it.
+
+    `sent_bytes`, if given, accumulates how much the client actually handed over. That is
+    the number that matters for a disk bound: a refusal that arrives after the client has
+    finished uploading has refused nothing.
+    """
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0", "spec_version": "2.3"},
+        "http_version": "1.1",
+        "method": "POST",
+        "scheme": "http",
+        "path": path,
+        "raw_path": path.encode(),
+        "query_string": b"",
+        "root_path": "",
+        "headers": [
+            (b"host", b"testserver"),
+            (b"content-type", b"multipart/form-data; boundary=----labelproofprobe"),
+            (b"transfer-encoding", b"chunked"),
+        ],
+        "client": ("testclient", 50000),
+        "server": ("testserver", 80),
+    }
+
+    async def receive() -> dict[str, Any]:
+        try:
+            chunk = next(body)
+        except StopIteration:
+            return {"type": "http.request", "body": b"", "more_body": False}
+        if sent_bytes is not None:
+            sent_bytes.append(len(chunk))
+        return {"type": "http.request", "body": chunk, "more_body": True}
+
+    sent: list[dict[str, Any]] = []
+
+    async def send(message: dict[str, Any]) -> None:
+        sent.append(message)
+
+    asyncio.run(app(scope, receive, send))
+
+    status = next(m["status"] for m in sent if m["type"] == "http.response.start")
+    payload = b"".join(m.get("body", b"") for m in sent if m["type"] == "http.response.body")
+    return status, json.loads(payload) if payload else None
+
+
+ONE_MB = b"\x89PNG\r\n\x1a\n" + b"q" * (1024 * 1024 - 8)
+
+
+def megabytes(count: int) -> Iterator[bytes]:
+    for _ in range(count):
+        yield ONE_MB
+
+
+def test_a_large_multi_part_upload_is_spooled_rather_than_held(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """120 MB of artwork across 15 parts must not cost 120 MB of RSS.
+
+    Measured with tracemalloc around the whole request, so what is asserted is what the
+    process retained while the route ran. Before the fix this tracked the upload almost
+    exactly. Every part is named by the manifest, so this exercises the ACCEPT path —
+    expansion, pairing, and 15 renames into the job directory — not just the refusal.
+
+    The worker pool is held back for the duration. It starts before `POST /batch` returns,
+    and a worker decoding an 8 MB image legitimately holds 8 MB — measured at 42 MB of
+    perfectly correct verification noise, which would have set the ceiling here by
+    accident and measured the wrong subsystem.
+    """
+    monkeypatch.setattr(WorkerPool, "start", lambda self: None)
+    names = [f"f{n}.png" for n in range(15)]
+    app = create_app(config=make_config(tmp_path), provider=spec_provider())
+    body = multipart_stream(
+        [("manifest", "manifest.csv", manifest_csv([row(front=n) for n in names]).encode())]
+        + [("files", name, megabytes(8)) for name in names]
+    )
+
+    tracemalloc.start()
+    tracemalloc.reset_peak()
+    try:
+        status, payload = asgi_post(app, "/batch", body)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+
+    assert status == 200, payload
+    assert payload["accepted"] == 15
+    assert peak < 24 * 1024 * 1024, (
+        f"the route retained {peak / 1e6:.0f} MB while 120 MB was uploaded — the upload "
+        f"is being held, not spooled"
+    )
+
+
+def test_a_single_huge_part_is_spooled_rather_than_held(tmp_path: Path) -> None:
+    """One 64 MB part, which is the real shape: an agent uploads one `labels.zip`.
+
+    The multi-part test above cannot catch per-part materialization — with 8 MB parts,
+    reading each one whole still fits under any sane ceiling. Here the single part is
+    larger than the ceiling, so `data = await upload.read()` fails outright and only
+    genuine chunking passes.
+    """
+    app = create_app(config=make_config(tmp_path), provider=spec_provider())
+    body = multipart_stream([("files", "one_big.png", megabytes(64))])
+
+    tracemalloc.start()
+    tracemalloc.reset_peak()
+    try:
+        status, payload = asgi_post(app, "/batch", body)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+
+    # Refused for being over the per-file cap — after it was streamed, which is the point.
+    assert status == 400
+    assert payload["error"]["code"] == "file_too_large"
+    assert peak < 24 * 1024 * 1024, (
+        f"the route retained {peak / 1e6:.0f} MB for a single 64 MB part — it is being "
+        f"read whole, not chunked"
+    )
+
+
+def test_a_chunked_upload_is_cut_off_at_the_wire_not_after_it_lands(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The disk bound, and the only test here that measures the thing that matters.
+
+    A `Transfer-Encoding: chunked` POST sends no `Content-Length`, so the header check in
+    `api/main` is skipped by construction. Everything inside the route is downstream of
+    Starlette's multipart parser, which drains the socket into temp files before the route
+    function starts — so a cap enforced in `create_batch` fires only once the whole upload
+    is already on the volume. Measured before `_WireLimit`: cap 1 MB, 200 MB sent, 200 MB
+    written, refusal on the last byte. The volume holds `jobs.db`, so filling it takes
+    every batch on the server with it.
+
+    The assertion is therefore about how much the CLIENT got to send, not about the status
+    code — a refusal after the upload finished has refused nothing.
+    """
+    monkeypatch.setattr(batch_routes, "MAX_TOTAL_BYTES", 4 * 1024 * 1024)
+    app = create_app(config=make_config(tmp_path), provider=spec_provider())
+
+    sent: list[int] = []
+    status, payload = asgi_post(
+        app, "/batch", multipart_stream([("files", "big.png", megabytes(256))]), sent
+    )
+
+    assert status == 400
+    assert payload["error"]["code"] == "batch_too_large"
+    assert payload["error"]["next_step"] == "reduce"
+
+    ceiling = 4 * 1024 * 1024 + main_mod._BATCH_ENVELOPE_BYTES
+    accepted = sum(sent)
+    assert accepted <= ceiling + 2 * 1024 * 1024, (
+        f"the client uploaded {accepted / 1e6:.0f} MB before being cut off, against a "
+        f"{ceiling / 1e6:.0f} MB ceiling — the body is being taken in full and refused after"
+    )
+    assert accepted < 256 * 1024 * 1024
+
+
+def test_the_wire_limit_leaves_verify_now_alone() -> None:
+    """The tight single-verify ceiling still applies on its own path, over the wire."""
+    app = create_app(config=make_config_api(max_image_bytes=1024 * 1024, max_images=2))
+    sent: list[int] = []
+    status, payload = asgi_post(
+        app, "/verify", multipart_stream([("images", "big.png", megabytes(64))]), sent
+    )
+    assert status == 400
+    assert payload["error"]["code"] == "file_too_large"
+    assert "2 images of up to 1 MB each" in payload["error"]["message"]
+    assert sum(sent) < 64 * 1024 * 1024
+
+
+def longest_loop_block_ms(app: Any, path: str, body: Iterator[bytes]) -> tuple[int, float]:
+    """Drive one request and report the longest stretch the event loop went unserved.
+
+    A heartbeat coroutine does nothing but `await asyncio.sleep(0)` in a loop, which yields
+    to anything else that is ready. The largest gap between two of its ticks is, by
+    definition, the longest uninterrupted block of synchronous work in the process.
+    """
+    gaps: list[float] = []
+
+    async def drive() -> int:
+        running = True
+
+        async def heartbeat() -> None:
+            last = time.perf_counter()
+            while running:
+                await asyncio.sleep(0)
+                now = time.perf_counter()
+                gaps.append((now - last) * 1000)
+                last = now
+
+        async def receive() -> dict[str, Any]:
+            try:
+                return {"type": "http.request", "body": next(body), "more_body": True}
+            except StopIteration:
+                return {"type": "http.request", "body": b"", "more_body": False}
+
+        sent: list[dict[str, Any]] = []
+
+        async def send(message: dict[str, Any]) -> None:
+            sent.append(message)
+
+        scope = {
+            "type": "http",
+            "asgi": {"version": "3.0", "spec_version": "2.3"},
+            "http_version": "1.1",
+            "method": "POST",
+            "scheme": "http",
+            "path": path,
+            "raw_path": path.encode(),
+            "query_string": b"",
+            "root_path": "",
+            "headers": [
+                (b"host", b"testserver"),
+                (b"content-type", b"multipart/form-data; boundary=----labelproofprobe"),
+                (b"transfer-encoding", b"chunked"),
+            ],
+            "client": ("testclient", 50000),
+            "server": ("testserver", 80),
+        }
+
+        beat = asyncio.create_task(heartbeat())
+        try:
+            await app(scope, receive, send)
+        finally:
+            running = False
+            await asyncio.sleep(0)
+            beat.cancel()
+        return int(next(m["status"] for m in sent if m["type"] == "http.response.start"))
+
+    status = asyncio.run(drive())
+    return status, max(gaps)
+
+
+#: The longest the event loop may go unserved during one batch upload. Measured at 848 ms
+#: before `_assemble` moved off the loop and 54 ms after, from the same 2.8 MB request.
+#: 250 ms catches that regression with room for a contended CI box, and it is well inside
+#: what a concurrent verification can absorb.
+LOOP_BLOCK_CEILING_MS = 250
+
+
+def test_a_zip_upload_does_not_stall_the_event_loop(tmp_path: Path) -> None:
+    """PERF-5, BATCH-9 — the priority rule is worthless if the loop itself is dead.
+
+    Zip expansion, CSV parsing, renames and SQLite are all blocking, and they used to run
+    straight from `async def create_batch`. A 300-entry archive — 2.8 MB on the wire,
+    1017x amplification — blocked the loop for 848 ms in one stretch, during which a
+    concurrent `GET /health` got one sample in the whole second. `ProviderBudget` cannot
+    help with this: it rations model slots, and a dead loop is not a slot problem. So the
+    entire Verify-Now-keeps-priority invariant was defeated by a 2.8 MB upload.
+    """
+    entries = {f"f{n}.png": b"\x00" * (9 * 1024 * 1024) for n in range(200)}
+    entries["manifest.csv"] = manifest_csv([row(front=name) for name in entries]).encode()
+    archive = zip_of(entries)
+    assert len(archive) < 4 * 1024 * 1024, "the point is that a small request does this"
+
+    app = create_app(config=make_config(tmp_path), provider=spec_provider())
+    status, worst = longest_loop_block_ms(
+        app, "/batch", multipart_stream([("files", "labels.zip", archive)])
+    )
+
+    assert status in (200, 400)
+    assert worst < LOOP_BLOCK_CEILING_MS, (
+        f"the event loop went unserved for {worst:.0f} ms during a "
+        f"{len(archive) / 1e6:.1f} MB upload — blocking work is running on it"
+    )
+
+
+def test_a_refused_upload_leaves_no_artwork_behind(tmp_path: Path) -> None:
+    """SEC-2 — a rejected gigabyte must not sit in staging waiting for a sweep."""
+    client = make_client(tmp_path)
+    response = post_batch(client, [], manifest_text="not,a,manifest\n1,2,3\n")
+    assert response.status_code == 400
+
+    store: BatchStore = client.app.state.batch_store
+    assert list(store.staging_root.iterdir()) == []
+
+
+def test_accepted_artwork_is_moved_out_of_staging_not_copied(tmp_path: Path) -> None:
+    """The staged file BECOMES the stored file — asserted on the inode, not on tidiness.
+
+    The previous version of this test checked that staging was empty afterwards and that
+    the image was readable. Both hold under a copy, because `staging()`'s `finally` deletes
+    the directory either way, so the property in the test's name was unasserted and
+    `source.replace(...)` -> `shutil.copyfile(...)` left the suite green. Only identity
+    distinguishes a move from a copy, and identity is what bounds peak disk on a 1.2 GB
+    dump.
+    """
+    client = make_client(tmp_path, provider=spec_provider())
+    store_cls = BatchStore
+    original = store_cls.adopt_image
+    staged_inode: dict[str, int] = {}
+
+    def spy(self: BatchStore, job_id: str, supplied_name: str, source: Path) -> None:
+        staged_inode[supplied_name] = source.stat().st_ino
+        original(self, job_id, supplied_name, source)
+
+    store_cls.adopt_image = spy  # type: ignore[method-assign]
+    try:
+        job_id = post_batch(client, [row()]).json()["job_id"]
+    finally:
+        store_cls.adopt_image = original  # type: ignore[method-assign]
+
+    store: BatchStore = client.app.state.batch_store
+    stored = store.images_root / job_id / stored_name(GOOD_IMAGE)
+    assert staged_inode[GOOD_IMAGE] == stored.stat().st_ino, (
+        "the stored file is a different inode from the staged one — it was copied, not moved"
+    )
+    assert list(store.staging_root.iterdir()) == []
+    assert store.read_image(job_id, GOOD_IMAGE) == GOOD_BYTES
+    drain(client)
+
+
+def test_staging_a_killed_process_left_behind_is_swept(tmp_path: Path) -> None:
+    """`staging()` cleans up after itself on every ordinary path; this is for SIGKILL.
+
+    Which is precisely when a gigabyte of someone's label artwork is most likely to be
+    sitting there and least likely to be noticed.
+    """
+    store = BatchStore(tmp_path)
+    abandoned = store.staging_root / "up_deadprocess"
+    abandoned.mkdir()
+    (abandoned / "0000001").write_bytes(GOOD_BYTES)
+
+    assert store.purge_staging(now=time.time()) == 0, "a fresh upload was swept mid-flight"
+    assert store.purge_staging(now=time.time() + 7200) == 1
+    assert not abandoned.exists()
+
+
+def test_the_ttl_sweep_reaches_staging_too(tmp_path: Path) -> None:
+    """`purge_expired` is the entry point the timed sweeper calls, so staging hangs off it.
+
+    `api/retention.py`'s sweeper walks MANAGED_SUBDIRS = ("batches", "uploads", "results")
+    and has never heard of `staging/`. Without this, a directory left by a SIGKILL — the
+    case where a gigabyte of label artwork is most likely to be sitting there — would be
+    collected only when a new POST /batch arrived, which is precisely the traffic
+    dependence the timed sweeper exists to remove (SEC-2).
+    """
+    store = BatchStore(tmp_path)
+    abandoned = store.staging_root / "up_deadprocess"
+    abandoned.mkdir()
+    (abandoned / "0000001").write_bytes(GOOD_BYTES)
+
+    store.purge_expired(now=time.time() + 7200)
+    assert not abandoned.exists(), "the TTL sweep walked past an abandoned staging directory"
+
+
 # --- the store (LP-147, LP-152, LP-158, BATCH-6) ---------------------------------------
 
 
@@ -429,6 +835,126 @@ def test_a_live_batch_is_not_purged(tmp_path: Path) -> None:
     job_id = seed(store)
     assert store.purge_expired() == []
     assert store.get_job(job_id) is not None
+
+
+def expire(client: TestClient, job_id: str) -> None:
+    """Push a job's TTL into the past without sweeping it, which is the real situation.
+
+    Purging is driven by POST /batch. A server that takes one dump and goes quiet has
+    exactly this on disk: a job past its life that nothing has come along to delete.
+    """
+    store: BatchStore = client.app.state.batch_store
+    # Reaches into the store on purpose: there is no public setter for `expires_at` and
+    # there should not be one. Only the clock moves a job past its life in production.
+    with store._conn() as connection:
+        connection.execute(
+            "UPDATE jobs SET expires_at = ? WHERE job_id = ?", (time.time() - 60, job_id)
+        )
+
+
+def test_an_expired_batch_is_not_served_even_before_it_is_swept(tmp_path: Path) -> None:
+    """SEC-2 — the promise is about what we hand back, not only about what we store.
+
+    Between expiry and the next upload there is no sweep, and without an expiry check on
+    the read paths the API went on serving the whole job: status, items, and an export
+    carrying 300 applications' brand names and extracted label text — while the 'not
+    found' message on the very same endpoint told the caller it had been deleted hours
+    ago. Retaining data past a promise is a bug; answering with it while denying you have
+    it is a false statement to a government user.
+    """
+    client = make_client(tmp_path, provider=spec_provider())
+    job_id = post_batch(client, [row()]).json()["job_id"]
+    drain(client)
+    assert client.get(f"/batch/{job_id}").status_code == 200
+
+    expire(client, job_id)
+
+    for path in (f"/batch/{job_id}", f"/batch/{job_id}/export.csv"):
+        response = client.get(path)
+        assert response.status_code == 400, path
+        assert response.json()["error"]["code"] == "batch_not_found", path
+
+    retry = client.post(f"/batch/{job_id}/retry")
+    assert retry.status_code == 400
+    assert retry.json()["error"]["code"] == "batch_not_found"
+
+
+def test_an_expired_export_leaks_no_label_text(tmp_path: Path) -> None:
+    """The export is the leak that matters: every extracted field of every application."""
+    client = make_client(tmp_path, provider=spec_provider())
+    job_id = post_batch(client, [row()]).json()["job_id"]
+    drain(client)
+    assert "OLD TOM" in client.get(f"/batch/{job_id}/export.csv").text
+
+    expire(client, job_id)
+    body = client.get(f"/batch/{job_id}/export.csv").text
+    assert "OLD TOM" not in body
+    assert "Bardstown" not in body
+
+
+def test_an_expired_batch_is_not_processed_either(tmp_path: Path) -> None:
+    """Refusing to serve it and refusing to produce more of it are the same promise.
+
+    `claim()` selected on `state` alone, so past the 24-hour mark the workers carried on:
+    tokens spent, and freshly extracted brand names and label text written to disk, for a
+    job the API was simultaneously telling the caller had been deleted. Stopping only the
+    read path fixed the visible half and left the tool still manufacturing the data.
+    """
+    store = BatchStore(tmp_path)
+    config = make_config(tmp_path)
+    job = store.create_job(retention_hours=24)
+    store.save_image(job.job_id, GOOD_IMAGE, GOOD_BYTES)
+    store.add_items(
+        job.job_id,
+        [(n + 2, Application.model_validate(old_tom()), [GOOD_IMAGE]) for n in range(3)],
+    )
+    assert store.counts(job.job_id).queued == 3
+
+    with store._conn() as connection:
+        connection.execute(
+            "UPDATE jobs SET expires_at = ? WHERE job_id = ?", (time.time() - 60, job.job_id)
+        )
+
+    pool = WorkerPool(store, config, lambda names: spec_provider())
+    pool.start()
+    assert pool.drain(timeout=30)
+
+    counts = store.counts(job.job_id)
+    assert counts.queued == 3, "an expired job was still being worked"
+    assert counts.done == 0 and counts.failed == 0
+    assert all(item.result is None for item in store.items(job.job_id))
+
+
+def test_the_expiry_predicate_agrees_with_retentions(tmp_path: Path) -> None:
+    """One definition or none. Skips until `api/retention.py` lands on this branch.
+
+    `api.retention.is_expired` is the canonical predicate and its own docstring forbids
+    copies. It is not on `build/phase-1` yet, so `api.batch.store.is_expired` carries the
+    definition with a merge note. This is the tripwire: the moment both exist, a
+    disagreement fails here rather than surfacing as the API serving something the sweeper
+    thinks is gone.
+    """
+    retention = pytest.importorskip("api.retention")
+    now = time.time()
+    for offset in (-3600.0, -1.0, 0.0, 1.0, 3600.0):
+        assert store_mod.is_expired(now + offset, now=now) == retention.is_expired(
+            now + offset, now=now
+        ), f"predicates disagree at offset {offset}"
+
+
+def test_an_expired_batch_answers_the_same_way_as_one_that_never_existed(
+    tmp_path: Path,
+) -> None:
+    """Same fact from the agent's seat: the batch is gone and a new one is needed."""
+    client = make_client(tmp_path, provider=spec_provider())
+    job_id = post_batch(client, [row()]).json()["job_id"]
+    drain(client)
+    expire(client, job_id)
+
+    expired = client.get(f"/batch/{job_id}").json()["error"]
+    missing = client.get("/batch/job_never_existed").json()["error"]
+    assert expired == missing
+    assert "24 hours" in expired["message"]
 
 
 # --- per-item isolation (BATCH-6, TC-20) — the requirement most easily lost ------------
@@ -659,20 +1185,16 @@ class SlowProvider:
 def test_verify_now_stays_fast_while_a_batch_is_running(tmp_path: Path) -> None:
     """PERF-5, LP-165 — the agent working their queue does not feel the importer dump.
 
-    Runs over HTTP with the priority middleware installed, which is the one line
-    `create_app` needs for the shared budget to mean anything.
+    Runs over HTTP against the shipped app. The priority middleware is installed by
+    `create_app` and not by this test: a test that wires up the thing it is measuring can
+    pass while the deployed process has no priority rule at all.
     """
-    app = create_app(
-        config=make_config(tmp_path, batch_workers=4),
+    client = make_client(
+        tmp_path,
         provider=SlowProvider(spec_provider(), delay=0.05),
+        batch_workers=4,
     )
-    batch_routes.install_verify_priority(app)
-    before = len(app.router.routes)
-    app.include_router(batch_routes.router)
-    added = app.router.routes[before:]
-    del app.router.routes[before:]
-    app.router.routes[0:0] = added
-    client = TestClient(app)
+    app = client.app
 
     job_id = post_batch(client, [row() for _ in range(24)]).json()["job_id"]
     wait_until(
@@ -878,6 +1400,186 @@ def test_an_archive_entry_cannot_write_outside_the_job_directory(tmp_path: Path)
     assert response.status_code == 200
     assert response.json()["accepted"] == 1
     assert not (tmp_path.parent / GOOD_IMAGE).exists()
+
+
+def zip_with_corrupt_entry() -> bytes:
+    """A zip whose central directory is fine and whose compressed stream is not.
+
+    This is what a 1.2 GB dump copied off a flaky share looks like: the archive opens, the
+    listing is right, and one entry blows up on decompression.
+    """
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr(GOOD_IMAGE, GOOD_BYTES)
+    raw = bytearray(buffer.getvalue())
+    middle = len(raw) // 2
+    for offset in range(middle, middle + 40):
+        raw[offset] ^= 0xFF
+    return bytes(raw)
+
+
+def zip_with_unsupported_compression() -> bytes:
+    """compress_type 99 — WinZip AES. `zipfile` raises NotImplementedError on read."""
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_STORED) as archive:
+        archive.writestr(GOOD_IMAGE, GOOD_BYTES)
+    raw = bytearray(buffer.getvalue())
+    raw[8:10] = (99).to_bytes(2, "little")
+    central = raw.rfind(b"PK\x01\x02")
+    raw[central + 10 : central + 12] = (99).to_bytes(2, "little")
+    return bytes(raw)
+
+
+def zip_with_truncated_entry() -> bytes:
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr(GOOD_IMAGE, GOOD_BYTES)
+    raw = buffer.getvalue()
+    central = raw.rfind(b"PK\x01\x02")
+    return raw[: central - 60] + raw[central:]
+
+
+@pytest.mark.parametrize(
+    "archive",
+    [
+        pytest.param(zip_with_corrupt_entry(), id="corrupt-deflate"),
+        pytest.param(zip_with_unsupported_compression(), id="unsupported-compression"),
+        pytest.param(zip_with_truncated_entry(), id="truncated-entry"),
+    ],
+)
+def test_an_unreadable_archive_entry_is_a_user_error_not_a_500(
+    tmp_path: Path, archive: bytes
+) -> None:
+    """The archive opens and the listing is fine — it is decompression that fails.
+
+    Every one of these left as a 500 saying "something went wrong on our side" with
+    next_step=retry: advice that is wrong, infinitely repeatable, and hides the one fact
+    that would let the agent act — that a named file in their archive is damaged. It also
+    contradicts the rule stated at the top of `api/main.py`, that no path out of this app
+    emits a framework default.
+    """
+    client = make_client(tmp_path)
+    response = post_batch(client, [row()], images={}, archive=archive)
+
+    assert response.status_code == 400
+    error = response.json()["error"]
+    assert error["kind"] == "user"
+    assert error["code"] == "unreadable_archive_entry"
+    assert error["next_step"] == "replace"
+    assert GOOD_IMAGE in error["message"], "the agent is not told which file is bad"
+    assert "went wrong on our side" not in error["message"]
+
+
+def test_an_over_cap_batch_inside_an_archive_is_still_a_size_refusal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The entry-read guard must not swallow our own refusals into "damaged archive"."""
+    monkeypatch.setattr(batch_routes, "MAX_TOTAL_BYTES", 1024)
+    client = make_client(tmp_path)
+    response = post_batch(
+        client, [row()], images={}, archive=zip_of({GOOD_IMAGE: GOOD_BYTES})
+    )
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "batch_too_large"
+
+
+def test_two_files_with_one_name_are_refused_rather_than_silently_resolved(
+    tmp_path: Path,
+) -> None:
+    """A DAM export laid out `front/x.png` + `back/x.png` used to store whichever was last.
+
+    Names are reduced to their last segment, so the two collide. The manifest addresses
+    images by name, which makes it genuinely ambiguous which one a row means — and the old
+    `files[clean] = path` picked silently, reported nothing in `unmatched_files`, and
+    showed the agent a verdict about a picture they did not send. Verified before the fix:
+    front=GOOD, back=POISON, POISON stored, no warning anywhere.
+    """
+    client = make_client(tmp_path, provider=spec_provider())
+    archive = zip_of(
+        {
+            "front/" + GOOD_IMAGE: GOOD_BYTES,
+            "back/" + GOOD_IMAGE: POISON_BYTES,
+            "manifest.csv": manifest_csv([row()]).encode("utf-8"),
+        }
+    )
+    response = client.post(
+        "/batch", files=[("files", ("labels.zip", archive, "application/zip"))]
+    )
+
+    assert response.status_code == 400
+    error = response.json()["error"]
+    assert error["code"] == "duplicate_file_name"
+    assert GOOD_IMAGE in error["message"]
+    assert "nothing has been checked" in error["message"].lower()
+
+
+def test_one_image_named_by_two_rows_is_still_fine(tmp_path: Path) -> None:
+    """The complement: sharing an image across rows is normal and must keep working."""
+    client = make_client(tmp_path, provider=spec_provider())
+    response = post_batch(client, [row(), row()])
+    assert response.status_code == 200
+    assert response.json()["accepted"] == 2
+    drain(client)
+
+
+def test_an_oversized_archive_entry_is_refused_before_it_is_decompressed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The load-bearing zip-bomb check: the declared size, read before any decompression.
+
+    `unpack`'s read bound was described as the check that stops a bomb. It is not —
+    CPython's `ZipExtFile` never returns more than the declared `file_size`, so this
+    comparison is what actually refuses one. Untested until now, which is how the wrong
+    story survived in the docstring.
+
+    The assertion has to be that `unpack` was never called. Checking only the status code
+    passes with the declared-size check deleted, because the `+1` read bound then produces
+    `cap + 1` bytes and `add`'s own size check refuses that instead — same response, after
+    writing every entry to disk. Across a 4000-entry archive that is the whole difference
+    between refusing a bomb and expanding one.
+    """
+    unpacked: list[str] = []
+    original = batch_routes._Landing.unpack
+
+    def spy(self: Any, archive: Any, entry: Any, limit: int) -> Path:
+        unpacked.append(entry.filename)
+        return original(self, archive, entry, limit)
+
+    monkeypatch.setattr(batch_routes._Landing, "unpack", spy)
+
+    client = make_client(tmp_path, max_image_bytes=64 * 1024)
+    archive = zip_of({GOOD_IMAGE: b"\x00" * (256 * 1024)})
+    response = post_batch(client, [row()], images={}, archive=archive)
+
+    assert response.status_code == 400
+    error = response.json()["error"]
+    assert error["code"] == "file_too_large"
+    assert error["next_step"] == "resize"
+    assert GOOD_IMAGE in error["message"]
+    assert unpacked == [], "the oversized entry was decompressed before being refused"
+
+
+def test_too_many_selected_files_says_so_and_points_at_the_zip(tmp_path: Path) -> None:
+    """Starlette caps a multipart body at 1000 parts, below our own MAX_FILES of 4000.
+
+    So for multi-select that limit always binds first, and FastAPI wraps it into a bare
+    400. An agent who ctrl-A'd 1200 label images was told "That address is not part of
+    this tool. Go back to the verification page and try again" — no number, no limit, and
+    the wrong category of problem entirely.
+    """
+    client = make_client(tmp_path)
+    files: list[tuple[str, tuple[str, bytes, str]]] = [
+        ("manifest", ("manifest.csv", manifest_csv([row()]).encode(), "text/csv"))
+    ]
+    files.extend(("files", (f"f{n}.png", b"x", "image/png")) for n in range(1500))
+
+    response = client.post("/batch", files=files)
+    assert response.status_code == 400
+    error = response.json()["error"]
+    assert error["code"] == "too_many_files"
+    assert "1000" in error["message"]
+    assert "zip" in error["message"]
+    assert "Go back to the verification page" not in error["message"]
 
 
 def test_a_corrupt_archive_is_answered_in_plain_language(tmp_path: Path) -> None:
@@ -1108,6 +1810,56 @@ def test_a_failed_item_exports_its_reason(tmp_path: Path) -> None:
 
 
 # --- logging (SEC-4) ------------------------------------------------------------------
+
+
+def test_every_image_line_says_which_item_it_belongs_to(tmp_path: Path) -> None:
+    """Six workers interleaving, `image_index` only ever 0 or 1 — attribution or nothing.
+
+    These lines exist to answer one question: which application was pre-gated, and on
+    which defect. A worker thread inherits no ContextVar, so the request ID that
+    attributes every interactive line is empty here; without job_id and item_id the whole
+    stream is unreadable and the lines are pure noise (OPS-1).
+    """
+    client = make_client(tmp_path, provider=spec_provider())
+    stream = io.StringIO()
+    applog.configure(stream=stream)
+
+    job_id = post_batch(client, [row(), row()]).json()["job_id"]
+    drain(client)
+
+    scored = [
+        json.loads(line)
+        for line in stream.getvalue().splitlines()
+        if line and json.loads(line).get("event") == "image_scored"
+    ]
+    assert len(scored) == 2
+    assert {entry["job_id"] for entry in scored} == {job_id}
+    assert len({entry["item_id"] for entry in scored}) == 2, "two items, two item_ids"
+
+
+def test_the_interactive_path_still_attributes_by_request_id(tmp_path: Path) -> None:
+    """The complement: Verify Now needs no `owner`, because the ContextVar carries it."""
+    client = make_client(tmp_path, provider=spec_provider())
+    stream = io.StringIO()
+    applog.configure(stream=stream)
+
+    response = client.post(
+        "/verify",
+        files=[("images", (GOOD_IMAGE, GOOD_BYTES, "image/png"))],
+        data={"application": json.dumps(old_tom())},
+    )
+    assert response.status_code == 200
+
+    scored = [
+        json.loads(line)
+        for line in stream.getvalue().splitlines()
+        if line and json.loads(line).get("event") == "image_scored"
+    ]
+    assert scored and all(
+        entry["request_id"] == response.headers["X-Request-ID"] for entry in scored
+    )
+    # Present and null rather than absent, so one query shape reads both modes.
+    assert all(entry["job_id"] is None and entry["item_id"] is None for entry in scored)
 
 
 def test_running_a_batch_puts_no_label_text_in_the_logs(tmp_path: Path) -> None:
