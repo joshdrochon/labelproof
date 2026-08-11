@@ -76,6 +76,24 @@ MAX_TOKENS: Final[int] = 8192
 #: fails at startup rather than as a 400 on the grader's first click (PERF-6).
 VALID_EFFORTS: Final[frozenset[str]] = frozenset({"low", "medium", "high", "xhigh", "max"})
 
+#: Models that reject `thinking` and `output_config.effort` outright — sending either is a
+#: 400 on every call, not a silently ignored parameter ("adaptive thinking is not
+#: supported on this model", "This model does not support the effort parameter").
+#:
+#: Haiku 4.5 is on this list and it is the model the 5-second adoption gate points at
+#: (LP-330: 5.5s single call against 9.6s for Opus 5), so this is not an edge case — it is
+#: the main path. Matched on prefix because the pinned id and its dated variants are the
+#: same model.
+_NO_THINKING_OR_EFFORT: Final[tuple[str, ...]] = ("claude-haiku-4-5",)
+
+
+def supports_thinking_and_effort(model: str) -> bool:
+    """Whether this model accepts `thinking` and `output_config.effort`.
+
+    Sending them where they are not supported does not degrade — it fails the request.
+    """
+    return not model.startswith(_NO_THINKING_OR_EFFORT)
+
 #: Image formats the vision endpoint accepts. The preprocessor emits PNG or WebP; this
 #: guard exists so an unsupported type is a clear message rather than a raw 400.
 SUPPORTED_MEDIA_TYPES: Final[frozenset[str]] = frozenset(
@@ -512,17 +530,23 @@ class AnthropicVisionProvider:
         payload = base64.standard_b64encode(image.data).decode("ascii")
         started = self._clock()
 
+        model = self.config.extraction_model
+        output_config: dict[str, Any] = {
+            "format": {"type": "json_schema", "schema": EXTRACTION_SCHEMA}
+        }
+        extra: dict[str, Any] = {}
+        if supports_thinking_and_effort(model):
+            output_config["effort"] = self.config.effort
+            extra["thinking"] = {"type": "adaptive"}
+
         try:
             message = self._client.with_options(
                 timeout=timeout_seconds, max_retries=0
             ).messages.create(
-                model=self.config.extraction_model,
+                model=model,
                 max_tokens=MAX_TOKENS,
-                thinking={"type": "adaptive"},
-                output_config={
-                    "effort": self.config.effort,
-                    "format": {"type": "json_schema", "schema": EXTRACTION_SCHEMA},
-                },
+                output_config=output_config,
+                **extra,
                 system=SYSTEM_BLOCKS,
                 messages=[
                     {

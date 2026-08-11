@@ -371,6 +371,34 @@ def test_the_schema_is_sent_as_the_output_format() -> None:
     assert fmt["schema"] == EXTRACTION_SCHEMA
 
 
+def test_a_thinking_capable_model_gets_thinking_and_effort() -> None:
+    provider, client = a_provider(responds_with(a_label()))
+    provider.extract(a_request())
+
+    call = client.calls[0]
+    assert call["thinking"] == {"type": "adaptive"}
+    assert call["output_config"]["effort"] == provider.config.effort
+
+
+def test_haiku_is_sent_neither_thinking_nor_effort() -> None:
+    """Both are 400s on Haiku 4.5, not ignored parameters — and it is the main path.
+
+    Haiku is the only model that fits the 5-second adoption gate (LP-330), so "the model
+    that rejects these two parameters" is the one the product runs on. Sending them was a
+    400 on all twenty calls of the LP-331 spike.
+    """
+    provider, client = a_provider(
+        responds_with(a_label()), config=Config(extraction_model="claude-haiku-4-5")
+    )
+    provider.extract(a_request())
+
+    call = client.calls[0]
+    assert "thinking" not in call
+    assert "effort" not in call["output_config"]
+    # The schema still has to go, or nothing constrains the answer.
+    assert call["output_config"]["format"]["schema"] == EXTRACTION_SCHEMA
+
+
 def test_the_schema_covers_all_seven_fields() -> None:
     properties = EXTRACTION_SCHEMA["properties"]["fields"]["properties"]
     assert set(properties) == {name.value for name in FieldName}
