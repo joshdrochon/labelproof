@@ -6,7 +6,9 @@ the clock, and the vocabulary of failure.
 **The upload boundary.** Bytes arriving over HTTP are hostile until proven otherwise, so
 they go through `pipeline.ingest` before anything else touches them — magic-byte sniffing
 rather than a filename, caps enforced before decode, metadata stripped, re-encoded
-(SEC-5, LP-076).
+(SEC-5, LP-076). That sequence — ingest, score, pre-gate — is `api.verify.prepare_images`
+and is shared with batch rather than written twice, so the pre-gate cannot hold here and
+silently not there.
 
 **The clock.** `Config.request_budget_ms` is a deadline for the *request*, not a hope
 about the provider. Extraction runs in a worker thread and is awaited with that deadline;
@@ -32,20 +34,12 @@ from pydantic import ValidationError
 from api import errors
 from api import logging as applog
 from api.models import (
-    Aggregate,
     Application,
     Cost,
-    FieldName,
-    FieldResult,
-    ImageQuality,
-    ImageReport,
     Recommendation,
     Timings,
-    Verdict,
     VerificationResult,
 )
-from api.pipeline import ingest as ingest_mod
-from api.pipeline import quality as quality_mod
 from api.provider.base import (
     ExtractionProvider,
     ImageInput,
@@ -53,6 +47,8 @@ from api.provider.base import (
     ProviderUsage,
 )
 from api.routes import get_config, provider_for
+from api.verify import pregate_headline, prepare_images
+from api.verify import unverified as _unverified
 from api.verify import verify as run_verification
 
 router = APIRouter()
@@ -131,84 +127,6 @@ def _validation_message(exc: ValidationError) -> str:
     )
 
 
-def _roles_for(count: int, supplied: list[str] | None) -> list[str | None]:
-    """Which face of the label each image shows.
-
-    Supplied roles win. Otherwise one image is the whole label and two are assumed
-    front then back, which is how agents send them and what TC-16 turns on. Beyond two
-    the honest answer is "unknown" — guessing would put the warning on the wrong image
-    in the evidence panel.
-    """
-    if supplied and len(supplied) == count:
-        return [r.strip().lower() or None for r in supplied]
-    if count == 1:
-        return ["single"]
-    if count == 2:
-        return ["front", "back"]
-    return [None] * count
-
-
-def _expected_values(application: Application) -> dict[FieldName, str | None]:
-    """The application side of every row, so an unverified result still shows something."""
-    producer = ", ".join(
-        part for part in (application.producer_name, application.producer_address) if part
-    )
-    abv = application.alcohol_content
-    return {
-        FieldName.BRAND_NAME: application.brand_name,
-        FieldName.CLASS_TYPE: application.class_type,
-        FieldName.ALCOHOL_CONTENT: f"{abv:g}% alc/vol" if abv is not None else None,
-        FieldName.NET_CONTENTS: application.net_contents,
-        FieldName.PRODUCER: producer or None,
-        FieldName.COUNTRY_OF_ORIGIN: application.country_of_origin,
-        FieldName.GOVERNMENT_WARNING: "the statement required by 27 CFR 16.21",
-    }
-
-
-def _unverified(
-    application: Application,
-    reports: list[ImageReport],
-    *,
-    request_id: str,
-    headline: str,
-    per_field: str,
-    timings: Timings,
-) -> VerificationResult:
-    """A result that verified nothing, and says so on every row.
-
-    Used by the two paths that stop before comparison: the pre-gate (an image too poor to
-    be worth a model call) and the budget stop (LP-079). Both return Unreadable per field
-    rather than an empty response, because a blank checklist reads as "fine" at a glance
-    and this is the opposite of fine. There is no seventh verdict for "not attempted" and
-    there should not be — Unreadable already means "we did not verify this", which is
-    exactly true here and can never be mistaken for a pass.
-    """
-    expected = _expected_values(application)
-    fields = [
-        FieldResult(
-            field=name,
-            verdict=Verdict.UNREADABLE,
-            extracted=None,
-            expected=expected[name],
-            confidence=0.0,
-            rationale=per_field,
-        )
-        for name in FieldName
-    ]
-    return VerificationResult(
-        request_id=request_id,
-        aggregate=Aggregate(
-            recommendation=Recommendation.NEEDS_REVIEW,
-            rationale=headline,
-            driving_field=None,
-        ),
-        fields=fields,
-        images=reports,
-        timings_ms=timings,
-        cost=Cost(),
-    )
-
-
 async def _read_uploads(images: list[UploadFile], max_images: int) -> list[tuple[str, bytes]]:
     if len(images) > max_images:
         raise errors.UserError(
@@ -240,59 +158,21 @@ async def verify_endpoint(
     parsed = parse_application(application)
     uploads = await _read_uploads(images, config.max_images)
 
-    ingest_started = time.perf_counter()
-    ingested = ingest_mod.ingest([data for _, data in uploads], config)
-    timings.ingest = int((time.perf_counter() - ingest_started) * 1000)
+    # Ingest, quality, and the pre-gate are `api.verify.prepare_images` — the same call
+    # batch makes, so LP-321 cannot be true here and false there.
+    prepared = prepare_images([data for _, data in uploads], config, roles=roles)
+    timings.ingest = prepared.ingest_ms
+    timings.quality = prepared.quality_ms
+    reports = prepared.reports
 
-    quality_started = time.perf_counter()
-    scores: list[ImageQuality] = [
-        quality_mod.assess(ingest_mod.to_array(image)) for image in ingested
-    ]
-    timings.quality = int((time.perf_counter() - quality_started) * 1000)
-
-    faces = _roles_for(len(ingested), roles)
-    reports = [
-        ImageReport(index=image.index, role=faces[position], quality=score)
-        for position, (image, score) in enumerate(zip(ingested, scores, strict=True))
-    ]
-    for report in reports:
-        applog.log(
-            "image_scored",
-            image_index=report.index,
-            blur=report.quality.blur,
-            exposure=report.quality.exposure,
-            glare=report.quality.glare,
-            skew_deg=report.quality.skew_deg,
-            quality=report.quality.verdict,
-        )
-
-    # The pre-gate (LP-321). An image nobody could read does not get a model call.
-    usable = [
-        ImageInput(
-            index=image.index,
-            data=image.data,
-            media_type=image.media_type,
-            role=faces[position],
-        )
-        for position, (image, score) in enumerate(zip(ingested, scores, strict=True))
-        if not quality_mod.should_skip_extraction(score)
-    ]
-
-    if not usable:
-        reason = next(
-            (s.reason for s in scores if s.reason),
-            "The images are too poor to read the label.",
-        )
+    if prepared.pregated:
         timings.total = int((time.perf_counter() - started) * 1000)
         applog.log("verify_pregated", count=len(reports), duration_ms=timings.total)
         return _unverified(
             parsed,
-            reports,
             request_id=request_id,
-            headline=(
-                f"{reason} Nothing on the label could be checked. "
-                f"The final decision is yours."
-            ),
+            reports=reports,
+            headline=pregate_headline(prepared.reason or ""),
             per_field="Not checked — the image could not be read.",
             timings=timings,
         )
@@ -301,7 +181,7 @@ async def verify_endpoint(
     remaining_ms = config.request_budget_ms - (time.perf_counter() - started) * 1000
 
     result = await _verify_within_budget(
-        parsed, usable, provider, remaining_ms=remaining_ms
+        parsed, prepared.usable, provider, remaining_ms=remaining_ms
     )
 
     if result is None:
@@ -309,14 +189,14 @@ async def verify_endpoint(
         applog.log(
             "verify_over_budget",
             duration_ms=timings.total,
-            count=len(usable),
+            count=len(prepared.usable),
             recommendation=Recommendation.NEEDS_REVIEW.value,
         )
         seconds = config.request_budget_ms / 1000
         return _unverified(
             parsed,
-            reports,
             request_id=request_id,
+            reports=reports,
             headline=(
                 f"This check was stopped after {seconds:g} seconds, so the label was "
                 f"not verified. Submit it again, or review it by hand. "

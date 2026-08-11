@@ -35,27 +35,14 @@ from api.batch.models import (
 )
 from api.batch.store import BatchStore
 from api.config import Config
-from api.models import (
-    Aggregate,
-    Application,
-    Cost,
-    FieldName,
-    FieldResult,
-    ImageQuality,
-    Recommendation,
-    Timings,
-    Verdict,
-    VerificationResult,
-)
-from api.pipeline import ingest as ingest_mod
-from api.pipeline import quality as quality_mod
+from api.models import VerificationResult
 from api.provider.base import (
     ExtractionProvider,
     ExtractionRequest,
     ExtractionResponse,
-    ImageInput,
     ProviderError,
 )
+from api.verify import pregate_headline, prepare_images, unverified
 from api.verify import verify as run_verification
 
 #: How many times one item is attempted automatically before it is failed with a reason
@@ -148,64 +135,6 @@ class _BudgetedProvider:
             return self._inner.extract(request)
 
 
-def _expected(application: Application) -> dict[FieldName, str | None]:
-    producer = ", ".join(
-        part for part in (application.producer_name, application.producer_address) if part
-    )
-    abv = application.alcohol_content
-    return {
-        FieldName.BRAND_NAME: application.brand_name,
-        FieldName.CLASS_TYPE: application.class_type,
-        FieldName.ALCOHOL_CONTENT: f"{abv:g}% alc/vol" if abv is not None else None,
-        FieldName.NET_CONTENTS: application.net_contents,
-        FieldName.PRODUCER: producer or None,
-        FieldName.COUNTRY_OF_ORIGIN: application.country_of_origin,
-        FieldName.GOVERNMENT_WARNING: "the statement required by 27 CFR 16.21",
-    }
-
-
-def unverified(application: Application, *, headline: str, per_field: str) -> VerificationResult:
-    """A result that verified nothing and says so on every row.
-
-    Same posture as the single-verification pre-gate: Unreadable per field rather than an
-    empty result, because a blank checklist in a 300-row table reads as "fine" at a glance
-    and this is the opposite of fine. There is no seventh verdict for "not attempted" and
-    Unreadable already means exactly "we did not verify this".
-    """
-    values = _expected(application)
-    return VerificationResult(
-        request_id="",
-        aggregate=Aggregate(
-            recommendation=Recommendation.NEEDS_REVIEW,
-            rationale=headline,
-            driving_field=None,
-        ),
-        fields=[
-            FieldResult(
-                field=name,
-                verdict=Verdict.UNREADABLE,
-                extracted=None,
-                expected=values[name],
-                confidence=0.0,
-                rationale=per_field,
-            )
-            for name in FieldName
-        ],
-        images=[],
-        timings_ms=Timings(),
-        cost=Cost(),
-    )
-
-
-def _roles(count: int) -> list[str | None]:
-    """One image is the whole label; two are front then back — as in Verify Now."""
-    if count == 1:
-        return ["single"]
-    if count == 2:
-        return ["front", "back"]
-    return [None] * count
-
-
 def verify_item(
     item: BatchItem,
     store: BatchStore,
@@ -214,9 +143,12 @@ def verify_item(
 ) -> VerificationResult:
     """Run one batch item through the same pipeline Verify Now uses.
 
-    The pre-gate runs here too. An importer dump is exactly where hopeless artwork
-    arrives in quantity, and spending a model call on an image nobody could read is the
-    one cost in this product with a guaranteed zero return (BUILD.md §6, LP-321).
+    "The same pipeline" is literal on both halves: `api.verify.prepare_images` for
+    ingest → quality → pre-gate, and `api.verify.verify` for extraction and comparison.
+    Neither is re-implemented here, because the pre-gate is the requirement most likely to
+    be lost by copy drift, and an importer dump is exactly where hopeless artwork arrives
+    in quantity — a model call on an image nobody could read is the one cost in this
+    product with a guaranteed zero return (BUILD.md §6, LP-321).
     """
     payloads: list[bytes] = []
     for name in item.images:
@@ -238,38 +170,16 @@ def verify_item(
             code="image_missing",
         )
 
-    ingested = ingest_mod.ingest(payloads, config)
-    scores: list[ImageQuality] = [
-        quality_mod.assess(ingest_mod.to_array(image)) for image in ingested
-    ]
-    faces = _roles(len(ingested))
+    prepared = prepare_images(payloads, config)
 
-    usable = [
-        ImageInput(
-            index=image.index,
-            data=image.data,
-            media_type=image.media_type,
-            role=faces[position],
-        )
-        for position, (image, score) in enumerate(zip(ingested, scores, strict=True))
-        if not quality_mod.should_skip_extraction(score)
-    ]
-
-    if not usable:
-        reason = next(
-            (s.reason for s in scores if s.reason),
-            "The images are too poor to read the label.",
-        )
+    if prepared.pregated:
         return unverified(
             item.application,
-            headline=(
-                f"{reason} Nothing on this label could be checked. "
-                f"The final decision is yours."
-            ),
+            headline=pregate_headline(prepared.reason or ""),
             per_field="Not checked — the image could not be read.",
         )
 
-    return run_verification(item.application, usable, provider)
+    return run_verification(item.application, prepared.usable, provider)
 
 
 def _failure_for(exc: Exception, attempts: int) -> ItemFailure:

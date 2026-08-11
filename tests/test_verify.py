@@ -1,9 +1,30 @@
-"""End-to-end verification against generated fixtures, with no model in the loop."""
+"""End-to-end verification against generated fixtures, with no model in the loop.
+
+The last section is about `api.verify`'s other half: the pre-model path both entry points
+share. It is tested here rather than in `test_api.py` or `test_batch.py` because the
+property under test only exists across the two — that Verify Now and Batch spend the same
+zero tokens on artwork nobody could read.
+"""
+
+from __future__ import annotations
+
+import io
+import json
+import threading
+from pathlib import Path
+from typing import Any
 
 import pytest
+from fastapi.testclient import TestClient
+from PIL import Image
 
+from api.batch.store import BatchStore
+from api.batch.worker import process
+from api.batch.models import ItemState
+from api.config import Config
+from api.main import create_app
 from api.models import Application, Commodity, FieldName, Recommendation, Verdict
-from api.provider.base import ExtractionRequest, ImageInput
+from api.provider.base import ExtractionRequest, ExtractionResponse, ImageInput
 from api.provider.fake import (
     FailingProvider,
     NonLabelProvider,
@@ -11,8 +32,14 @@ from api.provider.fake import (
     spec_name_for_image,
 )
 from api.provider.base import ProviderError
-from api.verify import verify
+from api.verify import prepare_images, verify
 from fixtures.generator.catalog import by_name
+
+ROOT = Path(__file__).resolve().parents[1]
+LABELS = ROOT / "fixtures" / "labels"
+SAMPLE = ROOT / "assets" / "samples" / "old_tom.json"
+
+READABLE_LABEL = "tc01_old_tom_clean.png"
 
 
 def images(n: int = 1, roles: list[str] | None = None) -> list[ImageInput]:
@@ -217,3 +244,161 @@ def test_every_result_carries_timings() -> None:
 def test_image_filename_maps_back_to_its_fixture() -> None:
     assert spec_name_for_image("tc03_title_case_warning_back.png") == "tc03_title_case_warning"
     assert spec_name_for_image("tc01_old_tom_clean.png") == "tc01_old_tom_clean"
+
+
+# --- the shared pre-model path (LP-321) ---------------------------------------------------
+#
+# `prepare_images` is the one copy of ingest -> quality -> pre-gate. It used to be written
+# twice, and the second copy — in the batch worker — is where the gate would quietly be
+# lost: an importer dump is the least-watched surface in the product and precisely where
+# hopeless artwork arrives by the hundred. These tests assert the property across both
+# entry points at once, because that is the only place it can be false.
+
+
+class CountingProvider:
+    """A fixture-backed provider that counts every model call it is asked to make."""
+
+    name = "fake:counting"
+
+    def __init__(self, inner: Any):
+        self.inner = inner
+        self.calls = 0
+        self._lock = threading.Lock()
+
+    def extract(self, request: ExtractionRequest) -> ExtractionResponse:
+        with self._lock:
+            self.calls += 1
+        return self.inner.extract(request)
+
+
+def hopeless_png() -> bytes:
+    """A near-black frame — the photo taken with a thumb over the lens."""
+    buffer = io.BytesIO()
+    Image.new("RGB", (1000, 1400), (2, 2, 2)).save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+def readable_png() -> bytes:
+    return (LABELS / READABLE_LABEL).read_bytes()
+
+
+def old_tom_application() -> dict[str, Any]:
+    raw = json.loads(SAMPLE.read_text())
+    return {key: value for key, value in raw.items() if not key.startswith("_")}
+
+
+def verify_now_calls(image: bytes, filename: str, tmp_path: Path) -> tuple[int, Any]:
+    """Drive `POST /verify` over HTTP and report (model calls, response body)."""
+    provider = CountingProvider(SpecBackedProvider(by_name("tc01_old_tom_clean")))
+    app = create_app(
+        config=Config(use_fake_provider=True, storage_dir=str(tmp_path / "verify")),
+        provider=provider,
+    )
+    client = TestClient(app)
+    response = client.post(
+        "/verify",
+        files=[("images", (filename, image, "image/png"))],
+        data={"application": json.dumps(old_tom_application())},
+    )
+    assert response.status_code == 200, response.text
+    return provider.calls, response.json()
+
+
+def batch_calls(image: bytes, filename: str, tmp_path: Path) -> tuple[int, Any]:
+    """Drive one batch item through the worker and report (model calls, stored result).
+
+    The result is serialized so both helpers hand back the same shape — the point of these
+    tests is that the two paths agree, and comparing a model to a JSON body would hide a
+    difference rather than surface one.
+    """
+    provider = CountingProvider(SpecBackedProvider(by_name("tc01_old_tom_clean")))
+    config = Config(use_fake_provider=True, storage_dir=str(tmp_path / "batch"))
+    store = BatchStore(tmp_path / "batch")
+    job = store.create_job()
+    store.save_image(job.job_id, filename, image)
+    store.add_items(
+        job.job_id, [(2, Application.model_validate(old_tom_application()), [filename])]
+    )
+    item = store.claim()
+    assert item is not None
+
+    state = process(item, store, config, provider)
+    assert state is ItemState.DONE, "the pre-gate produced a failure instead of a verdict"
+    stored = store.get_item(item.item_id)
+    assert stored is not None and stored.result is not None
+    return provider.calls, stored.result.model_dump(mode="json")
+
+
+@pytest.mark.tc("TC-13")
+def test_a_hopeless_image_costs_zero_model_calls_on_both_paths(tmp_path: Path) -> None:
+    """LP-321 — the pre-gate holds on Verify Now AND on batch, or it does not hold.
+
+    The counter is the assertion. A verdict of Unreadable proves the agent was told the
+    truth; only a call count of zero proves it cost nothing, and a batch of 300 hopeless
+    photographs is where that difference is measured in dollars.
+    """
+    interactive_calls, body = verify_now_calls(hopeless_png(), "dark.png", tmp_path)
+    assert interactive_calls == 0
+    assert body["aggregate"]["recommendation"] == Recommendation.NEEDS_REVIEW.value
+    assert {field["verdict"] for field in body["fields"]} == {Verdict.UNREADABLE.value}
+
+    queued_calls, result = batch_calls(hopeless_png(), "dark.png", tmp_path)
+    assert queued_calls == 0
+    assert result["aggregate"]["recommendation"] == Recommendation.NEEDS_REVIEW.value
+    assert {field["verdict"] for field in result["fields"]} == {Verdict.UNREADABLE.value}
+
+
+def test_both_paths_explain_a_pre_gated_label_in_the_same_words(tmp_path: Path) -> None:
+    """An agent who re-uploads a batch item through Verify Now must hear the same thing."""
+    _, body = verify_now_calls(hopeless_png(), "dark.png", tmp_path)
+    _, result = batch_calls(hopeless_png(), "dark.png", tmp_path)
+    assert body["aggregate"]["rationale"] == result["aggregate"]["rationale"]
+    assert "retake" in body["aggregate"]["rationale"].lower()
+
+
+def test_a_readable_image_does_reach_the_model_on_both_paths(tmp_path: Path) -> None:
+    """The control. Without it, "zero calls" would also pass on a pipeline that is broken."""
+    interactive_calls, body = verify_now_calls(readable_png(), READABLE_LABEL, tmp_path)
+    assert interactive_calls == 1
+    assert body["aggregate"]["recommendation"] == Recommendation.READY_TO_APPROVE.value
+
+    queued_calls, result = batch_calls(readable_png(), READABLE_LABEL, tmp_path)
+    assert queued_calls == 1
+    assert result["aggregate"]["recommendation"] == Recommendation.READY_TO_APPROVE.value
+
+
+def test_prepare_images_reports_the_defect_that_refused_the_label() -> None:
+    """A pre-gate that refuses without saying why is a dead end for the agent."""
+    prepared = prepare_images([hopeless_png()], Config(use_fake_provider=True))
+    assert prepared.pregated
+    assert prepared.usable == []
+    assert prepared.reason and prepared.reason.strip().endswith(".")
+    assert len(prepared.reports) == 1
+    assert prepared.reports[0].quality.verdict == "hopeless"
+
+
+def test_prepare_images_keeps_the_readable_image_and_labels_its_face() -> None:
+    prepared = prepare_images([readable_png()], Config(use_fake_provider=True))
+    assert not prepared.pregated
+    assert prepared.reason is None
+    assert [image.role for image in prepared.usable] == ["single"]
+
+    pair = prepare_images([readable_png(), readable_png()], Config(use_fake_provider=True))
+    assert [image.role for image in pair.usable] == ["front", "back"]
+
+    supplied = prepare_images(
+        [readable_png(), readable_png()],
+        Config(use_fake_provider=True),
+        roles=["BACK ", "front"],
+    )
+    assert [image.role for image in supplied.usable] == ["back", "front"]
+
+
+def test_one_hopeless_image_of_two_does_not_pre_gate_the_label(tmp_path: Path) -> None:
+    """TC-16's shape: the back is unusable, the front still gets read."""
+    prepared = prepare_images(
+        [readable_png(), hopeless_png()], Config(use_fake_provider=True)
+    )
+    assert not prepared.pregated
+    assert [image.index for image in prepared.usable] == [0]
+    assert len(prepared.reports) == 2
