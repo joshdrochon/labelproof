@@ -18,9 +18,26 @@ its input is missing or ambiguous.
 warning statement; that one cannot. A brand name has acceptable variations — STONE'S
 THROW is Stone's Throw. The statement required by 27 CFR 16.21 does not: it is exact or
 it is wrong, and a row reading "Acceptable variation" against the government warning
-would be the tool telling an agent that a variation was fine. Where the wording is right
-but the appearance could not be confirmed, the verdict is Unreadable — which means
-exactly what happened, and can never be misread as a pass.
+would be the tool telling an agent that a variation was fine.
+
+**Unreadable is doing two jobs, and one of them does not fit. Recorded, not hidden.**
+Where the wording is right but the appearance could not be settled — bold unresolved,
+contrast unjudged, the statement shrunk, two panels disagreeing — the verdict is
+Unreadable. That drives the aggregate to Needs review, which is what the PRD asks for on
+TC-06, and it can never be misread as a pass. But the PRD's own taxonomy defines
+Unreadable as *"image quality prevents verification of this field"*, and on TC-06 the
+warning is read perfectly: `extracted` carries the full verbatim statement.
+
+So the field verdict contradicts the taxonomy table while the aggregate matches the test
+case. That is a real gap in the six-value taxonomy, not a clever use of it: there is no
+verdict meaning "read fine, complies as far as we can tell, and something about it needs
+a human". Match is a lie, Mismatch is an accusation, Acceptable variation is the worst of
+both. Unreadable is the least wrong of four ill-fitting options, chosen because it fails
+in the safe direction.
+
+Adding a seventh verdict is a product decision (MATCH-1) and is not taken here. What is
+recorded here is that the gap exists and which way it was resolved, so the next person
+sees a decision rather than an accident.
 
 Appearance rules (bold, capitals, prominence) live in `typography.py`; this module owns
 the text and the verdict.
@@ -397,6 +414,32 @@ def type_size_context(net_contents_ml: float | None) -> str:
     )
 
 
+def required_wording_note() -> Finding:
+    """Say where the left-hand side of the warning diff comes from.
+
+    The warning row sends the canonical statement as `expected`, because that is what
+    the diff has to compare against. The column it lands in is captioned "The application
+    says", and a TTB application does not carry the warning statement — no applicant ever
+    types it. So the column, read literally, asserts something false about what was
+    filed.
+
+    The real fix is a per-field caption in the UI, which is not this module's to make.
+    This note closes the gap in the copy an agent actually reads, and it is worth having
+    even once the caption is fixed: it tells them the comparison is against the
+    regulation rather than against a filing, which is the more useful fact.
+    """
+    return Finding(
+        code="warning_expected_is_the_regulation",
+        message=(
+            "The wording shown for comparison is the statement required by 27 CFR "
+            "16.21, not something the applicant filed — applications do not carry the "
+            "warning text."
+        ),
+        citation=canon.CITATIONS["warning_text"],
+        severity=typography.SEVERITY_CONTEXT,
+    )
+
+
 def type_size_finding(net_contents_ml: float | None) -> Finding:
     """The same honesty, as a finding rather than a sentence bolted onto a rationale.
 
@@ -604,6 +647,13 @@ CHECK_MANIFEST: Final[tuple[Check, ...]] = (
         outcome="context only, never changes a verdict",
     ),
     Check(
+        code="warning_expected_is_the_regulation",
+        checks="nothing — it says where the wording shown for comparison comes from",
+        citation="27 CFR 16.21",
+        evidence="the regulation itself",
+        outcome="context only, never changes a verdict",
+    ),
+    Check(
         code="warning_type_size_not_verified",
         checks="nothing — it states the minimum type size that applies to this container",
         citation="27 CFR 16.22",
@@ -615,7 +665,7 @@ CHECK_MANIFEST: Final[tuple[Check, ...]] = (
         checks="the images agree about what the warning says",
         citation="27 CFR 16.21",
         evidence="the text read off every image",
-        outcome="context only — the most complete reading was checked",
+        outcome="Unreadable — the other panels have not been checked, a person must look",
     ),
 )
 
@@ -962,7 +1012,7 @@ def evaluate(
     wrong warning right.
     """
     signals = signals or WarningTypography()
-    honesty = [type_size_finding(net_contents_ml)]
+    honesty = [type_size_finding(net_contents_ml), required_wording_note()]
 
     if not legible:
         return WarningResult(

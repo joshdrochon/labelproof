@@ -174,7 +174,7 @@
         ]
       },
       "pending": "",
-      "notes": "TC-06. Warning present and verbatim but shrunk and low-contrast \u2014 the 'creative' evasion Jenny described. The wording is right, so this is not a correction to send back; the PRD asks for Needs review with the region shown. Unreadable is the verdict that carries that meaning without claiming the label is wrong (LP-211, LP-212)."
+      "notes": "TC-06. Warning present and verbatim but shrunk and low-contrast \u2014 the 'creative' evasion Jenny described. The wording is right, so this is not a correction to send back; the PRD's TC-06 row asks for Needs review with the region shown, and Unreadable is the only verdict that drives that without claiming the label is wrong (LP-211, LP-212). KNOWN TAXONOMY GAP: the PRD defines Unreadable as 'image quality prevents verification', and here the warning is read perfectly \u2014 `extracted` carries the full statement. The aggregate now matches the PRD and the field verdict does not. The six-value taxonomy has no verdict for 'read fine, complies as far as we can tell, needs a human anyway'; adding a seventh is a product decision (MATCH-1). Recorded rather than resolved."
     },
     {
       "name": "tc03b_non_bold_warning_header",

@@ -1056,8 +1056,58 @@ def test_context_only_findings_are_marked_as_such_in_the_manifest() -> None:
     assert context_codes == {
         "warning_prominence_unassessed",
         "warning_type_size_not_verified",
-        "warning_differs_between_images",
+        "warning_expected_is_the_regulation",
     }
+
+
+def test_the_manifest_outcome_matches_the_severity_the_code_emits() -> None:
+    """The manifest is documentation, and documentation that disagrees with the code is
+    worse than none. A row promising "context only" must not describe a finding that
+    holds up a verdict — warning_differs_between_images was exactly that after it stopped
+    being a context note."""
+    context_only = {
+        c.code for c in warning.CHECK_MANIFEST if c.outcome.startswith("context only")
+    }
+    emitted = {
+        f.code: f.severity
+        for result in (
+            warning.evaluate_across_images(
+                [
+                    warning.WarningSighting(
+                        image_index=0, text=_retitled("Government Warning:"),
+                        typography=GOOD,
+                    ),
+                    warning.WarningSighting(
+                        image_index=1, text=canon.CANONICAL_WARNING, typography=GOOD
+                    ),
+                ]
+            ),
+            warning.evaluate(canon.CANONICAL_WARNING, WarningTypography()),
+        )
+        for f in result.findings
+    }
+    for code, severity in emitted.items():
+        if severity == typography.SEVERITY_CONTEXT:
+            assert code in context_only, f"{code} is context but the manifest hides it"
+        else:
+            assert code not in context_only, f"{code} blocks a verdict, manifest says not"
+
+
+def test_the_row_says_where_the_required_wording_came_from() -> None:
+    """The warning row sends the canonical statement as `expected`, and the UI column it
+    lands in is captioned "The application says". A TTB application does not carry the
+    warning statement — no applicant types it — so the column, read literally, asserts
+    something false about what was filed.
+
+    The real fix is a per-field caption, which is not this module's to make. This closes
+    the gap in the copy an agent reads, and it earns its place after the caption is fixed
+    too: the comparison being against the regulation rather than a filing is the more
+    useful fact.
+    """
+    row = _warning_row("tc01_old_tom_clean")
+    note = next(f for f in row.findings if f.code == "warning_expected_is_the_regulation")
+    assert note.severity == typography.SEVERITY_CONTEXT
+    assert "not something the applicant filed" in note.message
 
 
 def test_the_limits_are_stated_rather_than_left_out() -> None:
