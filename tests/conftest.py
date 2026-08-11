@@ -1,24 +1,40 @@
 """Suite-wide fixtures, the offline guard, and the coverage gate.
 
-Three jobs, and each one exists because the suite makes a promise it would otherwise
-only be making in prose.
+Three jobs, and each exists because the suite makes a promise it would otherwise only be
+making in prose.
 
-**ENG-3 — the suite runs offline.** Every socket operation is blocked for the whole
-session. Not "we use fakes so we probably do not call out" — blocked, so a test that
-opens a socket fails loudly rather than passing on a laptop with wifi and failing in
-CI. See `_no_network`.
+**ENG-3 — the suite runs offline.** Every verb that can put a packet on the wire is
+refused, and the guard is installed at import so it also covers collection. This half of
+the file came from `wave/ci`, unchanged, and the history is worth keeping because it is
+the same mistake twice.
 
-**LP-245 — the coverage floor is enforced, not reported.** `pytest_sessionfinish`
-reads the live coverage data and fails the run when a rules-engine module drops below
-its floor. A floor that only prints a number is a number nobody reads.
+Both branches wrote a guard independently. Both patched `connect`, `connect_ex` and
+`getaddrinfo` and both claimed in their own docstrings to block everything. Both leaked:
+`socket.gethostbyname()` does not route through `getaddrinfo`, a UDP `sendto()` needs no
+`connect` at all, and a session-scoped fixture is installed *after* collection, so a
+module-level `create_connection` at the top of a test file sailed straight out. A
+reviewer sent real packets through both and got live answers back — 5 bytes to 8.8.8.8,
+and `example.com` resolved to a real address.
+
+So there is now one guard rather than two, and this is it. It refuses `connect`,
+`connect_ex`, `sendto`, `sendmsg`, `getaddrinfo`, `gethostbyname`, `gethostbyname_ex`
+and `gethostbyaddr`; it runs from import time; and loopback is permitted deliberately,
+because an in-process server on 127.0.0.1 is not egress. `tests/contract/test_offline.py`
+sends a real packet's worth of intent at each of those verbs, so the next version of this
+file cannot regress quietly.
+
+**LP-245 — the coverage floor is enforced, not reported.** `pytest_sessionfinish` reads
+the live coverage data and fails the run when a rules-engine module drops below its
+floor. A floor that only prints a number is a number nobody reads.
 
 **Shared fixtures.** Builders for the domain objects the property, regression, and
-contract layers all need. Deliberately small: a fixture that hides which verdict a
-test is asserting on makes the test unreadable, and unreadable tests get deleted.
+contract layers all need. Deliberately small: a fixture that hides which verdict a test
+is asserting on makes the test unreadable, and unreadable tests get deleted.
 """
 
 from __future__ import annotations
 
+import ipaddress
 import socket
 from collections.abc import Iterator
 from pathlib import Path
@@ -37,73 +53,189 @@ from api.models import (
 
 ROOT = Path(__file__).resolve().parents[1]
 
-
-# --------------------------------------------------------------------------------------
-# ENG-3 — no network egress, asserted rather than assumed
-# --------------------------------------------------------------------------------------
-
-
-class NetworkAccessError(RuntimeError):
-    """A test tried to open a socket. The suite is offline by construction (ENG-3)."""
+#: Addresses a test may reach. Loopback only — an in-process server on 127.0.0.1 is not
+#: egress, and some libraries bind one to coordinate threads.
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost", ""})
 
 
-#: Attempts recorded during the session, so `tests/contract/test_offline.py` can prove
-#: the guard is armed rather than merely installed.
-BLOCKED_CONNECTIONS: list[str] = []
+class NetworkAccessDenied(RuntimeError):  # noqa: N818 - the name reads better at a call site
+    """Something in the test session tried to reach the outside world."""
 
 
-def _blocked(what: str) -> NetworkAccessError:
-    BLOCKED_CONNECTIONS.append(what)
-    return NetworkAccessError(
-        f"This test suite runs with no network egress (ENG-3), and something tried to "
-        f"{what}. Every provider call must go through an offline fake — see "
-        f"api/provider/fake.py. If a test genuinely needs a socket it must be marked "
-        f"`@pytest.mark.allow_network` and justified in the judgment log."
+class _Policy:
+    """Whether egress is permitted right now.
+
+    A module-level flag rather than a fixture argument, because the guard has to be
+    installed before any fixture exists in order to cover collection.
+    """
+
+    allowed = False
+    context = "during collection"
+
+
+_policy = _Policy()
+
+
+def _refuse(what: str, target: str) -> NetworkAccessDenied:
+    return NetworkAccessDenied(
+        f"{_policy.context}: {what} {target}.\n"
+        "The suite runs offline by design (ENG-3): use api.provider.fake or a recorded "
+        "fixture. If a socket is genuinely required, mark the test "
+        "@pytest.mark.allow_network and say why in the docstring."
     )
 
 
-@pytest.fixture(autouse=True, scope="session")
-def _no_network() -> Iterator[None]:
-    """Block every socket operation for the whole session.
+def _host_of(address: object) -> str | None:
+    if isinstance(address, tuple) and address and isinstance(address[0], str):
+        return address[0]
+    return None
 
-    Patched at the `socket` module rather than at each HTTP client, because the point
-    is to catch the call we did not anticipate. `httpx`, `requests`, the Anthropic SDK,
-    and a stray `urllib` in a dependency all bottom out here.
 
-    Starlette's `TestClient` drives the ASGI app in-process and never reaches this, so
-    the full HTTP stack is still exercised — see `tests/e2e/`.
+def _describe(address: object) -> str:
+    if isinstance(address, tuple) and address:
+        return f"{address[0]}:{address[1] if len(address) > 1 else '?'}"
+    return repr(address)
+
+
+def _check_socket_target(sock: socket.socket, address: Any, verb: str) -> None:
+    if _policy.allowed:
+        return
+    if sock.family not in (socket.AF_INET, socket.AF_INET6):
+        return  # AF_UNIX / socketpair: local IPC, not egress
+    host = _host_of(address)
+    if host is not None and host in _LOOPBACK_HOSTS:
+        return
+    raise _refuse(f"tried to {verb}", _describe(address))
+
+
+def _check_hostname(host: object, verb: str) -> None:
+    """Refuse to resolve a name.
+
+    A resolver query is a packet leaving the machine and it leaks the hostname, so this
+    is egress in its own right. It also makes the failure identical whether or not the
+    machine has a route out — otherwise a sandboxed CI runner raises a bare `gaierror`
+    that looks nothing like the laptop's error.
+
+    An IP literal is allowed through: `getaddrinfo("8.8.8.8", 53)` is pure arithmetic
+    and sends nothing. That exemption is correct *here* and catastrophic for reverse
+    lookups — see `_check_address`.
     """
-    real_socket = socket.socket
-    real_create_connection = socket.create_connection
-    real_getaddrinfo = socket.getaddrinfo
+    if _policy.allowed or not isinstance(host, str) or host in _LOOPBACK_HOSTS:
+        return
+    try:
+        ipaddress.ip_address(host)
+    except ValueError:
+        raise _refuse(f"tried to {verb}", repr(host)) from None
+
+
+def _check_address(host: object, verb: str) -> None:
+    """Refuse to reverse-resolve an address.
+
+    Split out from `_check_hostname` because sharing it was a hole. That function lets
+    an IP literal through — right for a forward lookup, which does no I/O on one — and
+    `gethostbyaddr`'s argument is *always* an IP literal. So the guard patched the
+    function and then exempted every possible input to it: `gethostbyaddr("8.8.8.8")`
+    went out and came back `('dns.google', ...)` with the guard fully armed.
+
+    Found by `tests/contract/test_offline.py` after that file was rewritten to probe
+    each verb separately rather than to probe the one path the implementation happened
+    to take. It is the same defect the guard rewrite was fixing, one layer down.
+    """
+    if _policy.allowed or not isinstance(host, str) or host in _LOOPBACK_HOSTS:
+        return
+    try:
+        if ipaddress.ip_address(host).is_loopback:
+            return
+    except ValueError:
+        pass
+    raise _refuse(f"tried to {verb}", repr(host))
+
+
+def _install_guard() -> None:
+    """Patch every verb that can put a packet on the wire. Runs once, at import."""
     real_connect = socket.socket.connect
     real_connect_ex = socket.socket.connect_ex
+    real_sendto = socket.socket.sendto
+    real_sendmsg = socket.socket.sendmsg
+    real_getaddrinfo = socket.getaddrinfo
+    real_gethostbyname = socket.gethostbyname
+    real_gethostbyname_ex = socket.gethostbyname_ex
+    real_gethostbyaddr = socket.gethostbyaddr
 
-    def guard_connect(self: Any, address: Any) -> Any:
-        raise _blocked(f"connect a socket to {address!r}")
+    def connect(sock: socket.socket, address: Any) -> None:
+        _check_socket_target(sock, address, "connect to")
+        real_connect(sock, address)
 
-    def guard_connect_ex(self: Any, address: Any) -> Any:
-        raise _blocked(f"connect a socket to {address!r}")
+    def connect_ex(sock: socket.socket, address: Any) -> int:
+        _check_socket_target(sock, address, "connect to")
+        return real_connect_ex(sock, address)
 
-    def guard_create_connection(address: Any, *args: Any, **kwargs: Any) -> Any:
-        raise _blocked(f"open a connection to {address!r}")
+    def sendto(sock: socket.socket, *args: Any) -> int:
+        # sendto(data, address) or sendto(data, flags, address) — the address is last.
+        if args:
+            _check_socket_target(sock, args[-1], "send a datagram to")
+        return real_sendto(sock, *args)
 
-    def guard_getaddrinfo(host: Any, port: Any, *args: Any, **kwargs: Any) -> Any:
-        raise _blocked(f"resolve the hostname {host!r}")
+    def sendmsg(sock: socket.socket, *args: Any) -> int:
+        # sendmsg(buffers[, ancdata[, flags[, address]]])
+        if len(args) >= 4:
+            _check_socket_target(sock, args[3], "send a message to")
+        return real_sendmsg(sock, *args)
 
-    socket.socket.connect = guard_connect  # type: ignore[method-assign]
-    socket.socket.connect_ex = guard_connect_ex  # type: ignore[method-assign]
-    socket.create_connection = guard_create_connection
-    socket.getaddrinfo = guard_getaddrinfo
+    def getaddrinfo(host: Any, port: Any, *args: Any, **kwargs: Any) -> Any:
+        _check_hostname(host, "resolve")
+        return real_getaddrinfo(host, port, *args, **kwargs)
 
+    def gethostbyname(host: str) -> str:
+        _check_hostname(host, "resolve")
+        return real_gethostbyname(host)
+
+    def gethostbyname_ex(host: str) -> Any:
+        _check_hostname(host, "resolve")
+        return real_gethostbyname_ex(host)
+
+    def gethostbyaddr(host: str) -> Any:
+        # _check_address, not _check_hostname: the latter exempts IP literals, which is
+        # every argument this function can take.
+        _check_address(host, "reverse-resolve")
+        return real_gethostbyaddr(host)
+
+    # Assigned through setattr: patching stdlib methods is exactly what a type checker
+    # should object to, and the alternative — eight suppressions, each of which has to
+    # name the right error code or it silences nothing and hides the next error behind
+    # it — is a maintenance trap. This file's first version got four of those codes
+    # wrong.
+    for owner, name, replacement in (
+        (socket.socket, "connect", connect),
+        (socket.socket, "connect_ex", connect_ex),
+        (socket.socket, "sendto", sendto),
+        (socket.socket, "sendmsg", sendmsg),
+        (socket, "getaddrinfo", getaddrinfo),
+        (socket, "gethostbyname", gethostbyname),
+        (socket, "gethostbyname_ex", gethostbyname_ex),
+        (socket, "gethostbyaddr", gethostbyaddr),
+    ):
+        setattr(owner, name, replacement)
+
+
+_install_guard()
+
+
+def pytest_collection_finish(session: pytest.Session) -> None:
+    _policy.context = "outside a test (session fixture or import)"
+
+
+@pytest.fixture(autouse=True)
+def _no_network_egress(request: pytest.FixtureRequest) -> Iterator[None]:
+    """Name the offending test in the error, and honour `@pytest.mark.allow_network`."""
+    opted_out = request.node.get_closest_marker("allow_network") is not None
+    previous_allowed, previous_context = _policy.allowed, _policy.context
+    _policy.allowed = opted_out
+    _policy.context = request.node.nodeid
     try:
         yield
     finally:
-        socket.socket = real_socket  # type: ignore[misc]
-        socket.socket.connect = real_connect  # type: ignore[method-assign]
-        socket.socket.connect_ex = real_connect_ex  # type: ignore[method-assign]
-        socket.create_connection = real_create_connection
-        socket.getaddrinfo = real_getaddrinfo
+        _policy.allowed, _policy.context = previous_allowed, previous_context
 
 
 # --------------------------------------------------------------------------------------
