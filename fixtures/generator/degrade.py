@@ -131,6 +131,21 @@ def dim(image: np.ndarray, factor: float = 0.35) -> np.ndarray:
     return np.clip(image.astype(np.float32) * factor, 0, 255).astype(np.uint8)
 
 
+def side_lit(
+    image: np.ndarray, *, bright: float = 0.95, dark: float = 0.18
+) -> np.ndarray:
+    """A bottle under one lamp: bright on one side, in shadow on the other (TC-13).
+
+    The realistic form of bad lighting, and the one that separates local normalization
+    from a brightness slider — a global curve either leaves the shadowed half unreadable
+    or blows out the lit half.
+    """
+    h, w = image.shape[:2]
+    ramp = np.linspace(bright, dark, w, dtype=np.float32)
+    gain = np.tile(ramp, (h, 1))[..., None]
+    return np.clip(image.astype(np.float32) * gain, 0, 255).astype(np.uint8)
+
+
 def glare(
     image: np.ndarray,
     *,
@@ -277,6 +292,40 @@ CONDITIONS: list[Condition] = [
             "something worse than nothing."
         ),
     ),
+    Condition(
+        name="tc13_dim",
+        tc="TC-13",
+        description="underexposed but recoverable",
+        expectation="readable",
+        why=(
+            "TC-13 proper. The obligation is to normalize and read it, not to reject it "
+            "— an agent told to retake a photograph that was perfectly recoverable has "
+            "been made slower by the tool, which is the complaint the product exists to "
+            "answer."
+        ),
+    ),
+    Condition(
+        name="tc13_dim_uneven",
+        tc="TC-13",
+        description="lit from one side, half the label in shadow",
+        expectation="readable",
+        why=(
+            "The realistic form of bad lighting: a bottle under one lamp. A global tone "
+            "curve either leaves the shadowed half unreadable or blows out the lit half, "
+            "so this is what separates local normalization from a brightness slider."
+        ),
+    ),
+    Condition(
+        name="tc13_near_black",
+        tc="TC-13",
+        description="so underexposed there is nothing left to recover",
+        expectation="pregated",
+        why=(
+            "The other side of the line. Lifting this would amplify noise into something "
+            "that looks like text, which is the failure mode where enhancement turns "
+            "into invention."
+        ),
+    ),
 ]
 
 #: Fixture name -> one-line description. Kept as a flat mapping because it is the shape
@@ -307,6 +356,10 @@ def apply_preset(image: np.ndarray, preset: str) -> np.ndarray:
             return glare(image, centre=(0.5, 0.45), radius=0.55, aspect=1.4)
         case "tc13_dim":
             return dim(image)
+        case "tc13_dim_uneven":
+            return side_lit(image)
+        case "tc13_near_black":
+            return dim(image, 0.04)
         case "tc14_blur_hopeless":
             return blur(image, 12.0)
         case "lp201_cylinder":

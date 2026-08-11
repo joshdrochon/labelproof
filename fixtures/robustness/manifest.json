@@ -57,6 +57,30 @@
       "expectation": "pregated",
       "why": "Past recovery. The obligation here is a retake reason and zero model calls \u2014 spending a token on this image buys nothing, and inpainting it would buy something worse than nothing.",
       "sha256": "ce88f40e73fbd1c0"
+    },
+    {
+      "name": "tc13_dim",
+      "tc": "TC-13",
+      "description": "underexposed but recoverable",
+      "expectation": "readable",
+      "why": "TC-13 proper. The obligation is to normalize and read it, not to reject it \u2014 an agent told to retake a photograph that was perfectly recoverable has been made slower by the tool, which is the complaint the product exists to answer.",
+      "sha256": "8d0156ab2b4852af"
+    },
+    {
+      "name": "tc13_dim_uneven",
+      "tc": "TC-13",
+      "description": "lit from one side, half the label in shadow",
+      "expectation": "readable",
+      "why": "The realistic form of bad lighting: a bottle under one lamp. A global tone curve either leaves the shadowed half unreadable or blows out the lit half, so this is what separates local normalization from a brightness slider.",
+      "sha256": "d4742aee880e5131"
+    },
+    {
+      "name": "tc13_near_black",
+      "tc": "TC-13",
+      "description": "so underexposed there is nothing left to recover",
+      "expectation": "pregated",
+      "why": "The other side of the line. Lifting this would amplify noise into something that looks like text, which is the failure mode where enhancement turns into invention.",
+      "sha256": "c388a6c32804a53b"
     }
   ]
 }
