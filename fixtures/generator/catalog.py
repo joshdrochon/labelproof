@@ -26,7 +26,9 @@ CATALOG: list[LabelSpec] = [
 
     OLD_TOM.with_(
         name="tc02_stones_throw",
-        brand_name="STONE’S THROW",
+        # The curly apostrophe is the fixture, not a typo — TC-02 turns on the label
+        # using U+2019 where the application uses U+0027.
+        brand_name="STONE’S THROW",  # noqa: RUF001
         class_type="Kentucky Straight Bourbon Whiskey",
         application_overrides={"brand_name": "Stone's Throw"},
         expect={"brand_name": "acceptable_variation"},

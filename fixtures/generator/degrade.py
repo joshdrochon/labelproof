@@ -104,8 +104,8 @@ def glare(
     falloff = falloff * (1.0 + _rng(seed).normal(0, 0.03, falloff.shape))
     falloff = np.clip(falloff, 0.0, 1.0)[..., None]
 
-    白 = np.full_like(image, 255, dtype=np.float32)
-    blended = image.astype(np.float32) * (1 - falloff) + 白 * falloff
+    white = np.full_like(image, 255, dtype=np.float32)
+    blended = image.astype(np.float32) * (1 - falloff) + white * falloff
     return np.clip(blended, 0, 255).astype(np.uint8)
 
 
