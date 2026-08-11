@@ -154,15 +154,20 @@ produced the numbers.
 
 **Two things depend on the extraction model choice and are not obvious:**
 
-1. **The prompt-cache pre-warm only pays on models whose minimum cacheable prefix is below
-   ~1.7k tokens.** The extraction system prompt measures around that; the minimum varies by
-   model and a prefix under it caches silently not at all — no error, just a full-price
-   bill. `keepwarm_cache_not_engaging` in the logs is how you find out. Verify after any
-   model change.
-2. **The 5-second budget assumes the adopted model's measured latency.** The machine is
-   sized for roughly 300 ms of non-provider work (`performance-2x`, two dedicated cores).
-   If a faster model widens the budget, `shared-cpu-2x` at 2 GB is a one-line change in
-   `fly.toml` and about an eighth of the cost.
+1. **The prompt cache engages on the shipped model; check it again after any model
+   change.** Measured with `count_tokens`, the system blocks are 2,074 tokens on Opus 5
+   and 1,602 on Haiku 4.5, against minimum cacheable prefixes of 512 and 4,096. So on
+   Opus 5 it caches comfortably, and Haiku 4.5 is the model where it would not. An
+   earlier version of this note had that comparison backwards and read as though the
+   cache were broken today; it is not. The real defect was that the pre-warm was building
+   a *different* request than the extractor, so it warmed an entry only it ever read —
+   fixed, and now asserted by `tests/test_keepwarm.py`. `keepwarm_cache_not_engaging` in
+   the logs is how you find out if this changes.
+2. **The latency budget is pinned to the configured model** in `fly.toml`
+   (`LABELPROOF_PROVIDER_TIMEOUT_MS` / `LABELPROOF_REQUEST_BUDGET_MS`). Change the model
+   and these have to move with it — `scripts/smoke.sh` fails loudly if the budget is
+   below the model's measured latency, and `tests/test_deploy_config.py` fails in CI
+   before it ever reaches production.
 
 **The deploy gate deliberately duplicates CI.** A deploy that depends on another workflow's
 name to know it is safe stops being gated the day someone renames that workflow. Keep the

@@ -13,6 +13,7 @@ Three things here are load-bearing enough to assert rather than trust:
 
 from __future__ import annotations
 
+import contextlib
 import io
 import json
 from typing import Any
@@ -186,6 +187,79 @@ def test_eviction_is_distinguished_from_never_caching(_capture: io.StringIO) -> 
 
     warnings = [e for e in _events(_capture) if e["event"] == "keepwarm_cache_not_engaging"]
     assert warnings and warnings[0]["reason_code"] == "cache_evicted"
+
+
+def test_the_warm_request_targets_the_same_cache_entry_as_a_real_extraction() -> None:
+    """The test that would have caught the pre-warm warming the wrong entry.
+
+    Prompt caching keys on the whole rendered prefix, not just `system`. The original
+    warm request omitted `output_config.format` (which carries the ~2.3k-token extraction
+    schema) and `thinking`/`effort` (which render ahead of `system`), so it wrote a
+    ~2.1k-token entry, read its own entry back, reported a healthy cache forever, and the
+    real request paid a full ~4.4k-token write every single time.
+
+    Asserted by capturing what the adapter actually sends rather than by reading the
+    adapter's source, so this fails if `_one_call` changes shape.
+    """
+    from api.config import Config
+    from api.models import Commodity
+    from api.provider.anthropic_adapter import AnthropicVisionProvider
+    from api.provider.base import ImageInput
+
+    captured: dict[str, Any] = {}
+
+    class Capturing:
+        def with_options(self, **_: object) -> Capturing:
+            return self
+
+        @property
+        def messages(self) -> Capturing:
+            return self
+
+        def create(self, **kwargs: Any) -> None:
+            captured.update(kwargs)
+            raise RuntimeError("captured — the response is not the point")
+
+    config = Config(anthropic_api_key="k", extraction_model="claude-opus-5", effort="low")
+    provider = AnthropicVisionProvider(config, client=Capturing())
+
+    # The capturing client raises after recording the request; the response is not what
+    # this test is about.
+    with contextlib.suppress(Exception):
+        provider._one_call(
+            ImageInput(index=0, data=b"\x89PNG", media_type="image/png", role="single"),
+            Commodity.SPIRITS,
+            5.0,
+        )
+
+    assert captured, "the adapter did not issue a request; the capture harness is stale"
+
+    warm = keepwarm.cache_parameters(config.extraction_model, config.effort)
+
+    # Everything that renders at or before the cache breakpoint must match exactly.
+    for key in ("model", "system", "output_config", "thinking"):
+        assert warm.get(key) == captured.get(key), (
+            f"the pre-warm and the real extraction disagree on '{key}', so they address "
+            f"different cache entries. The warm entry would be read only by the warmer."
+        )
+
+
+def test_the_warm_request_does_not_pin_what_lives_after_the_breakpoint() -> None:
+    """`messages` and `max_tokens` sit after the cache breakpoint, so they must NOT be in
+    the shared parameter set — pinning them would force the warmer to send an image."""
+    warm = keepwarm.cache_parameters("claude-opus-5", "low")
+    assert "messages" not in warm
+    assert "max_tokens" not in warm
+
+
+def test_thinking_is_omitted_on_models_that_reject_it() -> None:
+    """Haiku 4.5 returns a 400 for `thinking` and `output_config.effort`. The warm request
+    follows the adapter's own capability gate rather than a second copy of the rule."""
+    warm = keepwarm.cache_parameters("claude-haiku-4-5", "low")
+    assert "thinking" not in warm
+    assert "effort" not in warm["output_config"]
+    # The schema is not optional — it is most of the cached prefix.
+    assert warm["output_config"]["format"]["type"] == "json_schema"
 
 
 def test_warm_request_survives_a_provider_outage(_capture: io.StringIO) -> None:

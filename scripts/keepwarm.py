@@ -14,11 +14,21 @@ keep the ASGI stack, the JSON encoder and the accept loop hot, and they turn "th
 server is wedged" into a log line rather than a discovery the grader makes.
 
 **The provider's prompt cache** (LP-324). `api/provider/anthropic_adapter.py` puts a
-`cache_control` breakpoint on the last system block precisely so the seven-field
-instruction prefix is read from cache rather than re-processed. An ephemeral cache entry
-lives five minutes. Ping more often than that and the grader's first verification is a
-cache *read*; ping less often, or not at all, and it is the request that pays for the
-*write*. The interval below is four minutes for that reason and no other.
+`cache_control` breakpoint on the last system block so the instruction prefix is read from
+cache rather than re-processed. An ephemeral entry lives five minutes, so the interval
+below is four.
+
+Be accurate about what that is worth. It removes the **cache-write premium** from the
+grader's first verification. It does **not** meaningfully remove **latency**: measured,
+an extraction with a genuine 4,351-token cache read still took 9.4s, because the time
+goes into generation, not prefix processing. This module originally justified itself on
+PERF-6 grounds; that justification was wrong and has been removed rather than softened.
+Keep the pre-warm for the cost and for the honesty signal below; do not budget latency
+against it.
+
+The parameters that decide *which* cache entry gets warmed live in `cache_parameters`,
+which mirrors the adapter's real request. That mirroring is the whole feature — see the
+note there for what happens when it is wrong, because it was.
 
 **The TLS connection pool.** Not fixable from here, and worth saying plainly rather than
 implying otherwise: the SDK client lives in the uvicorn process, this loop is a separate
@@ -26,12 +36,14 @@ process, and httpx expires idle keep-alive connections after a few seconds regar
 The grader's first request pays one handshake to `api.anthropic.com`. The prompt cache
 is the part that was worth buying.
 
-**Honesty about whether it worked.** A prompt cache that silently fails to engage is
-worse than no cache, because the latency budget was planned around it. The minimum
-cacheable prefix is model-dependent and this system prompt is ~1.7-2.2k tokens — under
-some models' floor. So every ping reports what the provider actually did with the cache,
-and a run of misses is logged as a warning naming the likely cause. Nothing here assumes
-the optimisation worked.
+**Honesty about whether it worked.** A prompt cache can fail to engage with no error at
+all — just a bill at full price. The minimum cacheable prefix is model-dependent, and
+measured with `count_tokens`: the system blocks are 2,074 tokens on Opus 5 and 1,602 on
+Haiku 4.5, against minimums of 512 and 4,096 respectively. On the shipped model the
+prefix caches comfortably; on Haiku 4.5 it is close enough to the floor to be worth
+watching. So every ping reports what the provider actually did, and a run of misses is a
+warning that names the likely cause. Nothing here assumes the optimisation worked —
+assuming it worked is exactly the bug this module already shipped once.
 
 Runs as a sidecar inside the application container (see the Dockerfile's `CMD`). It is a
 no-op unless `LABELPROOF_KEEPWARM` is truthy, so `docker build && docker run` spends
@@ -100,19 +112,26 @@ class Settings:
     warm_cache: bool = True
     api_key: str = ""
     model: str = "claude-opus-5"
+    effort: str = "low"
 
     @classmethod
     def from_env(cls) -> Settings:
         port = os.environ.get("PORT", "8080")
         interval = _int("LABELPROOF_KEEPWARM_INTERVAL_S", DEFAULT_INTERVAL_S)
+        # The model and effort come from the app's own Config so the warm request cannot
+        # drift from the real one by reading a different default.
+        from api.config import Config
+
+        config = Config.from_env()
         return cls(
             enabled=_truthy("LABELPROOF_KEEPWARM"),
             # Clamped, not just defaulted — see MAX_INTERVAL_S.
             interval_s=max(30, min(interval, MAX_INTERVAL_S)),
             base_url=os.environ.get("LABELPROOF_KEEPWARM_URL", f"http://127.0.0.1:{port}"),
             warm_cache=_truthy("LABELPROOF_KEEPWARM_CACHE", default=True),
-            api_key=os.environ.get("ANTHROPIC_API_KEY", ""),
-            model=os.environ.get("LABELPROOF_EXTRACTION_MODEL", "claude-opus-5"),
+            api_key=config.anthropic_api_key,
+            model=config.extraction_model,
+            effort=config.effort,
         )
 
 
@@ -197,35 +216,74 @@ def _error_code(body: dict[str, Any]) -> str:
 # --------------------------------------------------------------------------------------
 
 
+def cache_parameters(model: str, effort: str) -> dict[str, Any]:
+    """The request parameters that determine which cache entry is written or read.
+
+    This mirrors `AnthropicVisionProvider._one_call` exactly, and the mirroring is the
+    entire correctness property. Prompt caching keys on the rendered prefix, and the
+    prefix is not just `system`:
+
+    - `output_config.format` carries the extraction JSON schema, which adds ~2.3k tokens
+      to the prefix. A warm request without it writes a ~2.1k-token entry; the real
+      request needs a ~4.4k-token entry. Different objects.
+    - On models that support them, `thinking` and `effort` render ahead of `system` and
+      invalidate the system tier, so omitting them writes a third distinct entry again.
+
+    The first version of this warmer omitted all three, on a reading of the caching rules
+    that was correct about `system` and wrong about everything ahead of it. Measured
+    against the live API it wrote 2,067 tokens, read back its own 2,067 tokens, logged a
+    healthy cache forever, and the real request still paid a full 4,351-token write every
+    time. Roughly $4.70/month for nothing, with an honesty check that confirmed it was
+    working — the worst of the available outcomes, because the reassurance was the bug.
+
+    Every value here comes from the adapter rather than being restated. `SYSTEM_BLOCKS`
+    and `EXTRACTION_SCHEMA` are imported, and thinking/effort follow the same
+    `supports_thinking_and_effort` gate, so a change in the adapter changes the warm
+    request in the same commit.
+
+    `messages` and `max_tokens` are deliberately NOT here: they sit after the cache
+    breakpoint on the last system block, so they cannot affect which entry is used.
+    """
+    from api.provider.anthropic_adapter import (
+        EXTRACTION_SCHEMA,
+        SYSTEM_BLOCKS,
+        supports_thinking_and_effort,
+    )
+
+    output_config: dict[str, Any] = {
+        "format": {"type": "json_schema", "schema": EXTRACTION_SCHEMA}
+    }
+    parameters: dict[str, Any] = {
+        "model": model,
+        "output_config": output_config,
+        "system": SYSTEM_BLOCKS,
+    }
+    if supports_thinking_and_effort(model):
+        output_config["effort"] = effort
+        parameters["thinking"] = {"type": "adaptive"}
+    return parameters
+
+
 @dataclass
 class CacheWarmer:
     """Writes and then re-reads the extraction prompt's cached prefix.
 
-    The request is built from the adapter's own `SYSTEM_BLOCKS`, imported rather than
-    copied. Prompt caching is a byte-exact prefix match, so a transcribed copy of the
-    system prompt would drift on the first prompt edit and produce a warmer that
-    diligently warms an entry nothing ever reads.
+    **What this buys, stated accurately.** It removes the cache-write premium from the
+    grader's first verification, and it is cheap. It does **not** remove the latency —
+    measured, a call with a genuine 4,351-token cache read still took 9.4s, because the
+    time is spent generating, not processing the prefix. The original PERF-6 rationale for
+    this feature was wrong on that point and is not repeated here. Keep it for the cost
+    and for the honesty signal; do not budget latency against it.
 
-    What is deliberately *omitted* from the warm request, and why it is still the same
-    cache entry:
-
-    - **No image, and a placeholder user message.** The cache breakpoint sits on the last
-      system block, so everything after it is outside the cached prefix. The real
-      request's image and commodity text land there.
-    - **No `output_config.format`.** The structured-output schema is not part of the
-      cached prefix (the prefix is tools → system → messages), and `max_tokens: 0` is
-      rejected outright when a response format is set.
-    - **No `thinking` and no `effort`.** Toggling thinking invalidates the *messages*
-      cache, not the tools+system cache this warms. Omitting them also keeps the warmer
-      working across extraction models with different thinking parameters, which matters
-      because the model is a config value.
-
-    `max_tokens: 0` runs prefill and returns immediately with no content and no output
-    tokens billed — the cache write without a generation to pay for or throw away.
+    **What it can and cannot prove.** Because `cache_parameters` mirrors the real request,
+    an entry this warmer reads is the entry the real request reads — same key, same
+    object. That inference is only as good as the mirroring, which is why there is a test
+    asserting the two parameter sets are equal rather than a comment asserting it.
     """
 
     model: str
     api_key: str
+    effort: str = "low"
     _client: Any = field(default=None, repr=False)
     _miss_streak: int = 0
     _ever_read: bool = False
@@ -241,14 +299,14 @@ class CacheWarmer:
         return self._client
 
     def warm(self) -> bool:
-        from api.provider.anthropic_adapter import SYSTEM_BLOCKS
-
         started = time.perf_counter()
         try:
             message = self.client().with_options(timeout=WARM_TIMEOUT_S).messages.create(
-                model=self.model,
-                max_tokens=0,
-                system=SYSTEM_BLOCKS,
+                **cache_parameters(self.model, self.effort),
+                # Not part of the cached prefix, and not shared with the real request.
+                # 1 rather than 0: `max_tokens: 0` is rejected outright when a response
+                # format is set, and the format is one of the things that has to match.
+                max_tokens=1,
                 messages=[{"role": "user", "content": "warmup"}],
             )
         except Exception as exc:
@@ -334,7 +392,9 @@ def run(settings: Settings, *, ticks: int | None = None, sleep: Any = time.sleep
 
     warmer: CacheWarmer | None = None
     if settings.warm_cache and settings.api_key:
-        warmer = CacheWarmer(model=settings.model, api_key=settings.api_key)
+        warmer = CacheWarmer(
+            model=settings.model, api_key=settings.api_key, effort=settings.effort
+        )
     elif settings.warm_cache:
         # No key means the deployment is already broken in a way `/ready` reports. Say it
         # once at startup rather than once every four minutes forever.
