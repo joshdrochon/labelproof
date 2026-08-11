@@ -8,6 +8,8 @@ import pytest
 
 from api import canon
 from api.models import (
+    Application,
+    Commodity,
     FieldName,
     FieldResult,
     Recommendation,
@@ -617,6 +619,88 @@ def test_warning_comparison_is_case_sensitive() -> None:
 
 def test_punctuation_differences_are_not_folded_away() -> None:
     assert not warning.is_verbatim(canon.CANONICAL_WARNING.replace(":", ";"))
+
+
+# --- LP-204: what the diff view is handed ---------------------------------------------
+#
+# WARN-8 says the word-level diff is the evidence — the thing an agent shows a supervisor
+# and an applicant. `web/src/components/DiffView.tsx` renders it from two fields on the
+# wire, `expected` and `extracted`, and it can only be as good as those. These tests
+# assert the contract from the server side, because a diff rendered against a placeholder
+# is worse than no diff: it looks like evidence and is noise.
+
+
+def _warning_row(fixture: str) -> FieldResult:
+    from api.provider.base import ImageInput
+    from api.provider.fake import SpecBackedProvider
+    from api.verify import verify as run_verification
+    from fixtures.generator.catalog import by_name
+
+    spec = by_name(fixture)
+    producer_name, _, producer_address = spec.producer.partition(", ")
+    application = Application(
+        commodity=Commodity(spec.commodity),
+        brand_name=spec.brand_name,
+        class_type=spec.class_type,
+        alcohol_content=45.0,
+        net_contents=spec.net_contents,
+        producer_name=producer_name,
+        producer_address=producer_address,
+        country_of_origin=spec.country_of_origin,
+        is_import=False,
+    )
+    result = run_verification(
+        application, [ImageInput(index=0, data=b"", role="single")], SpecBackedProvider(spec)
+    )
+    return next(f for f in result.fields if f.field is FieldName.GOVERNMENT_WARNING)
+
+
+@pytest.mark.tc("TC-05")
+def test_the_diff_view_is_handed_the_regulation_not_a_description_of_it() -> None:
+    row = _warning_row("tc05_reworded_warning")
+    assert row.expected == canon.CANONICAL_WARNING
+    assert row.extracted is not None and row.extracted != canon.CANONICAL_WARNING
+
+
+@pytest.mark.tc("TC-05")
+def test_the_two_sides_of_the_diff_differ_only_where_the_label_does() -> None:
+    """Whatever diff algorithm renders it, this is the pair it renders — and the words
+    that differ have to be the reworded ones, not an artefact of the comparison."""
+    row = _warning_row("tc05_reworded_warning")
+    assert row.extracted is not None
+    changed = {
+        word
+        for seg in warning.tokenized_diff(row.extracted)
+        if seg.is_difference
+        for word in (*seg.expected, *seg.found)
+    }
+    assert "pregnant" in changed
+    assert "Consumption" not in changed  # the untouched clause stays untouched
+
+
+def test_both_sides_are_long_enough_to_open_the_block_diff() -> None:
+    """FieldRow switches to the full side-by-side past 90 characters. A warning row
+    that fell under that would show fifty words of legalese inside a table cell."""
+    row = _warning_row("tc03_title_case_warning")
+    assert row.expected is not None and len(row.expected) > 90
+    assert row.extracted is not None and len(row.extracted) > 90
+
+
+def test_a_missing_warning_still_shows_the_agent_what_was_required() -> None:
+    """Nothing to diff against, and the required wording is still the useful thing to
+    put on screen — it is what the applicant has to add."""
+    row = _warning_row("tc07_missing_warning")
+    assert row.verdict is Verdict.MISSING
+    assert row.expected == canon.CANONICAL_WARNING
+    assert row.extracted is None
+
+
+def test_the_warning_row_points_at_a_region_on_the_picture() -> None:
+    """LP-212 asks for the region, and the row an agent most needs outlined was the one
+    field arriving with no evidence at all."""
+    row = _warning_row("tc06_buried_warning")
+    assert row.evidence is not None
+    assert row.evidence.bbox is not None
 
 
 # --- LP-214: the warning is the row an agent sees first --------------------------------
