@@ -128,20 +128,22 @@ def glare(
     *,
     centre: tuple[float, float] = (0.5, 0.75),
     radius: float = 0.28,
+    aspect: float = 1.0,
     intensity: float = 1.0,
     seed: int = 7,
 ) -> np.ndarray:
     """A specular blow-out over part of the label (TC-12).
 
-    Defaults put it over the lower portion, where the warning statement sits — the case
-    that must produce Unreadable for the warning while other fields stay verified.
+    `aspect` stretches the patch horizontally. A flash reflection off a bottle is a band
+    across the label, not a circle: it follows the curve of the glass, so it covers a few
+    lines of text right across the width rather than a disc in the middle of one.
     """
     h, w = image.shape[:2]
     cy, cx = int(h * centre[1]), int(w * centre[0])
     radius_px = radius * max(h, w)
 
     ys, xs = np.ogrid[:h, :w]
-    distance = np.sqrt((xs - cx) ** 2 + (ys - cy) ** 2)
+    distance = np.sqrt(((xs - cx) / max(aspect, 1e-6)) ** 2 + (ys - cy) ** 2)
     falloff = np.clip(1.0 - (distance / radius_px) ** 2, 0.0, 1.0) * intensity
 
     # A little noise so the patch is not a perfect analytic disc.
@@ -151,6 +153,28 @@ def glare(
     white = np.full_like(image, 255, dtype=np.float32)
     blended = image.astype(np.float32) * (1 - falloff) + white * falloff
     return np.clip(blended, 0, 255).astype(np.uint8)
+
+
+#: Where `render.py` lays the government warning out on a single-face label, as a fraction
+#: of the image height. Coupled to that layout on purpose — TC-12 is "glare obscuring the
+#: warning only", and a glare patch that happened to miss it would test nothing while
+#: looking like it passed. `test_glare_over_the_warning_actually_covers_it` fails loudly if
+#: the renderer ever moves the block.
+WARNING_BAND: tuple[float, float] = (0.45, 0.54)
+
+
+def glare_over_warning(image: np.ndarray, *, seed: int = 7) -> np.ndarray:
+    """A flash reflection sitting across the government warning and nothing else (TC-12).
+
+    Sized to blow out the warning band right across the width while leaving the brand,
+    class and alcohol content untouched. That separation is the entire test: the warning
+    must come back Unreadable and every other field must still be verified. A patch that
+    dimmed the whole label would prove only that a bad photo is a bad photo.
+    """
+    centre_y = (WARNING_BAND[0] + WARNING_BAND[1]) / 2
+    return glare(
+        image, centre=(0.5, centre_y), radius=0.045, aspect=7.0, intensity=1.0, seed=seed
+    )
 
 
 #: Named degradations per canonical test case, so a fixture name maps to one transform.
@@ -174,7 +198,7 @@ def apply_preset(image: np.ndarray, preset: str) -> np.ndarray:
         case "tc11_angle_45":
             return perspective(image, 45.0)
         case "tc12_glare_warning":
-            return glare(image)
+            return glare_over_warning(image)
         case "tc13_dim":
             return dim(image)
         case "tc14_blur_hopeless":

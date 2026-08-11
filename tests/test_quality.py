@@ -7,6 +7,7 @@ expectation is grounded in what was actually done to the pixels.
 import numpy as np
 import pytest
 
+from api.models import BoundingBox, FieldName
 from api.pipeline import quality
 from api.rules import thresholds as T
 from fixtures.generator import degrade
@@ -17,6 +18,21 @@ from fixtures.generator.render import render
 @pytest.fixture(scope="module")
 def clean() -> np.ndarray:
     return np.array(render(by_name("tc01_old_tom_clean")))
+
+
+#: Where the generator actually puts each block on a single-face label. Measured from the
+#: render, not guessed: a box that missed its text would make every region assertion below
+#: pass for the wrong reason.
+REGIONS: dict[FieldName, BoundingBox] = {
+    FieldName.BRAND_NAME: BoundingBox(x0=0.0, y0=0.055, x1=1.0, y1=0.115),
+    FieldName.CLASS_TYPE: BoundingBox(x0=0.0, y0=0.150, x1=1.0, y1=0.190),
+    FieldName.ALCOHOL_CONTENT: BoundingBox(x0=0.0, y0=0.260, x1=1.0, y1=0.292),
+    FieldName.NET_CONTENTS: BoundingBox(x0=0.0, y0=0.290, x1=1.0, y1=0.315),
+    FieldName.PRODUCER: BoundingBox(x0=0.0, y0=0.370, x1=1.0, y1=0.398),
+    FieldName.GOVERNMENT_WARNING: BoundingBox(x0=0.0, y0=0.450, x1=1.0, y1=0.540),
+}
+
+BLANK = BoundingBox(x0=0.0, y0=0.60, x1=1.0, y1=0.75)
 
 
 # --- the clean baseline -------------------------------------------------------------
@@ -153,6 +169,95 @@ def test_a_sharp_non_label_image_passes_the_pre_gate(clean: np.ndarray) -> None:
     rng = np.random.default_rng(0)
     photo = rng.integers(60, 200, size=(1400, 1000, 3), dtype=np.uint8)
     assert not quality.should_skip_extraction(quality.assess(photo))
+
+
+# --- LP-192: quality judged per region, not per image ------------------------------------
+
+def test_the_region_boxes_actually_land_on_their_text(clean: np.ndarray) -> None:
+    """Guards every other region assertion in this file. If the renderer moves a block,
+    these boxes stop containing text and the tests below would pass for the wrong
+    reason — a green suite proving nothing."""
+    for field, box in REGIONS.items():
+        assert quality.assess_region(clean, box).has_content, field
+
+
+def test_a_blank_area_is_blank_not_blurry(clean: np.ndarray) -> None:
+    """Laplacian variance over bare label stock is legitimately near zero. Reporting that
+    as 'too blurry to read' would flag every field whose box includes a margin."""
+    assessment = quality.assess_region(clean, BLANK)
+    assert assessment.verdict == "blank"
+    assert assessment.legible
+
+
+def test_every_region_of_a_clean_label_reads(clean: np.ndarray) -> None:
+    assert quality.illegible_regions(clean, REGIONS) == set()
+
+
+@pytest.mark.tc("TC-12")
+def test_glare_over_the_warning_actually_covers_it(clean: np.ndarray) -> None:
+    """The fixture guard for TC-12. A glare patch that missed the warning would leave the
+    case testing nothing while looking like it passed."""
+    glared = degrade.glare_over_warning(clean)
+    warning = quality.assess_region(glared, REGIONS[FieldName.GOVERNMENT_WARNING])
+    assert warning.glare < quality.assess_region(clean, REGIONS[FieldName.GOVERNMENT_WARNING]).glare
+
+
+@pytest.mark.tc("TC-12")
+def test_glare_on_the_warning_leaves_the_rest_of_the_label_readable(clean: np.ndarray) -> None:
+    """The whole point of per-region scoring. One global number would call this image
+    fine, because it *is* fine everywhere except the one place that matters most."""
+    glared = degrade.glare_over_warning(clean)
+    assert quality.illegible_regions(glared, REGIONS) == {FieldName.GOVERNMENT_WARNING}
+
+
+@pytest.mark.tc("TC-12")
+def test_the_whole_image_still_scores_ok_under_that_glare(clean: np.ndarray) -> None:
+    """The image-level gate must NOT reject this. Rejecting it would throw away the five
+    fields that are perfectly readable to protect the one that is not."""
+    assert quality.assess(degrade.glare_over_warning(clean)).verdict != "hopeless"
+
+
+@pytest.mark.tc("TC-12")
+def test_the_region_reason_names_glare(clean: np.ndarray) -> None:
+    glared = degrade.glare_over_warning(clean)
+    reason = quality.assess_region(glared, REGIONS[FieldName.GOVERNMENT_WARNING]).reason
+    assert reason and "glare" in reason.lower()
+
+
+@pytest.mark.tc("TC-14")
+def test_blurred_text_is_illegible_not_blank(clean: np.ndarray) -> None:
+    """Edge density collapses to zero on text blurred past legibility. Calling that region
+    blank would report a genuine TC-14 failure as an empty part of the label."""
+    assessment = quality.assess_region(
+        degrade.blur(clean, 12.0), REGIONS[FieldName.BRAND_NAME]
+    )
+    assert assessment.has_content
+    assert assessment.verdict == "hopeless"
+
+
+@pytest.mark.tc("TC-13")
+def test_a_dim_region_is_reported_as_dark(clean: np.ndarray) -> None:
+    assessment = quality.assess_region(
+        degrade.dim(clean, 0.05), REGIONS[FieldName.GOVERNMENT_WARNING]
+    )
+    assert assessment.reason and "dark" in assessment.reason.lower()
+
+
+def test_region_content_detection_survives_dim_light(clean: np.ndarray) -> None:
+    """Relative contrast, not an absolute range: a dimly lit line of text is still text."""
+    assert quality.assess_region(
+        degrade.dim(clean, 0.1), REGIONS[FieldName.BRAND_NAME]
+    ).has_content
+
+
+def test_a_degenerate_box_does_not_crash(clean: np.ndarray) -> None:
+    zero = BoundingBox(x0=0.5, y0=0.5, x1=0.5, y1=0.5)
+    assert quality.crop(clean, zero).size > 0
+
+
+def test_region_assessment_is_deterministic(clean: np.ndarray) -> None:
+    box = REGIONS[FieldName.GOVERNMENT_WARNING]
+    assert quality.assess_region(clean, box) == quality.assess_region(clean, box)
 
 
 # --- determinism ---------------------------------------------------------------------------

@@ -10,14 +10,25 @@ verified this and it was fine".
 
 **What the pre-gate does not do:** it catches illegible images, not wrong-subject ones. A
 photograph of a cat is sharp, well exposed, and perfectly scored — TC-15 needs the model.
+
+**Quality is also judged per region, not only per image (IMG-5, LP-192).** A whole-image
+score answers "is this a nice photograph", which is not the question. A label can be
+tack-sharp everywhere except the flash reflection sitting across the government warning,
+and a single global number reports that image as fine. `assess_region` scores one
+rectangle of the frame on the same scale, so the warning can come back Unreadable while
+the brand two inches above it comes back verified — which is TC-12, and is the difference
+between an honest result and a false pass.
 """
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+from dataclasses import dataclass
+
 import cv2
 import numpy as np
 
-from api.models import ImageQuality
+from api.models import BoundingBox, ImageQuality
 from api.rules import thresholds as T
 
 
@@ -147,6 +158,143 @@ def assess(image: np.ndarray) -> ImageQuality:
 def should_skip_extraction(quality: ImageQuality) -> bool:
     """LP-321 — is this image hopeless enough to skip the model entirely?"""
     return quality.verdict == "hopeless"
+
+
+# --------------------------------------------------------------------------------------
+# Per-region readability (IMG-5, LP-192)
+# --------------------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class RegionQuality:
+    """How readable one rectangle of the frame is.
+
+    `verdict` carries a fourth value the whole-image assessment has no use for: `blank`,
+    meaning the region is perfectly visible and there is simply nothing printed in it.
+    That distinction is the difference between Missing and Unreadable, and collapsing the
+    two would either invent a legibility problem or hide one.
+    """
+
+    blur: float
+    exposure: float
+    glare: float
+    has_content: bool
+    verdict: str  # "ok" | "degraded" | "hopeless" | "blank"
+    reason: str | None = None
+
+    @property
+    def legible(self) -> bool:
+        """False only for `hopeless`. Blank is legible — there is just nothing to read."""
+        return self.verdict != "hopeless"
+
+
+def crop(image: np.ndarray, box: BoundingBox) -> np.ndarray:
+    """The pixels inside a normalized 0..1 box, clamped to at least one pixel.
+
+    Normalized against the *preprocessed* image, per BUILD.md §6 — deskew changes
+    geometry, so a box drawn over the original upload drifts.
+    """
+    h, w = image.shape[:2]
+    y0, y1 = int(box.y0 * h), max(int(box.y1 * h), int(box.y0 * h) + 1)
+    x0, x1 = int(box.x0 * w), max(int(box.x1 * w), int(box.x0 * w) + 1)
+    return image[y0 : min(y1, h), x0 : min(x1, w)]
+
+
+#: Relative contrast below which a region is treated as bare stock rather than print.
+#: Blank paper under sensor noise sits near 0.02; text sits above 0.8 even at a tenth of
+#: normal exposure.
+_CONTENT_CONTRAST_RATIO = 0.12
+
+
+def _has_content(region: np.ndarray) -> bool:
+    """Is anything printed here, as opposed to bare label stock?
+
+    Measured as contrast *relative* to the region's own brightness, over a median-filtered
+    copy. Three rejected alternatives, each of which gets a real case wrong:
+
+    * **Edge density** calls text blurred past legibility blank, reporting a genuine TC-14
+      failure as an empty part of the label.
+    * **Absolute range** calls a dimly lit line of text blank.
+    * **Percentiles** call `750 mL` blank, because a short line across a wide box is a
+      couple of percent of the pixels and the 2nd percentile is still bare stock.
+
+    The median filter is what makes min-to-max safe to use: it removes the isolated hot
+    pixels a real sensor produces without touching a letter stroke.
+    """
+    gray = _to_gray(region)
+    if gray.size == 0:
+        return False
+    smoothed = cv2.medianBlur(gray, 3) if min(gray.shape[:2]) >= 3 else gray
+    low, high = float(smoothed.min()), float(smoothed.max())
+    return bool((high - low) / max(high, 1.0) >= _CONTENT_CONTRAST_RATIO)
+
+
+def assess_region(image: np.ndarray, box: BoundingBox) -> RegionQuality:
+    """Score one region of the label on the same 0..1 scale the whole image uses.
+
+    Blur is only allowed to condemn a region that has something printed in it. Laplacian
+    variance over bare label stock is legitimately near zero, and calling that "too
+    blurry to read" would flag every field whose evidence box happens to include a margin
+    — a wall of false flags, which is its own adoption failure (UX-7).
+    """
+    region = crop(image, box)
+    blur = blur_score(region)
+    exposure = exposure_score(region)
+    glare = glare_score(region)
+    content = _has_content(region)
+
+    applicable = [exposure, glare] + ([blur] if content else [])
+    worst = min(applicable)
+
+    if worst < T.HOPELESS:
+        verdict = "hopeless"
+        reason = _region_reason(blur if content else 1.0, exposure, glare)
+    elif not content:
+        verdict, reason = "blank", "Nothing is printed in this part of the label."
+    elif worst < T.DEGRADED:
+        verdict = "degraded"
+        reason = "This part of the label is hard to read."
+    else:
+        verdict, reason = "ok", None
+
+    return RegionQuality(
+        blur=round(blur, 3),
+        exposure=round(exposure, 3),
+        glare=round(glare, 3),
+        has_content=content,
+        verdict=verdict,
+        reason=reason,
+    )
+
+
+def assess_regions[K](
+    image: np.ndarray, boxes: Mapping[K, BoundingBox]
+) -> dict[K, RegionQuality]:
+    """Score several named regions of one image."""
+    return {key: assess_region(image, box) for key, box in boxes.items()}
+
+
+def illegible_regions[K](image: np.ndarray, boxes: Mapping[K, BoundingBox]) -> set[K]:
+    """The regions nobody could read — the fields that must come back Unreadable.
+
+    This is the mechanism behind TC-12: glare over the warning statement puts exactly one
+    key in this set, the extractor is told that field is not legible, and the brand on the
+    dry half of the label is verified normally.
+    """
+    return {
+        key
+        for key, assessment in assess_regions(image, boxes).items()
+        if not assessment.legible
+    }
+
+
+def _region_reason(blur: float, exposure: float, glare: float) -> str:
+    worst = min(blur, exposure, glare)
+    if worst == glare:
+        return "Glare is covering this part of the label."
+    if worst == exposure:
+        return "This part of the label is too dark to read."
+    return "This part of the label is too blurry to read."
 
 
 def _retake_reason(blur: float, exposure: float, glare: float) -> str:
