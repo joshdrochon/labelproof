@@ -1,4 +1,4 @@
-"""Roll a log file up into latency and cost percentiles (LP-119, OPS-1, OPS-4).
+"""Roll a log file up into latency, error and cost figures (LP-119, LP-124, OPS-1/4/5).
 
     .venv/bin/python -m scripts.rollup .data/logs.jsonl
     fly logs --no-tail | .venv/bin/python -m scripts.rollup
@@ -54,6 +54,22 @@ VERIFY_SERIES = "verification (POST /verify)"
 # --------------------------------------------------------------------------------------
 
 
+#: Events that mean "we degraded but stayed honest", counted for the error summary.
+DEGRADATION_EVENTS: tuple[str, ...] = (
+    "provider_retry",
+    "provider_unavailable",
+    "circuit_breaker",
+    "provider_bbox_dropped",
+    "provider_typography_unusable",
+    "batch_item_failed",
+    "batch_item_retry",
+    "config_incomplete",
+)
+
+#: Events that mean something broke that nobody chose. These should be zero.
+FAULT_EVENTS: tuple[str, ...] = ("unhandled_exception", "batch_item_unrecorded")
+
+
 @dataclass
 class Reading:
     """Everything a pass over the log collected."""
@@ -65,6 +81,10 @@ class Reading:
     cache_read_tokens: list[int] = field(default_factory=list)
     models: set[str] = field(default_factory=set)
     providers: set[str] = field(default_factory=set)
+    # --- errors (LP-124, OPS-5) ---
+    statuses: dict[int, int] = field(default_factory=dict)
+    taxonomy: dict[tuple[str, str], int] = field(default_factory=dict)
+    events: dict[str, int] = field(default_factory=dict)
     parsed: int = 0
     skipped: int = 0
     first_ts: float | None = None
@@ -72,6 +92,39 @@ class Reading:
 
     def note(self, series: str, duration_ms: int) -> None:
         self.latencies.setdefault(series, []).append(duration_ms)
+
+    def count(self, event: str) -> int:
+        return self.events.get(event, 0)
+
+    @property
+    def requests(self) -> int:
+        return sum(self.statuses.values())
+
+    def status_class(self, hundreds: int) -> int:
+        return sum(n for code, n in self.statuses.items() if code // 100 == hundreds)
+
+    @property
+    def attempted_verifications(self) -> int:
+        """Every `/verify` that reached a verdict of some kind, including "we did not".
+
+        `verify_complete`, `verify_pregated` and `verify_over_budget` are mutually
+        exclusive — a request emits exactly one of them.
+        """
+        return (
+            self.count("verify_complete")
+            + self.count("verify_pregated")
+            + self.count("verify_over_budget")
+        )
+
+    @property
+    def unverified(self) -> int:
+        """Requests that answered 200 and checked nothing.
+
+        This is the number a plain HTTP error rate hides, and it is the one that
+        matters: the pre-gate and the budget stop are both honest outcomes, but a run
+        where a third of the labels were never actually checked is not a healthy run.
+        """
+        return self.count("verify_pregated") + self.count("verify_over_budget")
 
 
 def iter_events(lines: Iterable[str], reading: Reading) -> Iterator[dict[str, Any]]:
@@ -104,7 +157,15 @@ def read(lines: Iterable[str]) -> Reading:
     reading = Reading()
     for line in iter_events(lines, reading):
         _observe_time(reading, line)
-        event = line.get("event")
+        event = str(line.get("event", ""))
+        reading.events[event] = reading.events.get(event, 0) + 1
+
+        if event == "request_complete" and isinstance(line.get("status"), int):
+            status = int(line["status"])
+            reading.statuses[status] = reading.statuses.get(status, 0) + 1
+        elif event == "request_failed":
+            key = (str(line.get("kind", "unknown")), str(line.get("code", "unknown")))
+            reading.taxonomy[key] = reading.taxonomy.get(key, 0) + 1
 
         if event == "request_complete" and isinstance(line.get("duration_ms"), int):
             reading.note(REQUEST_SERIES, line["duration_ms"])
@@ -323,10 +384,108 @@ def render_cost(reading: Reading) -> list[str]:
     return out
 
 
+def _rate(part: int, whole: int) -> str:
+    return "n/a" if whole == 0 else f"{part / whole * 100:.1f}%"
+
+
+def render_errors(reading: Reading) -> list[str]:
+    """The error-rate summary (LP-124, OPS-5).
+
+    Two rates, and the second is the one that would otherwise be invisible.
+
+    The HTTP rate answers "did the service respond". The unverified rate answers "did it
+    actually check the label" — because the pre-gate and the budget stop both answer
+    **200**. They are honest outcomes and the agent is told plainly that nothing was
+    checked, but a run where a quarter of the labels were never verified is not a healthy
+    run, and an error summary that reports 0% for it is telling a true fact in a way that
+    misleads.
+    """
+    out = ["## Errors", ""]
+
+    if reading.requests == 0 and not reading.taxonomy and reading.attempted_verifications == 0:
+        out += ["No request lines in the input, so nothing can be said about error rate.", ""]
+        return out
+
+    ok = reading.status_class(2)
+    client = reading.status_class(4)
+    server = reading.status_class(5)
+    other = reading.requests - ok - client - server
+    failed = reading.requests - ok
+
+    out += [
+        "| HTTP outcome | Count | Share |",
+        "|---|--:|--:|",
+        f"| Requests | {reading.requests} | |",
+        f"| 2xx | {ok} | {_rate(ok, reading.requests)} |",
+        f"| 4xx (the caller's request was wrong) | {client} | {_rate(client, reading.requests)} |",
+        f"| 5xx (ours, or the provider's) | {server} | {_rate(server, reading.requests)} |",
+    ]
+    if other:
+        out.append(f"| other | {other} | {_rate(other, reading.requests)} |")
+    out += [
+        f"| **Error rate** | {failed} | **{_rate(failed, reading.requests)}** |",
+        "",
+    ]
+
+    attempted = reading.attempted_verifications
+    if attempted:
+        out += [
+            "| Verification outcome | Count | Share |",
+            "|---|--:|--:|",
+            f"| Attempted | {attempted} | |",
+            f"| Verified | {reading.count('verify_complete')} | "
+            f"{_rate(reading.count('verify_complete'), attempted)} |",
+            f"| Not checked — images unreadable (pre-gate) | "
+            f"{reading.count('verify_pregated')} | "
+            f"{_rate(reading.count('verify_pregated'), attempted)} |",
+            f"| Not checked — ran out of time | {reading.count('verify_over_budget')} | "
+            f"{_rate(reading.count('verify_over_budget'), attempted)} |",
+            f"| **Unverified rate** | {reading.unverified} | "
+            f"**{_rate(reading.unverified, attempted)}** |",
+            "",
+            "Both unverified paths answer HTTP 200 and tell the agent plainly that "
+            "nothing was checked, so they never appear in the error rate above. They are "
+            "counted here because “the service responded” and “the label "
+            "was checked” are different questions.",
+            "",
+        ]
+
+    if reading.taxonomy:
+        out += ["| Error kind | Code | Count |", "|---|---|--:|"]
+        for (kind, code), n in sorted(
+            reading.taxonomy.items(), key=lambda item: (-item[1], item[0])
+        ):
+            out.append(f"| `{kind}` | `{code}` | {n} |")
+        out.append("")
+
+    degradations = [
+        (event, reading.count(event)) for event in DEGRADATION_EVENTS if reading.count(event)
+    ]
+    if degradations:
+        out += ["| Degraded but handled | Count |", "|---|--:|"]
+        out += [f"| `{event}` | {n} |" for event, n in degradations]
+        out.append("")
+
+    faults = [(event, reading.count(event)) for event in FAULT_EVENTS if reading.count(event)]
+    if faults:
+        listed = ", ".join(f"`{event}` x{n}" for event, n in faults)
+        out += [
+            f"**{sum(n for _, n in faults)} unchosen failures in this window: {listed}.** "
+            f"These are the ones to look at — every other line above is a path somebody "
+            f"designed.",
+            "",
+        ]
+    else:
+        out += ["No `unhandled_exception` lines in this window.", ""]
+
+    return out
+
+
 def render(reading: Reading, sources: Sequence[str]) -> str:
     body = [
         *render_header(reading, sources),
         *render_latency(reading),
+        *render_errors(reading),
         *render_cost(reading),
     ]
     return "\n".join(body).rstrip() + "\n"
@@ -348,6 +507,31 @@ def as_json(reading: Reading) -> dict[str, Any]:
             "enough_for_p95": s.confident,
             **{f"p{p}": s.at(p) for p in PERCENTILES},
         }
+    if reading.requests or reading.attempted_verifications:
+        out["errors"] = {
+            "requests": reading.requests,
+            "by_status": dict(sorted(reading.statuses.items())),
+            "error_rate": (
+                None
+                if reading.requests == 0
+                else round((reading.requests - reading.status_class(2)) / reading.requests, 4)
+            ),
+            "attempted_verifications": reading.attempted_verifications,
+            "verified": reading.count("verify_complete"),
+            "pregated": reading.count("verify_pregated"),
+            "over_budget": reading.count("verify_over_budget"),
+            "unverified_rate": (
+                None
+                if reading.attempted_verifications == 0
+                else round(reading.unverified / reading.attempted_verifications, 4)
+            ),
+            "taxonomy": {
+                f"{kind}/{code}": n for (kind, code), n in sorted(reading.taxonomy.items())
+            },
+            "degraded": {e: reading.count(e) for e in DEGRADATION_EVENTS if reading.count(e)},
+            "faults": {e: reading.count(e) for e in FAULT_EVENTS if reading.count(e)},
+        }
+
     if reading.usd:
         n = len(reading.usd)
         out["cost_usd"] = {

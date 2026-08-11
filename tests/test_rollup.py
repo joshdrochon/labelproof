@@ -1,4 +1,4 @@
-"""The latency and cost rollup (LP-119, OPS-1, OPS-4).
+"""The latency, error and cost rollup (LP-119, LP-124, OPS-1, OPS-4, OPS-5).
 
 This script produces the number that gets quoted in a status update, so what is under
 test is mostly honesty rather than arithmetic: does it say how many samples it had, does
@@ -182,6 +182,165 @@ def test_the_gate_says_it_is_a_floor_not_the_stopwatch() -> None:
 def test_a_log_with_no_verifications_says_the_gate_is_unmeasured() -> None:
     report = rollup.render(read(*requests(3, 4, 5)), [])
     assert "unmeasured" in report
+
+# --- errors (LP-124, OPS-5) -----------------------------------------------------------
+
+
+def failures(*pairs: tuple[str, str]) -> list[str]:
+    return [
+        line("request_failed", kind=kind, code=code, status=400) for kind, code in pairs
+    ]
+
+
+def statuses(*codes: int) -> list[str]:
+    return [line("request_complete", duration_ms=10, status=code) for code in codes]
+
+
+def test_the_error_rate_is_non_2xx_over_all_requests() -> None:
+    report = rollup.render(read(*statuses(200, 200, 200, 400, 503)), [])
+    assert "**40.0%**" in report
+
+
+def test_client_and_server_errors_are_not_lumped_together() -> None:
+    """A 4xx is the caller's request being wrong. A 5xx is ours. Averaging them into one
+    number tells an operator nothing about who has to fix something."""
+    payload = rollup.as_json(read(*statuses(200, 400, 400, 500)))
+    assert payload["errors"]["by_status"] == {200: 1, 400: 2, 500: 1}
+
+
+def test_a_clean_window_reports_a_zero_error_rate() -> None:
+    report = rollup.render(read(*statuses(200, 200, 200)), [])
+    assert "**0.0%**" in report
+
+
+def test_the_taxonomy_breakdown_names_kind_and_code() -> None:
+    report = rollup.render(
+        read(*statuses(400, 400, 413), *failures(("user", "incomplete_application"),
+                                                ("user", "incomplete_application"),
+                                                ("user", "file_too_large"))),
+        [],
+    )
+    assert "incomplete_application" in report
+    assert "file_too_large" in report
+    assert "`user`" in report
+
+
+def test_the_taxonomy_is_ordered_by_how_often_it_happens() -> None:
+    report = rollup.render(
+        read(*failures(("provider", "provider_unavailable"),
+                       ("user", "file_too_large"),
+                       ("user", "file_too_large"))),
+        [],
+    )
+    assert report.index("file_too_large") < report.index("provider_unavailable")
+
+
+def test_a_200_that_verified_nothing_is_counted_even_though_it_is_not_an_error() -> None:
+    """The pre-gate and the budget stop both answer 200. An error summary that reports
+    0% while a quarter of the labels were never checked is true and misleading."""
+    reading = read(
+        *statuses(200, 200, 200, 200),
+        *verifications(2400, 2500),
+        line("verify_pregated", duration_ms=310, count=1),
+        line("verify_over_budget", duration_ms=5000, count=2,
+             recommendation="needs_review"),
+    )
+    report = rollup.render(reading, [])
+    assert "**0.0%**" in report, "no HTTP request failed"
+    assert "Unverified rate" in report
+    assert "**50.0%**" in report
+
+
+def test_the_unverified_paths_are_named_separately() -> None:
+    """"Too blurry to read" and "ran out of time" need different fixes."""
+    reading = read(
+        *verifications(2400),
+        line("verify_pregated", duration_ms=310, count=1),
+        line("verify_over_budget", duration_ms=5000, count=1,
+             recommendation="needs_review"),
+    )
+    report = rollup.render(reading, [])
+    assert "images unreadable" in report
+    assert "ran out of time" in report
+
+
+def test_the_report_explains_why_the_two_rates_differ() -> None:
+    reading = read(*statuses(200), *verifications(2400))
+    report = rollup.render(reading, [])
+    assert "different questions" in report
+
+
+def test_degradations_are_counted_without_being_called_failures() -> None:
+    """A retry that succeeded is not an error. A rising retry count is still the shape
+    of an outage forming."""
+    reading = read(
+        *statuses(200, 200),
+        line("provider_retry", attempt=1, kind="provider"),
+        line("provider_retry", attempt=2, kind="provider"),
+        line("circuit_breaker", status="open"),
+    )
+    report = rollup.render(reading, [])
+    assert "Degraded but handled" in report
+    assert "provider_retry` | 2" in report
+
+
+def test_an_unhandled_exception_is_called_out_loudly() -> None:
+    reading = read(*statuses(200, 500), line("unhandled_exception", kind="internal",
+                                             code="internal_error"))
+    report = rollup.render(reading, [])
+    assert "unchosen failures" in report
+    assert "unhandled_exception` x1" in report
+
+
+def test_a_window_with_no_faults_says_so_rather_than_staying_silent() -> None:
+    """Absence of a scary section reads as "not measured". Say it explicitly."""
+    report = rollup.render(read(*statuses(200, 200)), [])
+    assert "No `unhandled_exception` lines" in report
+
+
+def test_a_log_with_no_requests_says_the_error_rate_is_unknowable() -> None:
+    reading = read(line("app_started", model="claude-opus-5"))
+    report = rollup.render(reading, [])
+    assert "nothing can be said about error rate" in report
+
+
+def test_json_output_carries_both_rates() -> None:
+    payload = rollup.as_json(
+        read(
+            *statuses(200, 200, 200, 500),
+            *verifications(2400),
+            line("verify_pregated", duration_ms=310, count=1),
+        )
+    )
+    assert payload["errors"]["error_rate"] == 0.25
+    assert payload["errors"]["unverified_rate"] == 0.5
+    assert payload["errors"]["pregated"] == 1
+
+
+def test_the_error_summary_reads_the_log_a_real_failure_writes() -> None:
+    """A 4xx driven through the real HTTP stack, rolled up by the real script."""
+    import io as stdio
+    import json as jsonlib
+
+    from fastapi.testclient import TestClient
+
+    from api import logging as applog
+    from api.config import Config
+    from api.main import create_app
+
+    client = TestClient(create_app(config=Config(use_fake_provider=True)))
+    stream = stdio.StringIO()
+    applog.configure(stream=stream)
+
+    client.post("/verify", files=[("images", ("x.png", b"not a png", "image/png"))],
+                data={"application": jsonlib.dumps({"commodity": "spirits"})})
+    client.get("/health")
+
+    reading = rollup.read(stream.getvalue().splitlines())
+    assert reading.requests == 2
+    assert reading.status_class(4) == 1
+    assert reading.taxonomy, "the failure did not reach the taxonomy breakdown"
+    assert "Errors" in rollup.render(reading, [])
 
 
 # --- cost -----------------------------------------------------------------------------
