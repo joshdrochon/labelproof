@@ -9,8 +9,10 @@ from hypothesis import strategies as st
 from api.rules.normalize import (
     Variation,
     classify_variation,
+    contains_after_normalization,
     equal_after_normalization,
     normalize,
+    surrounding_words,
     variation_note,
 )
 
@@ -82,6 +84,55 @@ def test_case_only_difference_is_classified_as_case_alone() -> None:
 
 def test_hyphenation_is_detected() -> None:
     assert Variation.HYPHENATION in classify_variation("DISTIL-\nLERY", "DISTILLERY")
+
+
+# --- the value carried inside a longer printed statement ------------------------------
+
+
+def test_the_words_around_the_value_are_quoted_from_the_label() -> None:
+    """"DISTILLED IN CANADA" agrees about the country and shows the agent the lead-in.
+
+    Quoted from the label's own text rather than from the normalized form: the whole
+    point of the row is that a reviewer can see it said "Distilled in" and not something
+    that changes the meaning.
+    """
+    assert surrounding_words("Distilled in Canada", "Canada") == "Distilled in"
+    assert surrounding_words("Bottled by Old Tom Distillery", "Old Tom") == (
+        "Bottled by … Distillery"
+    )
+
+
+def test_a_value_that_is_not_there_has_no_surrounding_words() -> None:
+    """The empty answer, which the caller renders as "within a longer phrase" and no quote.
+
+    Reachable on its own terms: `surrounding_words` is public and its contract is "the
+    words around the value, if the value is there". `compare_text` happens to call it
+    only after `contains_after_normalization` says yes, so nothing in the request path
+    reaches this branch — which is exactly why it needs asserting here rather than being
+    assumed impossible. A future caller that checks containment against a differently
+    normalized pair reaches it immediately, and the honest answer is no quote, not a
+    crash and not a wrong one.
+    """
+    assert not contains_after_normalization("Distilled in Canada", "Mexico")
+    assert surrounding_words("Distilled in Canada", "Mexico") == ""
+
+
+def test_the_quote_comes_from_the_label_even_when_the_match_was_made_on_a_rewrite() -> None:
+    """`matched_on` locates; the label's own text is what gets shown.
+
+    `expand_state_abbreviations` rewrites "BOTTLED BY OLD TOM, BARDSTOWN, KY" into
+    "...bardstown, kentucky" to make the two spellings compare equal. That rewrite is
+    fine to match on and absurd to print at an agent.
+    """
+    quoted = surrounding_words(
+        "BOTTLED BY OLD TOM, BARDSTOWN, KY",
+        "Old Tom, Bardstown, Kentucky",
+        matched_on=(
+            "bottled by old tom, bardstown, kentucky",
+            "old tom, bardstown, kentucky",
+        ),
+    )
+    assert quoted == "BOTTLED BY"
 
 
 # --- properties -----------------------------------------------------------------------

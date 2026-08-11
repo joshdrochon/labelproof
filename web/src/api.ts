@@ -214,6 +214,13 @@ export function normalizeResult(raw: unknown): VerificationResult {
   const cost = asRecord(obj['cost']) ?? {};
   const num = (src: Record<string, unknown>, key: string): number =>
     typeof src[key] === 'number' ? (src[key] as number) : 0;
+  /**
+   * For a stage that reports null when it did not run. Coercing that to 0 through `num`
+   * would undo the whole reason the server sends null: `adjudicate: 0` reads as
+   * "adjudication ran and took no time", which is the opposite of what happened.
+   */
+  const nullableNum = (src: Record<string, unknown>, key: string): number | null =>
+    typeof src[key] === 'number' ? (src[key] as number) : null;
 
   return {
     request_id: String(obj['request_id'] ?? ''),
@@ -257,12 +264,14 @@ export function normalizeResult(raw: unknown): VerificationResult {
       preprocess: num(timings, 'preprocess'),
       extract: num(timings, 'extract'),
       compare: num(timings, 'compare'),
-      adjudicate: num(timings, 'adjudicate'),
+      adjudicate: nullableNum(timings, 'adjudicate'),
       total: num(timings, 'total'),
     },
     cost: {
       input_tokens: num(cost, 'input_tokens'),
       output_tokens: num(cost, 'output_tokens'),
+      cache_read_tokens: num(cost, 'cache_read_tokens'),
+      cache_creation_tokens: num(cost, 'cache_creation_tokens'),
       usd: typeof cost['usd'] === 'number' ? cost['usd'] : 0,
     },
   };

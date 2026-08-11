@@ -115,13 +115,27 @@ export interface Timings {
   preprocess: number;
   extract: number;
   compare: number;
-  adjudicate: number;
+  /**
+   * Tier-3 text adjudication. **Null, not zero, when the stage did not run** — and it
+   * does not run in this build at all. The two are different facts: `0` reads as
+   * "instant", so a reader taking `adjudicate: 0` at face value concludes adjudication
+   * ran and cost nothing. See `api/timing.UNIMPLEMENTED_STAGES`.
+   */
+  adjudicate: number | null;
   total: number;
 }
 
 export interface Cost {
   input_tokens: number;
   output_tokens: number;
+  /**
+   * The two cache counters are carried separately because they are PRICED separately: a
+   * cached read costs a tenth of an input token, writing a cache entry costs 1.25x one,
+   * and `input_tokens` excludes both. Dropping either does not make the total
+   * conservative — it makes those tokens free.
+   */
+  cache_read_tokens: number;
+  cache_creation_tokens: number;
   usd: number;
 }
 

@@ -42,6 +42,10 @@ select = ["E", "F", "I", "N", "UP", "B", "SIM", "RUF"]
 
 [tool.mypy]
 python_version = "3.12"
+# tests/ is not a package, so `from conftest import ...` in a test subdirectory is
+# unresolvable to mypy without this. Adding __init__.py files instead would change how
+# pytest resolves every module in a suite several branches are editing at once.
+mypy_path = "tests"
 strict = true
 warn_unreachable = true
 disallow_any_generics = true
@@ -52,7 +56,73 @@ ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-q --strict-markers"
+# Coverage runs on every invocation on purpose. A number you have to remember to ask
+# for is a number nobody has. `--strict-markers` makes a typo'd marker a collection
+# error rather than a silently unselected test. See tests/README.md.
+addopts = """\
+-q --strict-markers --strict-config \
+--cov --cov-report=term-missing:skip-covered\
+"""
 markers = [
     "tc: canonical test case from PRD (e.g. @pytest.mark.tc('TC-03'))",
+    "property: hypothesis property test — a claim about all inputs, not one example",
+    "regression: pins one historical defect; the docstring names it",
+    "contract: asserts an agreement with something outside this process",
+    "e2e: drives the real HTTP stack end to end against an offline provider",
+    "allow_network: exempt from the offline guard — must be justified in the judgment log",
+]
+
+# --------------------------------------------------------------------------------------
+# Coverage (LP-245)
+# --------------------------------------------------------------------------------------
+#
+# The global floor below is a backstop. The gate that matters is the per-module floor
+# on the rules engine, enforced in tests/conftest.py — those modules decide verdicts,
+# and a line of one of them that has never run has never been checked against the
+# regulation it encodes.
+
+[tool.coverage.run]
+source = ["api", "eval", "fixtures"]
+branch = true
+omit = [
+    # Records live provider responses to disk for later replay. Exercising it means
+    # making a live call, which the suite is forbidden from doing (ENG-3). It is a
+    # developer tool, not a request path — nothing it does can produce a verdict.
+    "api/provider/record.py",
+    # The fixture build script: a CLI that writes PNGs to disk. Its logic lives in
+    # render.py and spec.py, which are covered; what is left here is argument parsing
+    # and file writing, and a test of it would assert that Pillow can save a file.
+    "fixtures/generator/build.py",
+    # The empty package markers, named individually.
+    #
+    # This was `*/__init__.py`, which is the only omit entry here that carried no
+    # justification — and it was not omitting nothing. It removed api/routes/__init__.py
+    # from measurement: 118 lines containing `provider_for` and `_fixture_provider`,
+    # i.e. the sample-mode fail-closed logic that is one of this suite's five motivating
+    # incidents and is pinned in tests/regression/test_sample_mode_false_pass.py. It
+    # also hid api/batch/__init__.py. A glob is a claim about every file that matches it
+    # now and every file that will match it later; these seven are the ones that are
+    # actually empty.
+    "api/__init__.py",
+    "api/pipeline/__init__.py",
+    "api/provider/__init__.py",
+    "api/rules/__init__.py",
+    "eval/__init__.py",
+    "fixtures/__init__.py",
+    "fixtures/generator/__init__.py",
+]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
+exclude_also = [
+    # Type-checking-only imports never execute at runtime.
+    "if TYPE_CHECKING:",
+    # Assertions marking states the type system already rules out. Covering one means
+    # constructing a value the types forbid.
+    "raise AssertionError\\(\"unreachable",
+    # Module CLIs. The functions they call are covered directly.
+    "if __name__ == .__main__.:",
+    "raise NotImplementedError",
+    "\\.\\.\\.$",
 ]

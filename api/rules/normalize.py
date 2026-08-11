@@ -32,6 +32,10 @@ _HYPHEN_LINEBREAK = re.compile(r"(\w)-\s*\n\s*(\w)")
 _WHITESPACE = re.compile(r"\s+")
 _TERMINAL_PUNCT = re.compile(r"[.,;:!?\s]+$")
 
+#: The same set with the whitespace left out, for `classify_variation`'s whitespace probe
+#: and nowhere else. See `_strip_terminal_punctuation_only` below.
+_TERMINAL_PUNCT_NO_SPACE = re.compile(r"[.,;:!?]+$")
+
 
 class Variation(StrEnum):
     """A class of difference that normalization can explain."""
@@ -92,6 +96,25 @@ def strip_terminal_punctuation(value: str) -> str:
     fixed point on the first pass.
     """
     return _TERMINAL_PUNCT.sub("", value)
+
+
+def _strip_terminal_punctuation_only(value: str) -> str:
+    """Drop trailing sentence punctuation and leave every space where it was.
+
+    Exists for one caller: `classify_variation`'s whitespace probe. That probe answers
+    "was whitespace load-bearing here?" by running every fold *except* the whitespace
+    one and seeing whether the strings still differ — which only works if nothing else
+    quietly removes whitespace on the way past.
+
+    `strip_terminal_punctuation` does exactly that now, and it has to: taking punctuation
+    and trailing spaces in one bite is what makes `normalize` reach its fixed point on
+    the first pass. But reusing it inside the probe meant the probe erased the very
+    difference it was measuring, so `"0 "` against `"0   "` folded to equal and reported
+    *no variation at all* — a Tier-1 Match on two strings that are not the same string,
+    with nothing shown to the agent. That is the silent pass MATCH-9 exists to prevent,
+    and two property files caught it.
+    """
+    return _TERMINAL_PUNCT_NO_SPACE.sub("", value)
 
 
 def normalize(value: str) -> str:
@@ -184,7 +207,13 @@ def classify_variation(left: str, right: str) -> list[Variation]:
                 value = rejoin_hyphenation(value)
             if not keep_punct:
                 value = unify_punctuation(value)
-                value = strip_terminal_punctuation(value)
+                # The whitespace probe must not have its subject removed underneath it.
+                # See `_strip_terminal_punctuation_only`.
+                value = (
+                    _strip_terminal_punctuation_only(value)
+                    if keep_space
+                    else strip_terminal_punctuation(value)
+                )
             if not keep_marks:
                 value = fold_diacritics(value)
             if not keep_space:

@@ -24,8 +24,21 @@ class ErrorKind(StrEnum):
     INTERNAL = "internal"
 
 
-#: HTTP status per kind. Provider trouble is 503 rather than 500 — it is not our bug, and
-#: the distinction matters to anyone reading logs or a status page.
+#: Default HTTP status per kind. Provider trouble is 503 rather than 500 — it is not our
+#: bug, and the distinction matters to anyone reading logs or a status page.
+#:
+#: A *default*, not the whole story. `kind` groups by who can act, which is the right
+#: axis for choosing what to say to an agent and the wrong one for choosing a status
+#: line: 404, 405, 413 and 429 are all "the caller can fix this", and collapsing them to
+#: 400 loses information every HTTP participant downstream relies on. A 429 answering
+#: 400 is not retried by any client honouring `Retry-After`; a proxy or WAF cannot tell
+#: a missing route from a malformed body; and a 4xx dashboard loses the one split that
+#: says whether callers are lost or the service is shedding load.
+#:
+#: The app already made this decision and then undid it: `main._install_spa` raises
+#: `HTTPException(405)` specifically to preserve "wrong verb, not wrong URL", with a
+#: comment explaining why, and the handler three lines later threw the status away. So
+#: an error may now carry its own, and `kind` keeps doing the job it is good at.
 _STATUS: dict[ErrorKind, int] = {
     ErrorKind.USER: 400,
     ErrorKind.IMAGE: 422,
@@ -40,16 +53,29 @@ class LabelProofError(Exception):
     kind: ErrorKind = ErrorKind.INTERNAL
     code: str = "internal_error"
 
-    def __init__(self, message: str, *, next_step: str = "", code: str | None = None):
+    def __init__(
+        self,
+        message: str,
+        *,
+        next_step: str = "",
+        code: str | None = None,
+        status_code: int | None = None,
+    ):
         super().__init__(message)
         self.message = message
         self.next_step = next_step
+        self._status_code = status_code
         if code:
             self.code = code
 
     @property
     def status_code(self) -> int:
-        return _STATUS[self.kind]
+        """The status this error goes out with.
+
+        An explicit one wins over the kind default, so a 404 can stay a 404 while still
+        being a `user` error in the body an agent reads.
+        """
+        return self._status_code if self._status_code is not None else _STATUS[self.kind]
 
     def to_payload(self) -> dict[str, object]:
         return {

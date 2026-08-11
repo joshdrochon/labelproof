@@ -433,13 +433,26 @@ def _as_user_error(exc: RequestValidationError) -> errors.UserError:
 
 
 def _from_status(status: int) -> errors.LabelProofError:
-    """Frameworks answer with bare status codes. Agents get sentences instead."""
+    """Frameworks answer with bare status codes. Agents get sentences instead.
+
+    The sentence changes; the status does not. Each of these carries `status_code`
+    through so a 404 leaves as a 404 and a 429 as a 429, while the body still says
+    `kind: user` — the taxonomy groups by who can act, and that grouping is right for
+    the message and wrong for the status line.
+
+    Collapsing all four to 400 was a real defect, not a stylistic one. `_install_spa`
+    raises `HTTPException(405)` a hundred lines above precisely to preserve "wrong verb,
+    not wrong URL" — with a comment saying so — and this function used to discard it.
+    Downstream, a 429 answering 400 is not retried by any client honouring
+    `Retry-After`, and a proxy cannot distinguish a missing route from a malformed body.
+    """
     if status == 404:
         return errors.UserError(
             "That address is not part of this tool. Go back to the verification page "
             "and start again.",
             next_step="navigate",
             code="not_found",
+            status_code=404,
         )
     if status == 405:
         return errors.UserError(
@@ -447,6 +460,7 @@ def _from_status(status: int) -> errors.LabelProofError:
             "verification page and submit the label from the form.",
             next_step="navigate",
             code="method_not_allowed",
+            status_code=405,
         )
     if status == 413:
         return errors.UserError(
@@ -454,6 +468,7 @@ def _from_status(status: int) -> errors.LabelProofError:
             "and upload them again.",
             next_step="resize",
             code="file_too_large",
+            status_code=413,
         )
     if status == 429:
         return errors.UserError(
@@ -461,6 +476,7 @@ def _from_status(status: int) -> errors.LabelProofError:
             "submit again — nothing has been checked.",
             next_step="retry",
             code="too_many_requests",
+            status_code=429,
         )
     if status >= 500:
         return errors.InternalError()
