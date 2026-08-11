@@ -50,7 +50,7 @@ def test_exact_warning_with_good_typography_matches() -> None:
 @pytest.mark.tc("TC-01")
 def test_a_match_still_admits_what_it_could_not_measure() -> None:
     """WARN-9. Nothing is broken, and the tool still says what it did not check."""
-    signals = WarningTypography(header_is_bold=True, body_is_bold=False)
+    signals = WarningTypography(header_is_bold=True, body_is_bold=False, contrast_ok=True)
     result = warning.evaluate(canon.CANONICAL_WARNING, signals)
     assert result.verdict is Verdict.MATCH
     assert _asserted(result) == []
@@ -811,17 +811,66 @@ def test_only_one_typography_combination_can_reach_match(
     somewhere an agent has to look.
     """
     verdict = warning.evaluate(canon.CANONICAL_WARNING, signals).verdict
-    prominence_ok = (
-        signals.contrast_ok is not False
-        and (signals.relative_size is None
-             or signals.relative_size > typography.PROMINENCE_CONCERN_RATIO)
+    size_ok = (
+        signals.relative_size is None
+        or signals.relative_size > typography.PROMINENCE_CONCERN_RATIO
     )
     can_match = (
         signals.header_is_bold is True
         and signals.body_is_bold is False
-        and prominence_ok
+        and signals.contrast_ok is True
+        and size_ok
     )
     assert (verdict is Verdict.MATCH) is can_match
+
+
+def test_an_unconfirmed_contrast_never_reaches_a_pass() -> None:
+    """Confirmed false pass, now a named regression.
+
+    A verbatim statement whose contrast the reading could not judge used to come back
+    Match with two context notes beside it, and the aggregate said "Every required field
+    on the label matches the application." That scenario IS the evasion the PRD
+    describes — the warning screened back into busy artwork.
+    """
+    signals = WarningTypography(
+        header_is_bold=True, body_is_bold=False, contrast_ok=None, relative_size=None
+    )
+    result = warning.evaluate(canon.CANONICAL_WARNING, signals)
+    assert result.verdict is Verdict.UNREADABLE
+    assert "warning_contrast_unverified" in {f.code for f in result.findings}
+    assert _asserted(result) == []
+
+
+def test_an_unconfirmed_contrast_does_not_reach_ready_to_approve() -> None:
+    """The same case, traced to the sentence an agent actually reads."""
+    signals = WarningTypography(
+        header_is_bold=True, body_is_bold=False, contrast_ok=None, relative_size=None
+    )
+    rows = [
+        _row(FieldName.BRAND_NAME, Verdict.MATCH),
+        _row(FieldName.CLASS_TYPE, Verdict.MATCH),
+        _row(FieldName.GOVERNMENT_WARNING,
+             warning.evaluate(canon.CANONICAL_WARNING, signals).verdict),
+    ]
+    advice = aggregate.recommend(rows)
+    assert advice.recommendation is Recommendation.NEEDS_REVIEW
+    assert advice.driving_field is FieldName.GOVERNMENT_WARNING
+
+
+def test_only_size_may_go_unassessed_without_cost() -> None:
+    """The one signal whose abstention is free, and the reason it is free: 16.22(b)'s
+    rule is in millimetres and WARN-9 concedes we cannot measure those."""
+    answered = WarningTypography(
+        header_is_bold=True, body_is_bold=False, contrast_ok=True, relative_size=1.0
+    )
+    assert warning.evaluate(canon.CANONICAL_WARNING, answered).verdict is Verdict.MATCH
+    for signal in ("header_is_bold", "body_is_bold", "contrast_ok"):
+        blanked = answered.model_copy(update={signal: None})
+        assert warning.evaluate(canon.CANONICAL_WARNING, blanked).verdict is not (
+            Verdict.MATCH
+        ), signal
+    unsized = answered.model_copy(update={"relative_size": None})
+    assert warning.evaluate(canon.CANONICAL_WARNING, unsized).verdict is Verdict.MATCH
 
 
 def test_match_is_the_only_verdict_that_reads_as_a_pass() -> None:

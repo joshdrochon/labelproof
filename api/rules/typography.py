@@ -28,17 +28,32 @@ Bright lines versus heuristics
 
 Two classes of signal, deliberately routed differently:
 
-**Bright lines** — the heading is bold, the body is not bold. 16.22 states these as
-requirements with a yes/no answer, and Jenny's specification names them out loud. An
-abstention here is *unconfirmed*: the field cannot reach Match, and an agent is told to
-check by eye. Fails closed, unconditionally.
+**Bright lines** — the heading is bold (16.22(a)(2)), the body is not bold (a)(2), and
+the statement sits on a contrasting background (16.22(a)(1)). Each is stated in the
+regulation as a requirement with a yes/no answer. An abstention on any of them is
+*unconfirmed*: the field cannot reach Match, and an agent is told to look. Fails closed,
+unconditionally.
 
-**Heuristics** — relative size and contrast. The regulation's real line for size is an
-absolute measurement in millimetres, and WARN-9 concedes that is unmeasurable from an
-unscaled photograph. These signals detect the *evasion pattern* Jenny described, not the
-regulation itself. A negative answer raises a finding; an abstention says so plainly and
-does not, on its own, hold up a label — otherwise every label would be held up forever
-and the honesty caveat would be the only thing anyone read.
+Contrast reached that list the hard way. It began here as a heuristic on the argument
+that abstentions would be common and failing closed on all of them would flood the
+Needs-review queue. The argument was checkable and wrong: the spike measured zero
+abstentions in sixty signals, so failing closed on contrast holds up approximately
+nothing — and in the meantime a verbatim warning with `contrast_ok=None` reached Ready
+to approve, which is precisely the evasion the PRD describes as burying the statement in
+the artwork.
+
+**Heuristic** — relative size, and only that. The regulation's line for size is an
+absolute measurement in millimetres, WARN-9 concedes that is unmeasurable from an
+unscaled photograph, and the ratio is a proxy for an evasion pattern rather than a
+restatement of any rule. A concerning ratio raises a finding; an abstention says so
+plainly and holds nothing up, because the tool never claimed to measure it.
+
+A note on the asymmetry in contrast's two answers. `None` blocks Match, while `False`
+routes to Needs review rather than to Mismatch. That is not timidity: exposure, white
+balance and compression all change how much a background appears to contrast, so a
+*detected* contrast failure is not something this tool should assert against an
+applicant — PRD TC-06 says as much, asking for Needs review. Both answers end in front of
+a person, which is where a question a photograph cannot settle belongs.
 
 No thresholds
 -------------
@@ -225,35 +240,52 @@ def check_prominence(signals: WarningTypography) -> list[Finding]:
 
 
 def check_contrast(signals: WarningTypography) -> list[Finding]:
-    """WARN-5 / LP-212 — buried text. 16.22 requires a contrasting background."""
-    if signals.contrast_ok is False:
-        return [
-            Finding(
-                code="warning_low_contrast",
-                message=(
-                    "The warning does not stand out from the background behind it. It "
-                    "must be readily legible on a contrasting background — check the "
-                    "outlined area on the picture."
-                ),
-                citation=canon.CITATIONS["warning_format"],
-                severity=SEVERITY_VIOLATION,
-            )
-        ]
-    return []
+    """WARN-5 / LP-212 — buried text. 16.22(a)(1) requires a contrasting background.
+
+    A stated requirement with a yes/no answer, so an abstention blocks Match. A detected
+    failure goes to a person rather than back to the applicant, because exposure and
+    compression both change how much a background appears to contrast — see the module
+    docstring, and PRD TC-06.
+    """
+    match signals.contrast_ok:
+        case False:
+            return [
+                Finding(
+                    code="warning_low_contrast",
+                    message=(
+                        "The warning does not stand out from the background behind it. "
+                        "It must be readily legible on a contrasting background — check "
+                        "the outlined area on the picture."
+                    ),
+                    citation=canon.CITATIONS["warning_format"],
+                    severity=SEVERITY_VIOLATION,
+                )
+            ]
+        case None:
+            return [
+                Finding(
+                    code="warning_contrast_unverified",
+                    message=(
+                        "Could not tell from this image whether the warning stands out "
+                        "from the background behind it. It has not been checked — look "
+                        "at it yourself."
+                    ),
+                    citation=canon.CITATIONS["warning_format"],
+                    severity=SEVERITY_UNVERIFIED,
+                )
+            ]
+        case _:
+            return []
 
 
-def _unassessed_note(names: tuple[str, ...]) -> Finding:
-    """One line naming what the tool never looked at, rather than three (WARN-9)."""
-    readable = {
-        "relative_size": "how the warning's size compares with the rest of the label",
-        "contrast_ok": "whether the warning stands out from its background",
-    }
-    listed = " and ".join(readable.get(n, n) for n in names)
+def _unassessed_note() -> Finding:
+    """WARN-9, in one line: the tool did not judge the warning's size."""
     return Finding(
         code="warning_prominence_unassessed",
         message=(
-            f"This check did not assess {listed}. Type size and prominence are not "
-            f"measurable from a photograph — judge them by eye."
+            "This check did not assess how the warning's size compares with the rest of "
+            "the label. Type size and prominence are not measurable from a photograph — "
+            "judge them by eye."
         ),
         citation=canon.CITATIONS["warning_format"],
         severity=SEVERITY_CONTEXT,
@@ -275,16 +307,22 @@ def assess(signals: WarningTypography) -> TypographyAssessment:
         else:
             violations.append(finding.code)
 
-    for finding in check_prominence(signals) + check_contrast(signals):
+    for finding in check_contrast(signals):
+        findings.append(finding)
+        # A detected failure is a prominence concern (Needs review); an abstention is an
+        # unresolved bright line. Both block Match; only one asserts anything.
+        if finding.severity == SEVERITY_UNVERIFIED:
+            unconfirmed.append(finding.code)
+        else:
+            prominence.append(finding.code)
+
+    for finding in check_prominence(signals):
         findings.append(finding)
         prominence.append(finding.code)
 
     if signals.relative_size is None:
         unassessed.append("relative_size")
-    if signals.contrast_ok is None:
-        unassessed.append("contrast_ok")
-    if unassessed:
-        findings.append(_unassessed_note(tuple(unassessed)))
+        findings.append(_unassessed_note())
 
     return TypographyAssessment(
         findings=tuple(findings),

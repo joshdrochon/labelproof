@@ -171,10 +171,20 @@ class ExtractedField(BaseModel):
 
 
 class WarningTypography(BaseModel):
-    """Typography signals for the warning statement (WARN-2, WARN-7).
+    """Typography signals for the warning statement (WARN-2, WARN-5, WARN-7).
 
-    Every field is optional because the extractor may be unable to judge it. `None`
-    means "could not determine" and must route to Needs review — never to Match.
+    Every field is optional because the extractor may be unable to judge it. `None` means
+    "could not determine" and is never treated as compliance. What it costs depends on
+    the signal, and `api/rules/typography.py` is where that is decided and tested:
+
+    * `header_is_bold`, `body_is_bold`, `contrast_ok` are the bright lines of 16.22(a).
+      `None` blocks Match and routes the field to Needs review.
+    * `header_is_all_caps` is a cross-check only. Capitalization is read off the returned
+      text, which is direct evidence, so `None` costs nothing — but `False` against text
+      that reads in capitals means the two disagree, and that routes to Needs review.
+    * `relative_size` is a ratio against the surrounding body text, not a tri-state.
+      `None` is reported as unassessed and changes no verdict: 16.22(b)'s real rule is in
+      millimetres, and WARN-9 concedes those cannot be measured from a photograph.
     """
 
     header_is_all_caps: bool | None = None

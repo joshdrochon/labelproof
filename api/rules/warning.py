@@ -577,6 +577,13 @@ CHECK_MANIFEST: Final[tuple[Check, ...]] = (
         outcome="Unreadable — a person must judge it against the label",
     ),
     Check(
+        code="warning_contrast_unverified",
+        checks="the warning stands out from the background behind it",
+        citation="27 CFR 16.22",
+        evidence="not established — the reading could not tell",
+        outcome="Unreadable — a person must look",
+    ),
+    Check(
         code="warning_prominence_unassessed",
         checks="nothing — it reports that size and contrast were not assessed",
         citation="27 CFR 16.22",

@@ -49,6 +49,16 @@ def test_a_signal_the_model_answered_well_is_clean() -> None:
     assert typography.assess(signals).is_clean
 
 
+def test_all_three_bright_lines_must_be_answered_to_be_clean() -> None:
+    """Contrast joined bold on this list after a confirmed false pass: a verbatim
+    warning with contrast_ok=None reached Ready to approve."""
+    answered = WarningTypography(header_is_bold=True, body_is_bold=False, contrast_ok=True)
+    assert typography.assess(answered).is_clean
+    for blank in ("header_is_bold", "body_is_bold", "contrast_ok"):
+        signals = answered.model_copy(update={blank: None})
+        assert not typography.assess(signals).is_clean, blank
+
+
 # --- WARN-2, the heading in bold ------------------------------------------------------
 
 def test_header_not_bold_is_a_violation() -> None:
@@ -131,7 +141,9 @@ def test_the_prominence_boundary_is_inclusive_of_concern() -> None:
 
 def test_unknown_prominence_is_not_a_concern_but_is_admitted() -> None:
     """WARN-9: never claim to have checked size. Never block every label either."""
-    assessment = typography.assess(WarningTypography(header_is_bold=True, body_is_bold=False))
+    assessment = typography.assess(
+        WarningTypography(header_is_bold=True, body_is_bold=False, contrast_ok=True)
+    )
     assert assessment.prominence_concerns == ()
     assert "relative_size" in assessment.unassessed
     note = next(f for f in assessment.findings if f.code == "warning_prominence_unassessed")
@@ -140,17 +152,19 @@ def test_unknown_prominence_is_not_a_concern_but_is_admitted() -> None:
 
 def test_the_unassessed_note_never_changes_a_verdict() -> None:
     """A context finding is an admission, not an accusation."""
-    signals = WarningTypography(header_is_bold=True, body_is_bold=False)
+    signals = WarningTypography(header_is_bold=True, body_is_bold=False, contrast_ok=True)
     assessment = typography.assess(signals)
     assert assessment.is_clean
     assert assessment.findings  # it still says so out loud
 
 
-def test_unassessed_note_is_one_line_not_three() -> None:
-    assessment = typography.assess(WarningTypography(header_is_bold=True, body_is_bold=False))
+def test_unassessed_note_is_one_line() -> None:
+    assessment = typography.assess(
+        WarningTypography(header_is_bold=True, body_is_bold=False, contrast_ok=True)
+    )
     notes = [f for f in assessment.findings if f.severity == typography.SEVERITY_CONTEXT]
     assert len(notes) == 1
-    assert "size" in notes[0].message and "background" in notes[0].message
+    assert "size" in notes[0].message
 
 
 # --- WARN-5, buried text (LP-212) -----------------------------------------------------
@@ -171,10 +185,16 @@ def test_good_contrast_says_nothing() -> None:
     assert typography.check_contrast(WarningTypography(contrast_ok=True)) == []
 
 
-def test_unknown_contrast_is_admitted_not_asserted() -> None:
-    assessment = typography.assess(WarningTypography(header_is_bold=True, body_is_bold=False))
-    assert "contrast_ok" in assessment.unassessed
+def test_unknown_contrast_blocks_match_and_asserts_nothing() -> None:
+    """The confirmed false pass. 16.22(a)(1) states contrasting background as a
+    requirement with a yes/no answer, so an abstention is a real gap — but it is a gap,
+    not an accusation, so it never lands in prominence_concerns."""
+    assessment = typography.assess(
+        WarningTypography(header_is_bold=True, body_is_bold=False, contrast_ok=None)
+    )
+    assert "warning_contrast_unverified" in assessment.unconfirmed
     assert assessment.prominence_concerns == ()
+    assert not assessment.is_clean
 
 
 # --- the whole grid -------------------------------------------------------------------
@@ -187,7 +207,9 @@ def test_only_a_fully_answered_pair_can_be_clean(
 ) -> None:
     """Exhaustive over the bright lines. Clean if and only if both were answered right."""
     assessment = typography.assess(
-        WarningTypography(header_is_bold=header_bold, body_is_bold=body_bold)
+        WarningTypography(
+            header_is_bold=header_bold, body_is_bold=body_bold, contrast_ok=True
+        )
     )
     expected_clean = header_bold is True and body_bold is False
     assert assessment.is_clean is expected_clean
@@ -412,7 +434,7 @@ def test_a_stub_that_abstains_is_a_valid_rereader() -> None:
         ) -> typography.WarningReread:
             return typography.WarningReread(typography=WarningTypography())
 
-    first = WarningTypography(header_is_bold=None, body_is_bold=False)
+    first = WarningTypography(header_is_bold=None, body_is_bold=False, contrast_ok=True)
     merged, findings = typography.adopt_reread(
         first, Abstainer().reread_warning(
             typography.escalation_request(first, image_index=0, warning_text="x")
