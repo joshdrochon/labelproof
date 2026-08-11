@@ -36,7 +36,7 @@ from eval.gates import (
     status_line,
 )
 from eval.outcomes import ACCURACY_FLOOR, FieldOutcome, Report, evaluate
-from eval.report import render
+from eval.report import ascii_safe, render
 from eval.run import build_parser, main, payload
 from fixtures.generator.catalog import (
     CATALOG,
@@ -515,6 +515,28 @@ def test_a_subset_run_is_exempt_from_the_coverage_guard() -> None:
     assert "NOT A RELEASE GATE" in render(report)
 
 
+def test_a_subset_run_never_prints_a_pass_verdict() -> None:
+    """`--fixture` in a CI YAML would otherwise read as a green verdict it did not earn.
+
+    Coverage is suspended on a narrowed run, so "no failures among the fixtures I chose"
+    is a different claim from PASS, and the report now says which one it is making.
+    """
+    text = render(Report(tier="A", outcomes=[outcome()], subset=True))
+    assert "SUBSET RUN — NO RELEASE VERDICT" in ascii_safe(text) or (
+        "SUBSET RUN -- NO RELEASE VERDICT" in text
+    )
+    assert "\nPASS" not in text
+    assert "status=subset" in text
+
+
+def test_the_full_set_still_prints_pass_when_it_passes() -> None:
+    sound = [s for s in CATALOG if s.name not in KNOWN_LIVE_FALSE_PASSES]
+    text = render(evaluate(sound))
+    assert text.rstrip().endswith("subset=false")
+    assert "\nPASS" in text
+    assert "status=pass" in text
+
+
 def test_a_subset_run_still_fails_on_a_false_pass() -> None:
     report = Report(tier="A", outcomes=[warning_violation(actual=Verdict.MATCH)], subset=True)
     assert not report.passed
@@ -962,9 +984,6 @@ def test_a_seeded_regression_trips_the_threshold_gate(
 
     sound = [s for s in CATALOG if s.name not in KNOWN_LIVE_FALSE_PASSES]
     monkeypatch.setattr(run_module, "CATALOG", sound)
-    monkeypatch.setattr(
-        "eval.outcomes.REQUIRED_WARNING_VIOLATIONS", REQUIRED_WARNING_VIOLATIONS
-    )
     assert main([]) == EXIT_OK, "the sound subset must be green before seeding anything"
 
     broken = [sound[0].with_(expect={"brand_name": "mismatch"}), *sound[1:]]
@@ -1810,6 +1829,25 @@ def test_too_few_runs_per_fixture_also_blocks_a_recommendation() -> None:
 
     enough = _run_sweep({"claude-opus-5": 1.0}, specs, repeat=3)
     assert sweep.recommend(enough, specs) is not None
+
+
+def test_a_self_reported_repeat_cannot_inflate_the_evidence() -> None:
+    """`repeat` was taken on trust — the same shape as re-sends counting as samples."""
+    specs = evidence_complete_specs()
+    honest = _run_sweep({"claude-opus-5": 1.0}, specs, repeat=1)[0]
+    assert honest.observed_repeat == 1
+
+    honest.repeat = 100  # a caller claiming runs it never made
+    assert honest.observed_repeat == 1
+    assert sweep.recommend([honest], specs) is None
+    assert any("--repeat 1" in p for p in sweep.evidence_problems(specs, repeat=1))
+
+
+def test_the_observed_repeat_is_derived_from_the_runs() -> None:
+    specs = list(CATALOG[:3])
+    result = _run_sweep({"claude-opus-5": 1.0}, specs, repeat=4)[0]
+    assert result.observed_repeat == 4
+    assert len(result.runs) == 4 * len(specs)
 
 
 def test_recommend_requires_the_spec_set() -> None:

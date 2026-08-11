@@ -382,6 +382,19 @@ def render(
         lines += gap_section(report, tier_b_report)
         lines += ["", "Tier B does not gate. The verdict below is Tier A's alone."]
     lines += gates_section(gates)
-    lines += ["", "PASS" if code == 0 else f"FAIL (exit {code})"]
+    if code != 0:
+        lines += ["", f"FAIL (exit {code})"]
+    elif report.subset:
+        # A narrowed run never prints PASS. It cannot: coverage is suspended, so "no
+        # failures among the fixtures I chose" is not the same claim, and a CI job pointed
+        # at `--fixture` would otherwise read a green verdict it did not earn.
+        lines += [
+            "",
+            "SUBSET RUN — NO RELEASE VERDICT.",
+            "  No failures among the selected fixtures. That is not a pass: the coverage",
+            "  gate is suspended on a narrowed run. Only the full set can pass.",
+        ]
+    else:
+        lines += ["", "PASS"]
     lines += ["", status_line(report, gates)]
     return ascii_safe("\n".join(lines))

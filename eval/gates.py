@@ -182,9 +182,17 @@ def exit_code_for(gates: list[Gate]) -> int:
 def status_line(report: Report, gates: list[Gate]) -> str:
     """One greppable line for a CI log, with no timestamp so it stays byte-stable."""
     code = exit_code_for(gates)
+    if code != EXIT_OK:
+        status = "fail"
+    elif report.subset:
+        # Never "pass": a narrowed run has coverage suspended, so it cannot make that
+        # claim, and this line is what a CI log gets grepped for.
+        status = "subset"
+    else:
+        status = "pass"
     return (
         f"::labelproof-eval:: tier={report.tier} "
-        f"status={'pass' if code == EXIT_OK else 'fail'} exit={code} "
+        f"status={status} exit={code} "
         f"accuracy={report.accuracy:.4f} "
         f"false_passes={len(report.false_passes)} "
         f"warning_violations={len(report.warning_violations)} "

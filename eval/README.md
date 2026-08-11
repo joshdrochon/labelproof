@@ -118,6 +118,12 @@ The human report also ends with one greppable line for a CI log:
 ::labelproof-eval:: tier=A status=pass exit=0 accuracy=1.0000 false_passes=0 warning_violations=4 subset=false
 ```
 
+`status` is `pass`, `fail`, or **`subset`**. A `--fixture` run never prints `PASS` and never
+reports `status=pass`: coverage is suspended on a narrowed run, so "no failures among the
+fixtures I chose" is a weaker claim than a release verdict, and a CI job pointed at
+`--fixture` should not be able to read a green one. It still exits `0` so the diagnostic
+stays usable.
+
 ## What the workflow should do on failure
 
 Print the report (it already names the fixture and field for every failure) and fail the

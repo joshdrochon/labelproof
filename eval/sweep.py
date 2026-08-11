@@ -270,6 +270,19 @@ class ModelResult:
     runs: list[LabelRun] = field(default_factory=list)
     priced: bool = True
     repeat: int = 1
+    """What the caller asked for. `observed_repeat` is what actually happened."""
+
+    @property
+    def observed_repeat(self) -> int:
+        """Runs per distinct label, derived from the runs rather than self-reported.
+
+        The declared `repeat` was taken on trust by both `recommend` and `render` — the
+        same shape as the bug where re-sends counted as samples, one field over. Reachable
+        only by a caller building results by hand, which is exactly what the tests do.
+        """
+        if not self.runs:
+            return 0
+        return len(self.runs) // len({run.fixture for run in self.runs})
 
     # --- latency ----------------------------------------------------------------------
 
@@ -415,7 +428,7 @@ def recommend(
     meant any caller that forgot it silently skipped the evidence gate and got the
     pre-fix behaviour back — including one of this project's own tests.
     """
-    repeat = max((r.repeat for r in results), default=1)
+    repeat = min((r.observed_repeat for r in results), default=0)
     if evidence_problems(specs, repeat):
         return None
     qualified = [r for r in results if r.qualified and r.priced]
@@ -503,7 +516,7 @@ def render(results: Sequence[ModelResult], specs: Sequence[LabelSpec]) -> str:
         "number comes from scripts/timed_p95.py against the deployed URL.",
     ]
 
-    repeat = max((r.repeat for r in results), default=1)
+    repeat = min((r.observed_repeat for r in results), default=0)
     problems = evidence_problems(specs, repeat)
     winner = recommend(results, specs)
     lines += ["", RULE]
@@ -558,7 +571,7 @@ def evidence_section(
     questions and only the first one bounds the blind spot. A reader given a single
     'samples' figure cannot tell two labels from one label sent twice.
     """
-    repeat = max((r.repeat for r in results), default=1)
+    repeat = min((r.observed_repeat for r in results), default=0)
     coverage = posture_coverage(specs)
     out = [
         "",
