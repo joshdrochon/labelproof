@@ -50,6 +50,32 @@ LABELS = ROOT / "fixtures" / "labels"
 #: here: this measurement is extraction plus rules, not upload-to-verdict (PERF-1).
 P95_BUDGET_S = 5.0
 
+#: Warning postures a model must be shown to read correctly before it can be recommended.
+#:
+#: This exists because the sweep was, in a reviewer's simulation, a coin flip on the
+#: decision it exists to make. The golden set had ONE fixture exercising body-bold and
+#: ZERO exercising header-bold, each run once per model. Against measured Haiku error
+#: rates (30% body-bold, 20% header-bold, always in the false-pass direction) the sweep
+#: printed "SHIPS: claude-haiku-4-5 -- 100.0% accuracy, 0 warn FP" in 277 of 400
+#: simulated runs. The disqualification rule was correct; the evidence behind it was one
+#: sample and zero samples.
+#:
+#: A model cannot be recommended on a posture that was never shown to it.
+WARNING_POSTURES: dict[str, Callable[[LabelSpec], bool]] = {
+    "header_not_all_caps": lambda s: s.include_warning and s.warning_header_case != "upper",
+    "header_not_bold": lambda s: s.include_warning and not s.warning_header_bold,
+    "body_bold": lambda s: s.include_warning and s.warning_body_bold,
+    "text_altered": lambda s: s.include_warning and s.warning_text is not None,
+    "warning_absent": lambda s: not s.include_warning,
+}
+
+#: Samples per posture below which the sweep declines to name a winner.
+#:
+#: Three is not a statistical claim — it is the point at which a single lucky read stops
+#: being the whole answer. `undetectable_error_rate` prints what the chosen sample count
+#: actually buys, so nobody has to take this constant on faith.
+MIN_SAMPLES_PER_POSTURE = 3
+
 #: Builds the extractor for one model. Injected so the table, the disqualification rule
 #: and the recommendation are all testable with no network and no spend.
 ProviderForModel = Callable[[str], ExtractionProvider]
@@ -84,6 +110,41 @@ class LabelRun:
     usd: float
 
 
+def posture_coverage(specs: Sequence[LabelSpec], repeat: int = 1) -> dict[str, int]:
+    """Samples per warning posture across the set, accounting for repeats."""
+    return {
+        posture: sum(1 for spec in specs if matches(spec)) * repeat
+        for posture, matches in WARNING_POSTURES.items()
+    }
+
+
+def undetectable_error_rate(samples: int, confidence: float = 0.95) -> float:
+    """The largest per-call error rate that would still likely produce a clean sweep.
+
+    With `samples` independent reads and zero observed failures, any true error rate below
+    `1 - (1 - confidence) ** (1 / samples)` survives at the given confidence. At one sample
+    that is 95% — which is the honest description of what a single-shot sweep proves about
+    a model's warning reading: almost nothing.
+    """
+    if samples <= 0:
+        return 1.0
+    return 1.0 - (1.0 - confidence) ** (1.0 / samples)
+
+
+def evidence_problems(specs: Sequence[LabelSpec], repeat: int = 1) -> list[str]:
+    """Why this set cannot support a ship recommendation, if it cannot."""
+    problems: list[str] = []
+    for posture, samples in sorted(posture_coverage(specs, repeat).items()):
+        if samples == 0:
+            problems.append(f"{posture}: NO fixture exercises it — the model is never tested on it")
+        elif samples < MIN_SAMPLES_PER_POSTURE:
+            problems.append(
+                f"{posture}: {samples} sample(s), need {MIN_SAMPLES_PER_POSTURE}. "
+                f"An error rate up to {undetectable_error_rate(samples):.0%} would go unseen"
+            )
+    return problems
+
+
 def percentile(values: Sequence[float], fraction: float) -> float:
     """Nearest-rank percentile.
 
@@ -105,6 +166,7 @@ class ModelResult:
     report: Report
     runs: list[LabelRun] = field(default_factory=list)
     priced: bool = True
+    repeat: int = 1
 
     # --- latency ----------------------------------------------------------------------
 
@@ -163,15 +225,21 @@ def run_model(
     specs: Sequence[LabelSpec],
     provider: ExtractionProvider,
     *,
+    repeat: int = 1,
     clock: Callable[[], float] = time.perf_counter,
     load_images: Callable[[LabelSpec], list[ImageInput]] = image_inputs,
 ) -> ModelResult:
-    """Run the golden set through one model, timing and pricing each label."""
-    price = price_for(model)
-    report = Report(tier="A", fixtures=len(specs), provider=model)
-    result = ModelResult(model=model, report=report, priced=price is not None)
+    """Run the golden set through one model, timing and pricing each label.
 
-    for spec in specs:
+    `repeat` runs every label that many times. A model's warning reading is stochastic —
+    the same label can come back right once and wrong the next — so one pass per label
+    cannot distinguish a reliable model from a lucky one. See `MIN_SAMPLES_PER_POSTURE`.
+    """
+    price = price_for(model)
+    report = Report(tier="A", fixtures=len(specs) * repeat, provider=model)
+    result = ModelResult(model=model, report=report, priced=price is not None, repeat=repeat)
+
+    for spec in [s for s in specs for _ in range(repeat)]:
         started = clock()
         try:
             images = load_images(spec)
@@ -218,6 +286,7 @@ def run(
     specs: Sequence[LabelSpec],
     provider_for_model: ProviderForModel,
     *,
+    repeat: int = 1,
     clock: Callable[[], float] = time.perf_counter,
     load_images: Callable[[LabelSpec], list[ImageInput]] = image_inputs,
 ) -> list[ModelResult]:
@@ -226,6 +295,7 @@ def run(
             model,
             specs,
             provider_for_model(model),
+            repeat=repeat,
             clock=clock,
             load_images=load_images,
         )
@@ -233,8 +303,19 @@ def run(
     ]
 
 
-def recommend(results: Sequence[ModelResult]) -> ModelResult | None:
-    """The cheapest model that clears the correctness gates. None if none does."""
+def recommend(
+    results: Sequence[ModelResult], specs: Sequence[LabelSpec] | None = None
+) -> ModelResult | None:
+    """The cheapest model that clears the correctness gates on sufficient evidence.
+
+    `specs` is optional only so existing callers keep working; when supplied — as the CLI
+    always does — a set that cannot support a recommendation yields None rather than a
+    winner picked on one sample.
+    """
+    if specs is not None:
+        repeat = max((r.repeat for r in results), default=1)
+        if evidence_problems(specs, repeat):
+            return None
     qualified = [r for r in results if r.qualified and r.priced]
     if not qualified:
         return None
@@ -248,12 +329,14 @@ def recommend(results: Sequence[ModelResult]) -> ModelResult | None:
 RULE = "=" * 78
 
 
-def estimate_lines(models: Sequence[str], specs: Sequence[LabelSpec]) -> list[str]:
+def estimate_lines(
+    models: Sequence[str], specs: Sequence[LabelSpec], repeat: int = 1
+) -> list[str]:
     """What this sweep is about to spend, printed before it spends it."""
-    images = sum(2 if s.face != "single" else 1 for s in specs)
+    images = sum(2 if s.face != "single" else 1 for s in specs) * repeat
     out = [
         "",
-        f"Planned: {len(specs)} label(s), {images} image(s) per model, "
+        f"Planned: {len(specs)} label(s) x {repeat} run(s), {images} image(s) per model, "
         f"{len(models)} model(s) = {images * len(models)} live call(s).",
     ]
     total = 0.0
@@ -284,7 +367,7 @@ def render(results: Sequence[ModelResult], specs: Sequence[LabelSpec]) -> str:
         "false passes on warning rows ships. Correctness disqualifies; speed does not.",
         "A model that is fast and reads the warning wrong is disqualified here, not excused.",
         "",
-        f"{'model':20s}{'accuracy':>10s}{'warn FP':>9s}{'p50':>8s}{'p95':>8s}"
+        f"{'model':20s}{'accuracy':>10s}{'warn FP':>12s}{'p50':>8s}{'p95':>8s}"
         f"{'$/label':>10s}   verdict",
     ]
 
@@ -294,13 +377,21 @@ def render(results: Sequence[ModelResult], specs: Sequence[LabelSpec]) -> str:
         verdict = "QUALIFIED" if result.qualified else "DISQUALIFIED"
         if result.qualified and result.latency_risk:
             verdict = "QUALIFIED (LATENCY RISK)"
+        # The count carries its denominator here for the same reason it does in the Tier A
+        # report: `0` alone reads identically whether it was 0-of-4 or 0-of-1, and this is
+        # the table that decides which model ships.
+        false_passes = f"{len(report.false_passes)}/{len(report.warning_violations)}"
         lines.append(
-            f"{result.model:20s}{report.accuracy:>9.1%}{len(report.false_passes):>9d}"
+            f"{result.model:20s}{report.accuracy:>9.1%}{false_passes:>12s}"
             f"{result.p50:>7.1f}s{result.p95:>7.1f}s{cost:>10s}   {verdict}"
         )
         for reason in result.disqualifiers:
             lines.append(f"{'':20s}  -> {reason}")
 
+    lines.append("")
+    lines.append("'warn FP' is false passes / warning-violation rows checked.")
+
+    lines += evidence_section(specs, results)
     lines += latency_by_shape(results)
 
     lines += [
@@ -310,9 +401,24 @@ def render(results: Sequence[ModelResult], specs: Sequence[LabelSpec]) -> str:
         "number comes from scripts/timed_p95.py against the deployed URL.",
     ]
 
-    winner = recommend(results)
+    repeat = max((r.repeat for r in results), default=1)
+    problems = evidence_problems(specs, repeat)
+    winner = recommend(results, specs)
     lines += ["", RULE]
-    if winner is None:
+    if problems:
+        lines += [
+            "NO RECOMMENDATION — THE EVIDENCE DOES NOT SUPPORT ONE.",
+            "",
+            "Every model above may show a clean warning column and still misread the",
+            "warning in production, because these postures were barely tested or not",
+            "tested at all. Fix the set, not the threshold:",
+        ]
+        lines += [f"  - {p}" for p in problems]
+        lines += [
+            "",
+            "Add fixtures for the uncovered postures and raise --repeat, then re-run.",
+        ]
+    elif winner is None:
         lines += [
             "NO MODEL QUALIFIES.",
             "Every tier measured fails a correctness gate. Do not ship on latency or cost;",
@@ -339,6 +445,27 @@ def render(results: Sequence[ModelResult], specs: Sequence[LabelSpec]) -> str:
             )
     lines.append(RULE)
     return "\n".join(lines)
+
+
+def evidence_section(
+    specs: Sequence[LabelSpec], results: Sequence[ModelResult]
+) -> list[str]:
+    """How many times each warning posture was actually put in front of each model."""
+    repeat = max((r.repeat for r in results), default=1)
+    coverage = posture_coverage(specs, repeat)
+    out = [
+        "",
+        f"Warning-posture evidence ({repeat} run(s) per label). A model can only be",
+        "recommended on postures it was actually shown:",
+    ]
+    for posture, samples in sorted(coverage.items()):
+        mark = "ok " if samples >= MIN_SAMPLES_PER_POSTURE else "!! "
+        blind = undetectable_error_rate(samples)
+        out.append(
+            f"  {mark}{posture:22s}{samples:3d} sample(s)   "
+            f"an error rate up to {blind:.0%} would go unseen"
+        )
+    return out
 
 
 def latency_by_shape(results: Sequence[ModelResult]) -> list[str]:

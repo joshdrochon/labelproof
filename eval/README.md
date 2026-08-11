@@ -163,6 +163,28 @@ disqualifies and never rescues — a fast model that reads the warning wrong is 
 by this report, not excused by it. When a cheaper tier is passed over, the report names it
 and says why.
 
+**It refuses to answer on thin evidence.** The disqualification rule was always right, but
+until 2026-08-11 the evidence behind it was one sample for body-bold and none for
+header-bold, run once per model. A reviewer simulated it against measured Haiku error rates
+and got `SHIPS: claude-haiku-4-5` in 277 of 400 runs — a coin flip on the decision the
+instrument exists to make. Two changes:
+
+- `--repeat N` (default 3) runs every label N times. A model's warning reading is
+  stochastic; one pass cannot tell a reliable model from a lucky one.
+- The sweep now names no winner at all unless every warning posture
+  (`header_not_all_caps`, `header_not_bold`, `body_bold`, `text_altered`,
+  `warning_absent`) has at least `MIN_SAMPLES_PER_POSTURE` samples. It prints the sample
+  count per posture alongside the error rate that would still go unseen at that count —
+  at one sample, 95%.
+
+On this branch `header_not_bold` has **zero** fixtures, so the sweep correctly reports
+`NO RECOMMENDATION` rather than blessing a tier. The fixture that closes it
+(`tc03b_non_bold_warning_header`) is on `wave/warning`; merging it, plus the default
+`--repeat 3`, restores a recommendation backed by evidence.
+
+The warn-FP column reads `false passes / violation rows checked`, because `0` alone reads
+identically whether it was 0-of-4 or 0-of-1.
+
 The p95 here is extraction plus rules, measured from a script. It is **not** PERF-1's
 upload-to-verdict number — that one comes from `scripts/timed_p95.py` against the deployed
 URL — and latency is grouped by call shape (one image is one call; two images are two

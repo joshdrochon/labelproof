@@ -87,14 +87,16 @@ def run_tier_b(
     return tier_b.evaluate(tier_b_set.labels, provider), ""
 
 
-def run_sweep(models: list[str], specs: list[Any], *, dry_run: bool) -> tuple[str, int]:
+def run_sweep(
+    models: list[str], specs: list[Any], *, dry_run: bool, repeat: int = 1
+) -> tuple[str, int]:
     """The model-tier sweep. Returns (text to print, exit code).
 
     Opt-in by construction — nothing reaches here without `--model` — and every exit is
     zero. A sweep is a measurement, not a gate: it informs which tier ships, and a machine
     with no credentials has not regressed, it has simply not measured.
     """
-    lines = sweep.estimate_lines(models, specs)
+    lines = sweep.estimate_lines(models, specs, repeat)
 
     if dry_run:
         lines.append("")
@@ -115,7 +117,7 @@ def run_sweep(models: list[str], specs: list[Any], *, dry_run: bool) -> tuple[st
             lines.append(f"SKIPPED — {exc}")
             return "\n".join(lines), 0
 
-    results = sweep.run(models, specs, lambda m: providers[m])
+    results = sweep.run(models, specs, lambda m: providers[m], repeat=repeat)
     lines.append(sweep.render(results, specs))
     return "\n".join(lines), 0
 
@@ -241,6 +243,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="with --model: print the planned calls and estimated spend, then stop.",
     )
     parser.add_argument(
+        "--repeat",
+        type=int,
+        default=sweep.MIN_SAMPLES_PER_POSTURE,
+        metavar="N",
+        help=(
+            f"with --model: run each label N times (default {sweep.MIN_SAMPLES_PER_POSTURE}). "
+            f"A model's warning reading is stochastic; one pass cannot tell a reliable "
+            f"model from a lucky one."
+        ),
+    )
+    parser.add_argument(
         "--min-accuracy",
         type=float,
         default=ACCURACY_FLOOR,
@@ -297,7 +310,9 @@ def main(argv: list[str] | None = None) -> int:
     # Reached only because the operator named a model: the CI command cannot get here,
     # which is what keeps the live path out of the build (LP-329).
     if args.model:
-        text, sweep_code = run_sweep(args.model, specs, dry_run=args.dry_run)
+        text, sweep_code = run_sweep(
+            args.model, specs, dry_run=args.dry_run, repeat=args.repeat
+        )
         print(text, file=sys.stderr if args.json else sys.stdout)
         if sweep_code:
             return sweep_code

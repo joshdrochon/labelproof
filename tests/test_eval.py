@@ -984,7 +984,9 @@ class _Harness:
         return response
 
 
-def _run_sweep(models: dict[str, float], specs: list[LabelSpec]) -> list[sweep.ModelResult]:
+def _run_sweep(
+    models: dict[str, float], specs: list[LabelSpec], repeat: int = 1
+) -> list[sweep.ModelResult]:
     """Run the sweep with a per-model latency, offline."""
     results = []
     for model, seconds in models.items():
@@ -994,11 +996,33 @@ def _run_sweep(models: dict[str, float], specs: list[LabelSpec]) -> list[sweep.M
                 model,
                 specs,
                 harness,
+                repeat=repeat,
                 clock=harness.clock,
                 load_images=harness.load_images,
             )
         )
     return results
+
+
+def evidence_complete_specs() -> list[LabelSpec]:
+    """The catalog plus the one warning posture it does not yet exercise.
+
+    `header_not_bold` has zero fixtures on this branch — the gap the sweep now refuses to
+    recommend across. The fixture that closes it (`tc03b_non_bold_warning_header`) belongs
+    to the warning agent and is deliberately NOT duplicated into the catalog here; these
+    tests build an equivalent locally so the ship rule can be tested on a set that has
+    evidence, while the real set keeps telling the truth about its gap.
+    """
+    base = CATALOG[0]
+    return [
+        *CATALOG,
+        base.with_(
+            name="local_header_not_bold",
+            warning_header_bold=False,
+            expect={"government_warning": "mismatch"},
+            notes="Local stand-in for the header-not-bold posture.",
+        ),
+    ]
 
 
 def test_the_sweep_measures_accuracy_cost_and_latency_per_model() -> None:
@@ -1013,10 +1037,11 @@ def test_the_sweep_measures_accuracy_cost_and_latency_per_model() -> None:
 
 
 def test_the_cheapest_qualifying_tier_is_what_ships() -> None:
-    """BUILD.md §1's rule, applied rather than restated."""
-    results = _run_sweep({"claude-opus-5": 4.0, "claude-haiku-4-5": 2.0}, list(CATALOG))
-    assert sweep.recommend(results).model == "claude-haiku-4-5"
-    assert "SHIPS: claude-haiku-4-5" in sweep.render(results, list(CATALOG))
+    """The ship rule, applied rather than restated — on a set that has the evidence."""
+    specs = evidence_complete_specs()
+    results = _run_sweep({"claude-opus-5": 4.0, "claude-haiku-4-5": 2.0}, specs, repeat=3)
+    assert sweep.recommend(results, specs).model == "claude-haiku-4-5"
+    assert "SHIPS: claude-haiku-4-5" in sweep.render(results, specs)
 
 
 def test_a_fast_model_that_reads_the_warning_wrong_is_disqualified() -> None:
@@ -1040,11 +1065,12 @@ def test_a_fast_model_that_reads_the_warning_wrong_is_disqualified() -> None:
 
 def test_a_disqualified_cheaper_model_is_named_next_to_the_winner() -> None:
     """The report must say why the cheap tier was passed over, not just pick another."""
-    results = _run_sweep({"claude-opus-5": 4.0, "claude-haiku-4-5": 1.0}, list(CATALOG))
+    specs = evidence_complete_specs()
+    results = _run_sweep({"claude-opus-5": 4.0, "claude-haiku-4-5": 1.0}, specs, repeat=3)
     results[1].report.outcomes.append(
         warning_violation(fixture="tc07_missing_warning", actual=Verdict.MATCH)
     )
-    text = sweep.render(results, list(CATALOG))
+    text = sweep.render(results, specs)
     assert "SHIPS: claude-opus-5" in text
     assert "claude-haiku-4-5 is cheaper" in text
     assert "disqualified" in text
@@ -1052,21 +1078,23 @@ def test_a_disqualified_cheaper_model_is_named_next_to_the_winner() -> None:
 
 def test_latency_never_disqualifies() -> None:
     """p95 here is extraction plus rules, not upload-to-verdict. It is context, not a gate."""
-    results = _run_sweep({"claude-opus-5": 12.0}, list(CATALOG))
+    specs = evidence_complete_specs()
+    results = _run_sweep({"claude-opus-5": 12.0}, specs, repeat=3)
     result = results[0]
     assert result.latency_risk
     assert result.qualified
     assert result.disqualifiers == []
-    text = sweep.render(results, list(CATALOG))
+    text = sweep.render(results, specs)
     assert "LATENCY RISK" in text
     assert "CONTEXT only" in text
 
 
 def test_no_qualifying_model_is_reported_as_such() -> None:
-    results = _run_sweep({"claude-haiku-4-5": 1.0}, list(CATALOG))
+    specs = evidence_complete_specs()
+    results = _run_sweep({"claude-haiku-4-5": 1.0}, specs, repeat=3)
     results[0].report.errors.append(("tc01_old_tom_clean", "boom"))
-    assert sweep.recommend(results) is None
-    assert "NO MODEL QUALIFIES" in sweep.render(results, list(CATALOG))
+    assert sweep.recommend(results, specs) is None
+    assert "NO MODEL QUALIFIES" in sweep.render(results, specs)
 
 
 def test_latency_is_split_by_call_shape() -> None:
@@ -1077,6 +1105,68 @@ def test_latency_is_split_by_call_shape() -> None:
     text = sweep.render(results, list(CATALOG))
     assert "Latency by call shape" in text
     assert "1 image(s)" in text and "2 image(s)" in text
+
+
+def test_the_sweep_refuses_to_recommend_on_a_posture_it_never_tested() -> None:
+    """The reviewer's 69%-coin-flip finding, closed at the source.
+
+    The disqualification rule was always right; the evidence behind it was one sample for
+    body-bold and none at all for header-bold. A model cannot be recommended on a posture
+    it was never shown.
+    """
+    specs = list(CATALOG)
+    results = _run_sweep({"claude-haiku-4-5": 1.0}, specs, repeat=3)
+    assert all(r.qualified for r in results)
+    assert sweep.recommend(results, specs) is None
+
+    text = sweep.render(results, specs)
+    assert "NO RECOMMENDATION" in text
+    assert "header_not_bold" in text
+    assert "SHIPS:" not in text
+
+
+def test_the_current_set_has_the_gap_the_reviewer_found() -> None:
+    """Pins the actual hole so closing it is a visible, deliberate change."""
+    coverage = sweep.posture_coverage(CATALOG)
+    assert coverage["header_not_bold"] == 0, "closed upstream — drop this test"
+    assert coverage["body_bold"] == 1
+
+
+def test_repeats_multiply_the_evidence() -> None:
+    assert sweep.posture_coverage(CATALOG, repeat=1)["body_bold"] == 1
+    assert sweep.posture_coverage(CATALOG, repeat=5)["body_bold"] == 5
+
+
+def test_a_single_sample_proves_almost_nothing_and_the_report_says_so() -> None:
+    """One clean read is consistent with a model that is wrong 95% of the time."""
+    assert sweep.undetectable_error_rate(1) == pytest.approx(0.95)
+    assert sweep.undetectable_error_rate(3) == pytest.approx(0.632, abs=0.01)
+    assert sweep.undetectable_error_rate(30) < 0.10
+    text = sweep.render(_run_sweep({"claude-opus-5": 1.0}, list(CATALOG)), list(CATALOG))
+    assert "would go unseen" in text
+
+
+def test_repeat_actually_runs_each_label_more_than_once() -> None:
+    specs = list(CATALOG[:2])
+    once = _run_sweep({"claude-opus-5": 1.0}, specs, repeat=1)[0]
+    thrice = _run_sweep({"claude-opus-5": 1.0}, specs, repeat=3)[0]
+    assert len(thrice.runs) == 3 * len(once.runs)
+    assert thrice.report.total == 3 * once.report.total
+
+
+def test_the_warn_fp_column_carries_its_denominator() -> None:
+    """The sin fixed in the Tier A report, fixed in the table that picks the model.
+
+    `0` reads identically whether it was 0-of-4 or 0-of-1, and this is where the decision
+    is made.
+    """
+    specs = evidence_complete_specs()
+    results = _run_sweep({"claude-opus-5": 1.0}, specs, repeat=3)
+    text = sweep.render(results, specs)
+    checked = len(results[0].report.warning_violations)
+    assert checked > 0
+    assert f"0/{checked}" in text
+    assert "false passes / warning-violation rows checked" in text
 
 
 def test_prices_cover_the_default_sweep() -> None:
