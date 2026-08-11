@@ -14,7 +14,8 @@ from pathlib import Path
 
 import pytest
 
-from api.models import FieldName, Verdict
+from api import canon
+from api.models import FieldName, Verdict, WarningTypography
 from api.provider.base import (
     ExtractionRequest,
     ExtractionResponse,
@@ -36,7 +37,7 @@ from eval.gates import (
 )
 from eval.outcomes import ACCURACY_FLOOR, FieldOutcome, Report, evaluate
 from eval.report import render
-from eval.run import main, payload
+from eval.run import build_parser, main, payload
 from fixtures.generator.catalog import CATALOG, REQUIRED_WARNING_VIOLATIONS
 from fixtures.generator.spec import LabelSpec
 
@@ -572,15 +573,51 @@ def test_cli_writes_a_report_artifact(tmp_path: object) -> None:
     assert body["exit_code"] == golden_exit()
 
 
+def _readme_exit_table() -> dict[int, str]:
+    """Parse the exit-code table out of eval/README.md as {code: gate name}."""
+    readme = (REPO / "eval" / "README.md").read_text()
+    table: dict[int, str] = {}
+    for line in readme.split("\n"):
+        cells = [c.strip() for c in line.strip().strip("|").split("|")]
+        if len(cells) != 3 or not cells[0].startswith("`"):
+            continue
+        code = cells[0].strip("`")
+        if not code.isdigit():
+            continue
+        table[int(code)] = cells[1].strip("`*")
+    return table
+
+
+def test_the_readme_exit_code_table_matches_the_gates() -> None:
+    """Pins code-to-gate, not just 'the digit appears somewhere'.
+
+    The previous version asserted each digit appeared in backticks anywhere in the file,
+    so a reviewer could swap 3 and 5 in the table and both 'documented' tests stayed
+    green — drifting the one fact the pinning test exists to protect.
+    """
+    documented = _readme_exit_table()
+    actual = {g.exit_code: g.name for g in gates_for(evaluate(CATALOG))}
+
+    for code, name in actual.items():
+        assert code in documented, f"exit {code} ({name}) is not in the README table"
+        assert documented[code] == name, (
+            f"README says exit {code} is {documented[code]!r}, gates say {name!r}"
+        )
+
+    assert documented.keys() == actual.keys() | {EXIT_OK, EXIT_USAGE}, (
+        "the README table documents a code no gate emits, or omits one"
+    )
+    assert documented[EXIT_OK] in ("—", "-", "")
+    assert documented[EXIT_USAGE] in ("—", "-", "")
+
+
 def test_documented_ci_command_matches_the_parser() -> None:
     """eval/README.md is the handoff artifact for whoever wires the workflow."""
-    from pathlib import Path
-
-    readme = (Path(__file__).resolve().parents[1] / "eval" / "README.md").read_text()
+    readme = (REPO / "eval" / "README.md").read_text()
     assert "python -m eval.run --report-json eval/out/report.json" in readme
-    for code in (EXIT_OK, EXIT_ACCURACY, EXIT_USAGE, EXIT_WARNING_FALSE_PASS,
-                 EXIT_HARNESS_ERROR, EXIT_WARNING_COVERAGE):
-        assert f"`{code}`" in readme
+    # The command must actually parse — a documented flag that no longer exists is worse
+    # than no documentation.
+    build_parser().parse_args(["--report-json", "eval/out/report.json"])
 
 
 # --- the CI run itself (LP-071) ----------------------------------------------------------------
@@ -658,6 +695,66 @@ def test_the_threshold_cannot_be_lowered_below_the_ops3_floor() -> None:
 
 def test_the_threshold_rejects_impossible_values() -> None:
     assert main(["--min-accuracy", "1.5"]) == EXIT_USAGE
+
+
+@pytest.mark.parametrize("value", ["nan", "NaN", "inf", "-inf", "Infinity"])
+def test_the_threshold_rejects_non_finite_values(value: str) -> None:
+    """`nan > 1.0` and `nan < 0.95` are both False, so nan slipped through both bounds
+    and surfaced as 'floor nan% BELOW FLOOR', exit 1 — a typo wearing the accuracy gate's
+    exit code."""
+    assert main([f"--min-accuracy={value}"]) == EXIT_USAGE
+
+
+# --- surviving an ASCII terminal (LP-123 robustness) -------------------------------------------
+
+def test_the_report_is_pure_ascii() -> None:
+    """`PYTHONIOENCODING=ascii` is normal in minimal containers and cron.
+
+    An em-dash there raises UnicodeEncodeError and Python exits 1, which this harness's
+    own exit-code table defines as an accuracy failure.
+    """
+    render(evaluate(CATALOG)).encode("ascii")
+
+
+def test_every_report_shape_is_pure_ascii() -> None:
+    shapes = [
+        Report(tier="A", outcomes=[warning_violation(actual=Verdict.MATCH)]),
+        Report(tier="A", outcomes=[outcome()], subset=True),
+        Report(tier="A", errors=[("f", "boom")]),
+        Report(
+            tier="A",
+            required_violations=frozenset({"missing_one"}),
+            outcomes=[warning_violation()],
+        ),
+    ]
+    for report in shapes:
+        render(report, tier_b.load(), Report(tier="B", outcomes=[outcome()])).encode("ascii")
+
+
+def test_the_sweep_report_is_pure_ascii() -> None:
+    specs = evidence_complete_specs()
+    sweep.render(_run_sweep({"claude-opus-5": 1.0}, specs, repeat=3), specs).encode("ascii")
+    sweep.render(_run_sweep({"claude-opus-5": 1.0}, list(CATALOG)), list(CATALOG)).encode(
+        "ascii"
+    )
+
+
+def test_the_cli_runs_under_an_ascii_only_stdout() -> None:
+    done = _run(
+        ["-m", "eval.run"], PYTHONIOENCODING="ascii", LC_ALL="C", LANG="C"
+    )
+    assert done.returncode == golden_exit(), done.stdout + done.stderr
+    assert "UnicodeEncodeError" not in done.stderr
+    assert "GOVERNMENT WARNING" in done.stdout
+
+
+def test_ascii_transliteration_is_readable_not_mangled() -> None:
+    from eval.report import ascii_safe
+
+    assert ascii_safe("a — b") == "a -- b"
+    assert ascii_safe("A↔B") == "A<->B"
+    assert ascii_safe("≥95%") == ">=95%"
+    assert ascii_safe("中") == "?"
 
 
 def test_the_effective_threshold_is_reported(
@@ -828,9 +925,25 @@ def test_the_a_to_b_gap_is_published(tmp_path: Path) -> None:
         + [outcome(expected=Verdict.MISMATCH, actual=Verdict.MATCH)],
     )
     text = render(tier_a, tier_b.load(), tier_b_report)
-    assert "A↔B accuracy gap" in text
+    assert "A-to-B accuracy gap" in text
     assert "+10.0 pp" in text
     assert "Blending them would hide the second" in text
+
+
+def test_the_gap_section_does_not_overstate_what_tier_a_measures() -> None:
+    """Tier A never touches the renderer or a model: `data=b""`, verdicts from the spec."""
+    tier_a = evaluate(CATALOG)
+    tier_b_report = Report(tier="B", outcomes=[outcome() for _ in range(4)])
+    text = render(tier_a, tier_b.load(), tier_b_report)
+    assert "RULES ENGINE" in text
+    assert "no pixels and no model" in text
+    assert "our own renderer" not in text
+
+
+def test_the_empty_tier_b_block_does_not_overstate_tier_a_either() -> None:
+    text = render(evaluate(CATALOG), tier_b.load())
+    assert "our own renderer" not in text
+    assert "RULES ENGINE" in text
 
 
 def test_tier_b_runs_end_to_end_against_a_populated_manifest(tmp_path: Path) -> None:
@@ -904,9 +1017,73 @@ def test_a_broken_manifest_fails_the_run_that_asked_for_tier_b(
     """A malformed manifest is a repo defect, not a model result."""
     path = _tier_b_manifest(tmp_path, [_old_tom_row(commodity="cider")])
     monkeypatch.setattr(tier_b, "MANIFEST", path)
-    assert main(["--tier", "b"]) == EXIT_USAGE
+    # A gate failure outranks it; with no gate failure the manifest sets the code.
+    assert main(["--tier", "b"]) == (golden_exit() or EXIT_USAGE)
     # ...and does not break the run that never asked for it.
     assert main([]) == golden_exit()
+
+
+def test_a_broken_manifest_never_masks_a_warning_false_pass(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A compliance failure must not reach CI disguised as 'bad flag'.
+
+    Reproduced by the reviewer: the same Tier A false pass exited 3 with a good manifest
+    and 2 with a broken one, while the JSON kept saying 3.
+    """
+    path = _tier_b_manifest(tmp_path, [_old_tom_row(commodity="cider")])
+    monkeypatch.setattr(tier_b, "MANIFEST", path)
+    monkeypatch.setattr(
+        "eval.run.evaluate",
+        lambda *a, **k: Report(
+            tier="A", outcomes=[warning_violation(actual=Verdict.MATCH)]
+        ),
+    )
+    code = main(["--json", "--tier", "b"])
+    body = json.loads(capsys.readouterr().out)
+    assert code == EXIT_WARNING_FALSE_PASS
+    assert body["exit_code"] == code, "the payload and the process must agree"
+    assert body["tier_b_manifest_invalid"] is True
+
+
+def test_the_payload_exit_code_always_equals_the_process_exit_code(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """README promises 'two forms, same content'. Hold it to that."""
+    path = _tier_b_manifest(tmp_path, [_old_tom_row(commodity="cider")])
+    monkeypatch.setattr(tier_b, "MANIFEST", path)
+    for argv in ([], ["--tier", "b"], ["--tier", "all"]):
+        code = main(["--json", *argv])
+        assert json.loads(capsys.readouterr().out)["exit_code"] == code, argv
+
+
+def test_tier_b_errors_are_visible_in_the_payload(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Six labels that all failed must not look like Tier B never ran."""
+    path = _tier_b_manifest(tmp_path, [_old_tom_row()])
+    monkeypatch.setattr(tier_b, "MANIFEST", path)
+    monkeypatch.setattr(tier_b, "evaluate", lambda labels, provider: Report(
+        tier="B", fixtures=len(labels), errors=[(label.name, "APIStatusError: 400")
+                                               for label in labels],
+    ))
+    monkeypatch.setattr("eval.run.live.has_credentials", lambda: True)
+    monkeypatch.setattr("eval.run.live.build", lambda *a, **k: (lambda *_: None))
+
+    main(["--json", "--tier", "b"])
+    body = json.loads(capsys.readouterr().out)["tier_b"]
+    assert body["ran"] is True
+    assert body["errors"], "a run where every label failed must say so"
+    assert body["accuracy"] is None
+
+
+def test_a_tier_b_that_never_ran_is_distinguishable_from_one_that_all_failed(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    main(["--json"])
+    body = json.loads(capsys.readouterr().out)["tier_b"]
+    assert body["ran"] is False
+    assert body["errors"] == []
 
 
 def test_tier_b_skips_rather_than_fails_without_credentials(
@@ -1044,23 +1221,68 @@ def test_the_cheapest_qualifying_tier_is_what_ships() -> None:
     assert "SHIPS: claude-haiku-4-5" in sweep.render(results, specs)
 
 
-def test_a_fast_model_that_reads_the_warning_wrong_is_disqualified() -> None:
-    """The whole point of the instrument: speed does not buy a pass on the warning gate."""
-    fast_and_wrong = _run_sweep({"claude-haiku-4-5": 1.0}, list(CATALOG))
-    # Force a false pass by scoring the set against a provider that always reads a clean
-    # warning, regardless of which defect the fixture actually renders.
-    for result in fast_and_wrong:
-        result.report.outcomes.append(
-            warning_violation(fixture="tc03_title_case_warning", actual=Verdict.MATCH)
-        )
+class _TypographyLiar(_Harness):
+    """A model that reads the warning's typography as compliant when it is not.
 
-    result = fast_and_wrong[0]
+    The realistic Haiku failure: the text is transcribed correctly, and `body_is_bold` /
+    `header_is_all_caps` come back the way a compliant label would look. Nothing else about
+    the extraction is wrong, which is exactly why it slips past everything except the
+    warning gate.
+    """
+
+    def extract(self, request: ExtractionRequest) -> ExtractionResponse:
+        response = super().extract(request)
+        for extraction in response.extractions:
+            if extraction.warning_text is None:
+                continue
+            extraction.warning_text = canon.CANONICAL_WARNING
+            # The comparison reads the extracted FIELD, not `warning_text`; a liar that
+            # only rewrote the latter would not actually reach the warning rules.
+            field = extraction.fields.get(FieldName.GOVERNMENT_WARNING)
+            if field is not None:
+                field.value = canon.CANONICAL_WARNING
+            extraction.warning_typography = WarningTypography(
+                header_is_all_caps=True,
+                header_is_bold=True,
+                body_is_bold=False,
+                relative_size=1.0,
+                contrast_ok=True,
+            )
+        return response
+
+
+def test_a_fast_model_that_reads_the_warning_wrong_is_disqualified() -> None:
+    """The whole point of the instrument: speed does not buy a pass on the warning gate.
+
+    End to end through a misreporting extractor, not by appending the outcome the
+    assertion then reads. The previous version proved `disqualifiers` consults
+    `false_passes`; it did not prove that a model reporting `body_is_bold=False` on tc04
+    becomes one.
+    """
+    specs = evidence_complete_specs()
+    liar = _TypographyLiar(1.0)
+    result = sweep.run_model(
+        "claude-haiku-4-5", specs, liar, repeat=3,
+        clock=liar.clock, load_images=liar.load_images,
+    )
+
+    slipped = {o.fixture for o in result.report.false_passes}
+    assert "tc04_bold_warning_body" in slipped, "a bold body read as non-bold must be caught"
+    assert "tc03_title_case_warning" in slipped
     assert not result.qualified
     assert any("false pass" in r for r in result.disqualifiers)
 
-    text = sweep.render(fast_and_wrong, list(CATALOG))
+    text = sweep.render([result], specs)
     assert "DISQUALIFIED" in text
     assert "fast and reads the warning wrong is disqualified here, not excused" in text
+
+
+def test_the_same_model_reading_typography_honestly_is_not_disqualified() -> None:
+    """The control. Without it, the test above could pass for the wrong reason."""
+    specs = evidence_complete_specs()
+    honest = _run_sweep({"claude-haiku-4-5": 1.0}, specs, repeat=3)[0]
+    assert honest.report.false_passes == []
+    assert honest.qualified
 
 
 def test_a_disqualified_cheaper_model_is_named_next_to_the_winner() -> None:
@@ -1095,6 +1317,21 @@ def test_no_qualifying_model_is_reported_as_such() -> None:
     results[0].report.errors.append(("tc01_old_tom_clean", "boom"))
     assert sweep.recommend(results, specs) is None
     assert "NO MODEL QUALIFIES" in sweep.render(results, specs)
+
+
+def test_a_p95_from_too_few_samples_says_it_is_not_a_percentile() -> None:
+    """`2 image(s) n=1` reported a p95 from one sample, on the axis the decision turns on."""
+    specs = [s for s in CATALOG if s.face != "single"]
+    text = sweep.render(_run_sweep({"claude-opus-5": 3.0}, list(CATALOG)), list(CATALOG))
+    assert specs, "the set must still contain a two-image fixture"
+    assert "[thin]" in text
+    assert "the maximum, not a percentile" in text
+
+
+def test_enough_repeats_clear_the_thin_marker() -> None:
+    specs = evidence_complete_specs()
+    text = sweep.render(_run_sweep({"claude-opus-5": 3.0}, specs, repeat=5), specs)
+    assert "[thin]" not in text
 
 
 def test_latency_is_split_by_call_shape() -> None:
@@ -1230,11 +1467,37 @@ def test_fixture_images_exist_for_every_spec() -> None:
 # --- expectations are honest -----------------------------------------------------------------
 
 def test_no_fixture_expects_a_warning_violation_to_pass() -> None:
-    """A golden set that expected a violation to be a Match would encode the bug."""
-    for spec in CATALOG:
+    """A golden set that expected a violation to be a Match would encode the bug.
+
+    The previous version of this test could not fail: it asserted that a value already
+    known to be `mismatch` or `missing` was not `match` or `not_applicable`. It now checks
+    the property that matters — every fixture whose NAME or defect declares a warning
+    violation must carry a non-passing expectation.
+    """
+    passing = {v.value for v in (Verdict.MATCH, Verdict.NOT_APPLICABLE)}
+    defective = [
+        spec
+        for spec in CATALOG
+        if not spec.include_warning
+        or spec.warning_header_case != "upper"
+        or not spec.warning_header_bold
+        or spec.warning_body_bold
+        or spec.warning_text is not None
+    ]
+    assert defective, "the set must contain warning defects at all"
+    for spec in defective:
         expected = spec.expect.get("government_warning")
-        if expected in ("mismatch", "missing"):
-            assert expected not in ("match", "not_applicable")
+        assert expected is not None, f"{spec.name} renders a warning defect but expects nothing"
+        assert expected not in passing, f"{spec.name} expects a violation to pass: {expected}"
+
+
+def test_the_expectation_check_can_actually_fail() -> None:
+    """Guards the guard: a fixture that expected its own defect to pass must be caught."""
+    passing = {v.value for v in (Verdict.MATCH, Verdict.NOT_APPLICABLE)}
+    liar = CATALOG[0].with_(
+        name="liar", warning_body_bold=True, expect={"government_warning": "match"}
+    )
+    assert liar.expect["government_warning"] in passing
 
 
 def test_finding_expectations_reference_codes_the_code_can_raise() -> None:

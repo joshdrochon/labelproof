@@ -1,8 +1,8 @@
 """Model-tier sweep — the instrument that decides which model ships (LP-329).
 
-BUILD.md §1 states the rule and this module is what applies it: *the cheapest tier that
-clears ≥95% field accuracy with zero false passes on warning rows is what ships*. The tier
-in BUILD.md is a starting point, not a finding; this table is the finding.
+The ship rule this module applies: *the cheapest tier that clears ≥95% field accuracy with
+zero false passes on warning rows is what ships*. Whichever tier the code currently
+defaults to is a starting point, not a finding; this table is the finding.
 
 **Correctness disqualifies. Speed does not.** A model is DISQUALIFIED for a warning false
 pass, for accuracy below the floor, or for a crashed fixture — and for nothing else. p95 is
@@ -41,6 +41,7 @@ from api.provider.base import ExtractionProvider, ImageInput
 from api.verify import verify
 from eval.outcomes import ACCURACY_FLOOR, Report, expected_verdicts, outcome_for
 from eval.pricing import DEFAULT_SWEEP, estimate_usd, price_for
+from eval.report import ascii_safe
 from fixtures.generator.spec import LabelSpec
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -195,7 +196,7 @@ class ModelResult:
     def usd_per_label(self) -> float:
         return sum(r.usd for r in self.runs) / len(self.runs) if self.runs else 0.0
 
-    # --- the ship rule (BUILD.md §1) ----------------------------------------------------
+    # --- the ship rule -------------------------------------------------------------------
 
     @property
     def disqualifiers(self) -> list[str]:
@@ -363,7 +364,7 @@ def render(results: Sequence[ModelResult], specs: Sequence[LabelSpec]) -> str:
         RULE,
         f"MODEL-TIER SWEEP — {len(specs)} label(s), live models (LP-329)",
         RULE,
-        "Ship rule (BUILD.md §1): the CHEAPEST tier clearing >=95% accuracy with ZERO",
+        "Ship rule: the CHEAPEST tier clearing >=95% accuracy with ZERO",
         "false passes on warning rows ships. Correctness disqualifies; speed does not.",
         "A model that is fast and reads the warning wrong is disqualified here, not excused.",
         "",
@@ -444,7 +445,7 @@ def render(results: Sequence[ModelResult], specs: Sequence[LabelSpec]) -> str:
                 f"That is a product decision, not a gate — see PERF-1."
             )
     lines.append(RULE)
-    return "\n".join(lines)
+    return ascii_safe("\n".join(lines))
 
 
 def evidence_section(
@@ -481,17 +482,27 @@ def latency_by_shape(results: Sequence[ModelResult]) -> list[str]:
         return []
 
     out = ["", "Latency by call shape (the adapter issues one concurrent call per image):"]
+    thin = False
     for result in results:
         parts = []
         for shape in shapes:
             samples = result.latencies(shape)
             if not samples:
                 continue
+            # A p95 from a handful of samples is the maximum wearing a percentile's name.
+            # Say so rather than letting it be quoted as one.
+            marker = "" if len(samples) >= MIN_SAMPLES_PER_POSTURE else " [thin]"
+            thin = thin or bool(marker)
             parts.append(
-                f"{shape} image(s) n={len(samples)}: "
+                f"{shape} image(s) n={len(samples)}{marker}: "
                 f"p50 {percentile(samples, 0.5):.1f}s p95 {percentile(samples, 0.95):.1f}s"
             )
         out.append(f"  {result.model:20s}{'   '.join(parts)}")
+    if thin:
+        out.append(
+            f"  [thin] fewer than {MIN_SAMPLES_PER_POSTURE} samples — that p95 is the "
+            f"maximum, not a percentile. Raise --repeat."
+        )
     return out
 
 

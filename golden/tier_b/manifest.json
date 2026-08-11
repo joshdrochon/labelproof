@@ -1,7 +1,7 @@
 {
   "tier": "B",
   "gates_ci": false,
-  "description": "Tier B — real bottle photographs. Reported every run, never gates CI. Small n, nondeterministic, live model. The gap between this number and Tier A's is the honest answer to 'does this work', and it is a published metric rather than an embarrassment (BUILD.md section 5).",
+  "description": "Tier B — real bottle photographs. Reported every run, never gates CI. Small n, nondeterministic, live model. The gap between this number and Tier A's is the honest answer to 'does this work', and it is a published metric rather than an embarrassment.",
   "capture_guide": [
     "6-8 photographs total, shot with a phone, originals unedited.",
     "Mixed commodity: at least one spirits, one wine, one malt.",

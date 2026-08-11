@@ -48,7 +48,7 @@ PRICES: dict[str, Price] = {
 DEFAULT_SWEEP: tuple[str, ...] = ("claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5")
 
 #: Rough token counts for the pre-flight spend estimate only — never for a reported cost.
-#: One image at the 2576px high-resolution tier is ~4,784 tokens (BUILD.md §8); the static
+#: One image at the 2576px high-resolution vision tier is ~4,784 tokens; the static
 #: system prompt plus schema is ~1,500; the JSON answer runs ~800.
 ESTIMATE_IMAGE_TOKENS = 4_784
 ESTIMATE_SYSTEM_TOKENS = 1_500

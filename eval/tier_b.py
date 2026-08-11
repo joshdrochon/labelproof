@@ -38,7 +38,7 @@ from eval.outcomes import FieldOutcome, Report
 ROOT = Path(__file__).resolve().parents[1]
 MANIFEST = ROOT / "golden" / "tier_b" / "manifest.json"
 
-#: Structural, not a setting. Tier B is reported every run and gates nothing (BUILD.md §5).
+#: Structural, not a setting. Tier B is reported every run and gates nothing.
 TIER_B_GATES = False
 
 #: Media types the pipeline accepts for a Tier B photograph, by extension.
@@ -225,7 +225,7 @@ def load(manifest_path: Path | None = None) -> TierBSet:
         # A manifest that claims to gate would be a quiet reversal of the one rule that
         # keeps this set honest, so it is rejected rather than obeyed.
         result.problems.append(
-            f"{path.name}: gates_ci must be false. Tier B never gates CI (BUILD.md §5)."
+            f"{path.name}: gates_ci must be false. Tier B never gates CI."
         )
 
     result.capture_guide = [str(x) for x in body.get("capture_guide", [])]

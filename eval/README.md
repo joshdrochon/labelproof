@@ -133,7 +133,13 @@ Tier B never changes the exit code, even on a Tier B warning false pass. Small n
 model make it flaky by nature, and gating on it would pressure whoever is on the hook into
 weakening the expectations. The one thing that *does* fail is a Tier B manifest that does
 not validate under `--tier b` — that is a repo defect rather than a model result, and it
-exits `2`.
+exits `2` **only when no Tier A gate failed**. A gate failure always outranks a
+configuration error: a broken manifest used to mask exit `3`, sending CI a compliance
+failure labelled "bad flag" while the JSON still said `3`.
+
+The payload's `exit_code` is always the number the process returns. `tier_b.errors` and
+`tier_b.ran` distinguish "Tier B never ran" from "every Tier B label failed" — without
+them both looked like `total: 0, accuracy: null` in the artifact CI keeps.
 
 ## Not part of CI
 
@@ -153,7 +159,7 @@ python -m eval.run --model claude-haiku-4-5 --dry-run   # estimate only, spends 
 ```
 
 Reports per model: field accuracy, **warning-field false passes**, p50/p95, and cost per
-label, then applies BUILD.md §1's rule — *the cheapest tier clearing ≥95% accuracy with
+label, then applies the ship rule — *the cheapest tier clearing ≥95% accuracy with
 zero false passes on warning rows ships.*
 
 **Correctness disqualifies; speed does not.** A model is `DISQUALIFIED` for a warning false

@@ -87,6 +87,38 @@ def test_a_regeneration_does_not_drift_from_the_committed_manifest(tmp_path: Pat
     assert _without_hashes(fresh) == _without_hashes(committed)
 
 
+def test_the_committed_hashes_match_the_committed_images() -> None:
+    """Repo integrity, and it is machine-independent.
+
+    `golden/set.json` recorded a sha256 per image that nothing ever compared against the
+    files on disk, so a corrupted or truncated fixture was invisible — the eval would
+    happily score against it. This checks the manifest describes the bytes actually
+    committed, which is true on every machine regardless of which font rendered them.
+    """
+    data = json.loads(GOLDEN.read_text())
+    labels = ROOT / "fixtures" / "labels"
+    checked = 0
+    for entry in data["fixtures"]:
+        for name, expected in entry["sha256"].items():
+            path = labels / name
+            assert path.is_file(), f"{name} is in the manifest but not on disk"
+            actual = hashlib.sha256(path.read_bytes()).hexdigest()[: len(expected)]
+            assert actual == expected, (
+                f"{name} does not match its recorded hash — the fixture changed without "
+                f"the manifest, or the file is corrupt"
+            )
+            checked += 1
+    assert checked, "the manifest recorded no hashes to check"
+
+
+def test_every_committed_image_is_named_by_the_manifest() -> None:
+    """An orphan PNG is a fixture nothing scores and nobody deletes."""
+    data = json.loads(GOLDEN.read_text())
+    declared = {name for entry in data["fixtures"] for name in entry["sha256"]}
+    on_disk = {p.name for p in (ROOT / "fixtures" / "labels").glob("*.png")}
+    assert on_disk == declared, f"orphans: {sorted(on_disk - declared)}"
+
+
 def test_the_manifest_records_the_font_that_produced_its_hashes() -> None:
     """So a cross-machine hash mismatch reads as a font change, not as flakiness."""
     body = json.loads(GOLDEN.read_text())

@@ -27,7 +27,9 @@ offline spec-backed provider (ENG-3).
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
+import math
 import sys
 from pathlib import Path
 from typing import Any
@@ -42,7 +44,7 @@ from eval.outcomes import (
     evaluate,
     expected_verdicts,
 )
-from eval.report import render
+from eval.report import ascii_safe, render
 from fixtures.generator.catalog import CATALOG
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -101,12 +103,12 @@ def run_sweep(
     if dry_run:
         lines.append("")
         lines.append("--dry-run: stopping before any live call. Nothing was spent.")
-        return "\n".join(lines), 0
+        return ascii_safe("\n".join(lines)), 0
 
     if not live.has_credentials():
         lines.append("")
         lines.append(live.NO_CREDENTIALS)
-        return "\n".join(lines), 0
+        return ascii_safe("\n".join(lines)), 0
 
     providers: dict[str, Any] = {}
     for model in models:
@@ -115,11 +117,11 @@ def run_sweep(
         except ConfigError as exc:
             lines.append("")
             lines.append(f"SKIPPED — {exc}")
-            return "\n".join(lines), 0
+            return ascii_safe("\n".join(lines)), 0
 
     results = sweep.run(models, specs, lambda m: providers[m], repeat=repeat)
     lines.append(sweep.render(results, specs))
-    return "\n".join(lines), 0
+    return ascii_safe("\n".join(lines)), 0
 
 
 def payload(
@@ -127,9 +129,18 @@ def payload(
     tier_b_set: tier_b.TierBSet | None = None,
     tier_b_report: Report | None = None,
     tier_b_note: str = "",
+    *,
+    exit_code: int | None = None,
+    manifest_broken: bool = False,
 ) -> dict[str, Any]:
-    """The machine-readable form of a report, gates included (LP-122)."""
+    """The machine-readable form of a report, gates included (LP-122).
+
+    `exit_code` is the number the process will actually return. It is passed in rather
+    than recomputed so the payload and the process can never disagree — they did, and CI
+    branching on `== 3` read a compliance failure as a bad flag.
+    """
     gates = gates_for(report)
+    code = exit_code_for(gates) if exit_code is None else exit_code
     tier_b_body: dict[str, Any] | None = None
     if tier_b_set is not None:
         tier_b_body = {
@@ -140,6 +151,11 @@ def payload(
             "usable": tier_b_set.usable,
             "problems": tier_b_set.problems,
             "note": tier_b_note,
+            # Labels that were attempted and failed — a live call that 400s, a file that
+            # would not decode. Without this the artifact CI keeps cannot tell "six labels
+            # all errored" from "Tier B never ran": both showed total 0, accuracy null.
+            "errors": tier_b_report.errors if tier_b_report is not None else [],
+            "ran": tier_b_report is not None,
             # Deliberately absent when nothing was measured. A null here is unmistakable;
             # a 1.0 from 0/0 is the number that would end up in a submission.
             "accuracy": (
@@ -161,8 +177,9 @@ def payload(
     return {
         "tier_b": tier_b_body,
         "gates": [g.as_dict() for g in gates],
-        "exit_code": exit_code_for(gates),
-        "status": "pass" if exit_code_for(gates) == 0 else "fail",
+        "exit_code": code,
+        "status": "pass" if code == 0 else "fail",
+        "tier_b_manifest_invalid": manifest_broken,
         "tier": report.tier,
         "subset": report.subset,
         "fixtures": report.fixtures,
@@ -275,7 +292,27 @@ def select(names: list[str] | None) -> list[Any] | None:
     return specs or None
 
 
+def survive_an_ascii_terminal() -> None:
+    """Stop a stray character exiting 1 and looking like an accuracy failure.
+
+    Minimal containers and cron run with `PYTHONIOENCODING=ascii` / `LC_ALL=C`. The report
+    itself is transliterated to ASCII (`eval.report.ascii_safe`), but argparse help text
+    and exception messages are not, and a UnicodeEncodeError there exits 1 — which this
+    harness's own exit-code table defines as "field accuracy below the floor". A mangled
+    character is a cosmetic defect; a misread exit code is a wrong decision.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        # A stream that refuses to be reconfigured (already detached, or not a TextIO)
+        # is not worth failing the run over.
+        with contextlib.suppress(ValueError, OSError):
+            reconfigure(errors="backslashreplace")
+
+
 def main(argv: list[str] | None = None) -> int:
+    survive_an_ascii_terminal()
     args = build_parser().parse_args(argv)
 
     specs = select(args.fixture)
@@ -286,7 +323,13 @@ def main(argv: list[str] | None = None) -> int:
     # The threshold ratchets one way. A gate whose bar can be lowered until it passes is
     # not a gate, and OPS-3 fixes the floor at 95% — raising it is tightening, lowering
     # it would be quietly redefining the requirement in a CI argument.
-    if args.min_accuracy > 1.0 or args.min_accuracy < ACCURACY_FLOOR:
+    #
+    # `isfinite` first, because nan slips through both comparisons: `nan > 1.0` and
+    # `nan < 0.95` are each False. It reached the report as "floor nan% BELOW FLOOR" and
+    # exit 1 — a configuration typo indistinguishable from an accuracy regression.
+    if not math.isfinite(args.min_accuracy) or not (
+        ACCURACY_FLOOR <= args.min_accuracy <= 1.0
+    ):
         print(
             f"--min-accuracy must be between {ACCURACY_FLOOR} and 1.0. "
             f"{ACCURACY_FLOOR:.0%} is the OPS-3 floor and this flag can only raise it.",
@@ -304,7 +347,21 @@ def main(argv: list[str] | None = None) -> int:
     # for Tier B; in a run that did not, it is a printed warning and nothing more.
     manifest_broken = wanted and not tier_b_set.usable
 
-    body = payload(report, tier_b_set, tier_b_report, tier_b_note)
+    # A gate failure always outranks a configuration error. Returning EXIT_USAGE for a bad
+    # manifest while a warning false pass was also live reported a compliance failure to
+    # CI as "bad flag" — and disagreed with the JSON, which still said exit_code 3. The
+    # process exit and the payload are now the same number, always.
+    gate_code: int = exit_code_for(gates_for(report))
+    exit_code = gate_code if gate_code else (EXIT_USAGE if manifest_broken else 0)
+
+    body = payload(
+        report,
+        tier_b_set,
+        tier_b_report,
+        tier_b_note,
+        exit_code=exit_code,
+        manifest_broken=manifest_broken,
+    )
 
     # Printed before the Tier A report so the status line stays the last thing on stdout.
     # Reached only because the operator named a model: the CI command cannot get here,
@@ -332,14 +389,18 @@ def main(argv: list[str] | None = None) -> int:
 
     if manifest_broken:
         print(
-            "golden/tier_b/manifest.json does not validate — see the Tier B section above.",
+            "golden/tier_b/manifest.json does not validate — see the Tier B section above."
+            + (
+                f" Exiting {exit_code} because a Tier A gate also failed, which outranks it."
+                if gate_code
+                else ""
+            ),
             file=sys.stderr,
         )
-        return EXIT_USAGE
 
-    # Tier B never touches this. Only Tier A's gates set the exit code (BUILD.md §5).
-    code: int = body["exit_code"]
-    return code
+    # Tier B's own results never touch this. Only Tier A's gates, and a bad manifest when
+    # nothing worse happened.
+    return exit_code
 
 
 if __name__ == "__main__":

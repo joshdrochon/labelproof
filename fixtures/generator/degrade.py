@@ -6,7 +6,7 @@ reproducible byte for byte, which regression tests require and a photograph cann
 
 **The honest limitation:** these simulate optics, not physics. Real specular highlights on
 curved glass and real lens blur differ from a Gaussian and an overlay. That gap is why
-Tier B exists (BUILD.md §5), and it belongs in the limitations list rather than being
+Tier B exists, and it belongs in the limitations list rather than being
 papered over.
 """
 
