@@ -28,6 +28,7 @@ CATALOG: list[LabelSpec] = [
         name="tc02_stones_throw",
         brand_name="STONE’S THROW",
         class_type="Kentucky Straight Bourbon Whiskey",
+        application_overrides={"brand_name": "Stone's Throw"},
         expect={"brand_name": "acceptable_variation"},
         notes=(
             "TC-02. Label carries a curly apostrophe and all caps; the application says "
@@ -71,6 +72,7 @@ CATALOG: list[LabelSpec] = [
         warning_scale=0.45,
         warning_contrast=0.35,
         expect={"government_warning": "mismatch"},
+        pending="LP-211",
         notes=(
             "TC-06. Warning present and verbatim but shrunk and low-contrast — the "
             "'creative' evasion Jenny described. Prominence heuristics (LP-211) target "
@@ -88,6 +90,7 @@ CATALOG: list[LabelSpec] = [
     OLD_TOM.with_(
         name="tc08_abv_mismatch",
         alcohol_text="40% Alc./Vol. (80 Proof)",
+        application_overrides={"alcohol_content": 45.0},
         expect={"alcohol_content": "mismatch"},
         notes=(
             "TC-08. Label says 40%, application says 45%. Internally consistent — 80 "
@@ -98,10 +101,13 @@ CATALOG: list[LabelSpec] = [
     OLD_TOM.with_(
         name="tc09_proof_inconsistent",
         alcohol_text="40% Alc./Vol. (90 Proof)",
-        expect={"alcohol_content": "mismatch"},
+        expect={"alcohol_content": "match"},
+        expect_findings={"alcohol_content": ["proof_abv_inconsistent"]},
         notes=(
-            "TC-09. 90 proof means 45%, so the label disagrees with itself. Raises an "
-            "internal-consistency finding independent of the application comparison."
+            "TC-09. 90 proof means 45%, so the label disagrees with itself. The verdict "
+            "is Match — the label agrees with the application — and the inconsistency "
+            "is a finding. Checking verdicts alone would score this as passing while "
+            "the defect went undetected."
         ),
     ),
 
@@ -109,6 +115,7 @@ CATALOG: list[LabelSpec] = [
         name="tc10_non_standard_fill",
         net_contents="733 mL",
         expect={"net_contents": "match"},
+        expect_findings={"net_contents": ["non_standard_fill"]},
         notes=(
             "TC-10. Matches the application exactly AND is a non-authorized size. The "
             "verdict is Match; the compliance failure rides along as a finding. If this "
@@ -159,6 +166,7 @@ CATALOG: list[LabelSpec] = [
         class_type="Cognac",
         producer="Maison Claire, Cognac, France",
         country_of_origin=None,
+        application_overrides={"is_import": True, "country_of_origin": "France"},
         expect={"country_of_origin": "missing"},
         notes=(
             "TC-19. Application marks this an import; the label carries no country of "
@@ -170,6 +178,7 @@ CATALOG: list[LabelSpec] = [
         name="tc22_spirits_abv_abbreviation",
         alcohol_text="45% ABV",
         expect={"alcohol_content": "match"},
+        expect_findings={"alcohol_content": ["spirits_abv_abbreviation"]},
         notes=(
             "TC-22. Value is correct so the verdict is Match; using 'ABV' on a spirits "
             "label is a format finding riding alongside."

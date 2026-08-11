@@ -24,11 +24,16 @@
         "commodity": "spirits",
         "brand_name": "OLD TOM DISTILLERY",
         "class_type": "Kentucky Straight Bourbon Whiskey",
+        "alcohol_content": 45.0,
         "net_contents": "750 mL",
-        "producer": "Old Tom Distillery, Bardstown, Kentucky",
-        "country_of_origin": null
+        "producer_name": "Old Tom Distillery",
+        "producer_address": "Bardstown, Kentucky",
+        "country_of_origin": null,
+        "is_import": false
       },
       "expect": {},
+      "expect_findings": {},
+      "pending": "",
       "notes": "TC-01 clean match. The brief's sample label, fully compliant."
     },
     {
@@ -42,15 +47,20 @@
       },
       "application": {
         "commodity": "spirits",
-        "brand_name": "STONE\u2019S THROW",
+        "brand_name": "Stone's Throw",
         "class_type": "Kentucky Straight Bourbon Whiskey",
+        "alcohol_content": 45.0,
         "net_contents": "750 mL",
-        "producer": "Old Tom Distillery, Bardstown, Kentucky",
-        "country_of_origin": null
+        "producer_name": "Old Tom Distillery",
+        "producer_address": "Bardstown, Kentucky",
+        "country_of_origin": null,
+        "is_import": false
       },
       "expect": {
         "brand_name": "acceptable_variation"
       },
+      "expect_findings": {},
+      "pending": "",
       "notes": "TC-02. Label carries a curly apostrophe and all caps; the application says 'Stone's Throw'. Dave's case \u2014 obviously the same thing, and the agent must see the judgment call rather than a silent pass."
     },
     {
@@ -66,13 +76,18 @@
         "commodity": "spirits",
         "brand_name": "OLD TOM DISTILLERY",
         "class_type": "Kentucky Straight Bourbon Whiskey",
+        "alcohol_content": 45.0,
         "net_contents": "750 mL",
-        "producer": "Old Tom Distillery, Bardstown, Kentucky",
-        "country_of_origin": null
+        "producer_name": "Old Tom Distillery",
+        "producer_address": "Bardstown, Kentucky",
+        "country_of_origin": null,
+        "is_import": false
       },
       "expect": {
         "government_warning": "mismatch"
       },
+      "expect_findings": {},
+      "pending": "",
       "notes": "TC-03. Jenny's catch \u2014 she rejected a real label for exactly this. The header reads 'Government Warning:' instead of all caps."
     },
     {
@@ -88,13 +103,18 @@
         "commodity": "spirits",
         "brand_name": "OLD TOM DISTILLERY",
         "class_type": "Kentucky Straight Bourbon Whiskey",
+        "alcohol_content": 45.0,
         "net_contents": "750 mL",
-        "producer": "Old Tom Distillery, Bardstown, Kentucky",
-        "country_of_origin": null
+        "producer_name": "Old Tom Distillery",
+        "producer_address": "Bardstown, Kentucky",
+        "country_of_origin": null,
+        "is_import": false
       },
       "expect": {
         "government_warning": "mismatch"
       },
+      "expect_findings": {},
+      "pending": "",
       "notes": "TC-04. 16.22's inverse rule: only 'GOVERNMENT WARNING' may be bold, the remainder must not be. The one almost everyone misses."
     },
     {
@@ -110,13 +130,18 @@
         "commodity": "spirits",
         "brand_name": "OLD TOM DISTILLERY",
         "class_type": "Kentucky Straight Bourbon Whiskey",
+        "alcohol_content": 45.0,
         "net_contents": "750 mL",
-        "producer": "Old Tom Distillery, Bardstown, Kentucky",
-        "country_of_origin": null
+        "producer_name": "Old Tom Distillery",
+        "producer_address": "Bardstown, Kentucky",
+        "country_of_origin": null,
+        "is_import": false
       },
       "expect": {
         "government_warning": "mismatch"
       },
+      "expect_findings": {},
+      "pending": "",
       "notes": "TC-05. Paraphrased clause (1). Must produce a word-level diff as evidence."
     },
     {
@@ -132,13 +157,18 @@
         "commodity": "spirits",
         "brand_name": "OLD TOM DISTILLERY",
         "class_type": "Kentucky Straight Bourbon Whiskey",
+        "alcohol_content": 45.0,
         "net_contents": "750 mL",
-        "producer": "Old Tom Distillery, Bardstown, Kentucky",
-        "country_of_origin": null
+        "producer_name": "Old Tom Distillery",
+        "producer_address": "Bardstown, Kentucky",
+        "country_of_origin": null,
+        "is_import": false
       },
       "expect": {
         "government_warning": "mismatch"
       },
+      "expect_findings": {},
+      "pending": "LP-211",
       "notes": "TC-06. Warning present and verbatim but shrunk and low-contrast \u2014 the 'creative' evasion Jenny described. Prominence heuristics (LP-211) target this; until they land the expectation may need revisiting."
     },
     {
@@ -154,13 +184,18 @@
         "commodity": "spirits",
         "brand_name": "OLD TOM DISTILLERY",
         "class_type": "Kentucky Straight Bourbon Whiskey",
+        "alcohol_content": 45.0,
         "net_contents": "750 mL",
-        "producer": "Old Tom Distillery, Bardstown, Kentucky",
-        "country_of_origin": null
+        "producer_name": "Old Tom Distillery",
+        "producer_address": "Bardstown, Kentucky",
+        "country_of_origin": null,
+        "is_import": false
       },
       "expect": {
         "government_warning": "missing"
       },
+      "expect_findings": {},
+      "pending": "",
       "notes": "TC-07. No warning anywhere. Disqualifying on its own, ranked first."
     },
     {
@@ -176,13 +211,18 @@
         "commodity": "spirits",
         "brand_name": "OLD TOM DISTILLERY",
         "class_type": "Kentucky Straight Bourbon Whiskey",
+        "alcohol_content": 45.0,
         "net_contents": "750 mL",
-        "producer": "Old Tom Distillery, Bardstown, Kentucky",
-        "country_of_origin": null
+        "producer_name": "Old Tom Distillery",
+        "producer_address": "Bardstown, Kentucky",
+        "country_of_origin": null,
+        "is_import": false
       },
       "expect": {
         "alcohol_content": "mismatch"
       },
+      "expect_findings": {},
+      "pending": "",
       "notes": "TC-08. Label says 40%, application says 45%. Internally consistent \u2014 80 proof is correct for 40% \u2014 so this isolates the comparison from TC-09."
     },
     {
@@ -198,14 +238,23 @@
         "commodity": "spirits",
         "brand_name": "OLD TOM DISTILLERY",
         "class_type": "Kentucky Straight Bourbon Whiskey",
+        "alcohol_content": 40.0,
         "net_contents": "750 mL",
-        "producer": "Old Tom Distillery, Bardstown, Kentucky",
-        "country_of_origin": null
+        "producer_name": "Old Tom Distillery",
+        "producer_address": "Bardstown, Kentucky",
+        "country_of_origin": null,
+        "is_import": false
       },
       "expect": {
-        "alcohol_content": "mismatch"
+        "alcohol_content": "match"
       },
-      "notes": "TC-09. 90 proof means 45%, so the label disagrees with itself. Raises an internal-consistency finding independent of the application comparison."
+      "expect_findings": {
+        "alcohol_content": [
+          "proof_abv_inconsistent"
+        ]
+      },
+      "pending": "",
+      "notes": "TC-09. 90 proof means 45%, so the label disagrees with itself. The verdict is Match \u2014 the label agrees with the application \u2014 and the inconsistency is a finding. Checking verdicts alone would score this as passing while the defect went undetected."
     },
     {
       "name": "tc10_non_standard_fill",
@@ -220,13 +269,22 @@
         "commodity": "spirits",
         "brand_name": "OLD TOM DISTILLERY",
         "class_type": "Kentucky Straight Bourbon Whiskey",
+        "alcohol_content": 45.0,
         "net_contents": "733 mL",
-        "producer": "Old Tom Distillery, Bardstown, Kentucky",
-        "country_of_origin": null
+        "producer_name": "Old Tom Distillery",
+        "producer_address": "Bardstown, Kentucky",
+        "country_of_origin": null,
+        "is_import": false
       },
       "expect": {
         "net_contents": "match"
       },
+      "expect_findings": {
+        "net_contents": [
+          "non_standard_fill"
+        ]
+      },
+      "pending": "",
       "notes": "TC-10. Matches the application exactly AND is a non-authorized size. The verdict is Match; the compliance failure rides along as a finding. If this ever reports a mismatch, the two checks have been conflated."
     },
     {
@@ -244,11 +302,16 @@
         "commodity": "spirits",
         "brand_name": "OLD TOM DISTILLERY",
         "class_type": "Kentucky Straight Bourbon Whiskey",
+        "alcohol_content": 45.0,
         "net_contents": "750 mL",
-        "producer": "Old Tom Distillery, Bardstown, Kentucky",
-        "country_of_origin": null
+        "producer_name": "Old Tom Distillery",
+        "producer_address": "Bardstown, Kentucky",
+        "country_of_origin": null,
+        "is_import": false
       },
       "expect": {},
+      "expect_findings": {},
+      "pending": "",
       "notes": "TC-16. Two-image application \u2014 brand on the front, warning on the back. Renders as _front.png and _back.png; the warning must be found across images before Missing is declared."
     },
     {
@@ -264,13 +327,18 @@
         "commodity": "wine",
         "brand_name": "RIVERBEND CELLARS",
         "class_type": "Table Wine",
+        "alcohol_content": null,
         "net_contents": "750 mL",
-        "producer": "Riverbend Cellars, Napa, California",
-        "country_of_origin": null
+        "producer_name": "Riverbend Cellars",
+        "producer_address": "Napa, California",
+        "country_of_origin": null,
+        "is_import": false
       },
       "expect": {
         "alcohol_content": "not_applicable"
       },
+      "expect_findings": {},
+      "pending": "",
       "notes": "TC-17. Table wine at or below 14% may omit alcohol content. Must be Not applicable, never a false Missing."
     },
     {
@@ -286,13 +354,18 @@
         "commodity": "malt",
         "brand_name": "IRON GATE BREWING",
         "class_type": "India Pale Ale",
+        "alcohol_content": null,
         "net_contents": "355 mL",
-        "producer": "Iron Gate Brewing, Portland, Oregon",
-        "country_of_origin": null
+        "producer_name": "Iron Gate Brewing",
+        "producer_address": "Portland, Oregon",
+        "country_of_origin": null,
+        "is_import": false
       },
       "expect": {
         "alcohol_content": "not_applicable"
       },
+      "expect_findings": {},
+      "pending": "",
       "notes": "TC-18. Alcohol content is federally optional on malt. Not applicable."
     },
     {
@@ -308,13 +381,18 @@
         "commodity": "spirits",
         "brand_name": "MAISON CLAIRE",
         "class_type": "Cognac",
+        "alcohol_content": 45.0,
         "net_contents": "750 mL",
-        "producer": "Maison Claire, Cognac, France",
-        "country_of_origin": null
+        "producer_name": "Maison Claire",
+        "producer_address": "Cognac, France",
+        "country_of_origin": "France",
+        "is_import": true
       },
       "expect": {
         "country_of_origin": "missing"
       },
+      "expect_findings": {},
+      "pending": "",
       "notes": "TC-19. Application marks this an import; the label carries no country of origin. Paired with an application where is_import is true."
     },
     {
@@ -330,13 +408,22 @@
         "commodity": "spirits",
         "brand_name": "OLD TOM DISTILLERY",
         "class_type": "Kentucky Straight Bourbon Whiskey",
+        "alcohol_content": 45.0,
         "net_contents": "750 mL",
-        "producer": "Old Tom Distillery, Bardstown, Kentucky",
-        "country_of_origin": null
+        "producer_name": "Old Tom Distillery",
+        "producer_address": "Bardstown, Kentucky",
+        "country_of_origin": null,
+        "is_import": false
       },
       "expect": {
         "alcohol_content": "match"
       },
+      "expect_findings": {
+        "alcohol_content": [
+          "spirits_abv_abbreviation"
+        ]
+      },
+      "pending": "",
       "notes": "TC-22. Value is correct so the verdict is Match; using 'ABV' on a spirits label is a format finding riding alongside."
     }
   ]

@@ -33,15 +33,10 @@ def main() -> int:
                 "commodity": spec.commodity,
                 "images": [p.name for p in written],
                 "sha256": {p.name: _sha(p) for p in written},
-                "application": {
-                    "commodity": spec.commodity,
-                    "brand_name": spec.brand_name,
-                    "class_type": spec.class_type,
-                    "net_contents": spec.net_contents,
-                    "producer": spec.producer,
-                    "country_of_origin": spec.country_of_origin,
-                },
+                "application": spec.application(),
                 "expect": spec.expect,
+                "expect_findings": spec.expect_findings,
+                "pending": spec.pending,
                 "notes": spec.notes,
             }
         )

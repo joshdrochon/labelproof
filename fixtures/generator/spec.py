@@ -60,9 +60,34 @@ class LabelSpec:
     height: int = 1400
     background: tuple[int, int, int] = (250, 248, 242)
 
+    # --- the application side ------------------------------------------------------
+    application_overrides: dict[str, object] = field(default_factory=dict)
+    """Where the APPLICATION deliberately differs from what the label says.
+
+    Most fixtures pair a label with an application stating the same values — the defect
+    is on the label. A few invert that: TC-02's application reads `Stone's Throw` while
+    the label shouts `STONE'S THROW`, and TC-08's application says 45% where the label
+    says 40%. Without this the golden set could only ever express label defects."""
+
     # --- expected verdicts, for the golden set ------------------------------------
     expect: dict[str, str] = field(default_factory=dict)
     """field name -> expected verdict. Empty means "all match"."""
+
+    expect_findings: dict[str, list[str]] = field(default_factory=dict)
+    """field name -> finding codes that must be raised.
+
+    Verdicts alone cannot express several canonical cases. TC-09's verdict is Match —
+    the label agrees with the application — and the whole point of the case is the
+    finding riding alongside it. An eval that checked only verdicts would score TC-09
+    as passing while the proof inconsistency went undetected."""
+
+    pending: str = ""
+    """Ticket that must land before this fixture's expectation can hold.
+
+    TC-06 expects a buried warning to be caught, but prominence heuristics are LP-211
+    and do not exist. The expectation is right; the capability is missing. Marking it
+    pending keeps the gap visible in the report without leaving the release gate
+    permanently red — which would train everyone to ignore it."""
 
     notes: str = ""
     """Why this fixture exists. Ends up in golden/set.json for a human reader."""
@@ -73,9 +98,33 @@ class LabelSpec:
         header = _apply_case(canon.WARNING_HEADER, self.warning_header_case)
         return f"{header} {body}"
 
+    def application(self) -> dict[str, object]:
+        """The application record this label is verified against."""
+        producer_name, _, producer_address = self.producer.partition(", ")
+        record: dict[str, object] = {
+            "commodity": self.commodity,
+            "brand_name": self.brand_name,
+            "class_type": self.class_type,
+            "alcohol_content": _abv_of(self.alcohol_text),
+            "net_contents": self.net_contents,
+            "producer_name": producer_name,
+            "producer_address": producer_address,
+            "country_of_origin": self.country_of_origin,
+            "is_import": False,
+        }
+        record.update(self.application_overrides)
+        return record
+
     def with_(self, **changes: object) -> LabelSpec:
         """A copy with fields replaced — for building variants off a base spec."""
         return replace(self, **changes)  # type: ignore[arg-type]
+
+
+def _abv_of(text: str) -> float | None:
+    """The ABV an application would carry for this label. None when the label omits it."""
+    from api.rules.abv import parse
+
+    return parse(text).abv if text else None
 
 
 def _apply_case(header: str, case: HeaderCase) -> str:
