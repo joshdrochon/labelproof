@@ -1,0 +1,12 @@
+{
+  "commodity": "spirits",
+  "brand_name": "OLD TOM DISTILLERY",
+  "class_type": "Kentucky Straight Bourbon Whiskey",
+  "alcohol_content": 45.0,
+  "net_contents": "750 mL",
+  "producer_name": "Old Tom Distillery",
+  "producer_address": "Bardstown, Kentucky",
+  "country_of_origin": null,
+  "is_import": false,
+  "_source": "Fields transcribed from the take-home brief sample label. producer_name, producer_address and country_of_origin are NOT in the brief and are fabricated to exercise FIELD-5 and FIELD-6 \u2014 see README assumptions."
+}
