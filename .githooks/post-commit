@@ -1,0 +1,3 @@
+#!/bin/sh
+# Keep the ticket board in sync with history. The board is derived, never edited.
+python3 "$(git rev-parse --show-toplevel)/scripts/sync_board.py" || true
