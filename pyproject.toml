@@ -109,9 +109,17 @@ select = [
 #                          threshold in one module, and `T.PREGATE_HOPELESS` reads as the
 #                          citation it is.
 #   E, F                 — one-letter result/expectation factories local to a test module.
-#   ProviderUnavailable  — reads as the state it describes. `ProviderUnavailableError`
-#                          adds a syllable and no information.
-extend-ignore-names = ["stage", "T", "E", "F", "ProviderUnavailable"]
+#   ProviderUnavailable, NetworkAccessDenied
+#                        — read as the state they describe. `…Error` adds a syllable and
+#                          no information, and the codebase set this convention first.
+extend-ignore-names = [
+    "stage",
+    "T",
+    "E",
+    "F",
+    "ProviderUnavailable",
+    "NetworkAccessDenied",
+]
 
 [tool.ruff.lint.flake8-tidy-imports]
 ban-relative-imports = "parents"
@@ -231,4 +239,5 @@ testpaths = ["tests"]
 addopts = "-q --strict-markers"
 markers = [
     "tc: canonical test case from PRD (e.g. @pytest.mark.tc('TC-03'))",
+    "allow_network: opt out of the offline guard in tests/conftest.py (ENG-3)",
 ]
