@@ -35,9 +35,24 @@ a human". Match is a lie, Mismatch is an accusation, Acceptable variation is the
 both. Unreadable is the least wrong of four ill-fitting options, chosen because it fails
 in the safe direction.
 
-Adding a seventh verdict is a product decision (MATCH-1) and is not taken here. What is
-recorded here is that the gap exists and which way it was resolved, so the next person
-sees a decision rather than an accident.
+**The proposal, for MATCH-1: rename, do not add.** A seventh verdict looked like the
+answer and is the worse of the two. `UNREADABLE` is doing the right job under the wrong
+name — the gap is in the naming, not in the arity. Renaming it `NOT_CONFIRMED`, defined
+as *"this field was not confirmed: it could not be read, or something about it needs a
+person"*, makes the taxonomy table stop disagreeing with itself and covers both jobs
+honestly, because "we could not read it" is a special case of "we could not confirm it".
+
+The case for the rename over the addition is the blast radius. A rename touches a name.
+A seventh value touches `_SEVERITY` in `aggregate.py`, `SEVERITY` in `web/src/triage.ts`,
+the batch triage table, the verdict copy, and `_PASSING` in `eval/run.py` — and that last
+one is the one that fails dangerously. A new verdict missing from `_PASSING` is a new
+verdict the zero-false-pass gate does not recognise as a pass, which is a hole in the
+release gate opened by the change meant to make the taxonomy more honest. Renaming an
+existing value cannot open that hole, because every one of those tables already has a row
+for it.
+
+Not taken here: the taxonomy is the PRD's (MATCH-1), and this module does not get to
+rename it unilaterally.
 
 Appearance rules (bold, capitals, prominence) live in `typography.py`; this module owns
 the text and the verdict.
