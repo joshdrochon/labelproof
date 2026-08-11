@@ -22,6 +22,9 @@ different constants. Asserting monotonicity and separation cannot.
 
 from __future__ import annotations
 
+import itertools
+
+import cv2
 import numpy as np
 import pytest
 
@@ -161,19 +164,105 @@ def test_a_hopelessly_blurred_label_falls_below_the_pre_gate() -> None:
     assert quality.blur_score(_blurred(16)) < thresholds.HOPELESS
 
 
-def test_the_blur_scale_is_logarithmic_rather_than_linear() -> None:
-    """The scale itself, asserted rather than inferred.
+def _laplacian_variance(image: np.ndarray) -> float:
+    """The quantity the scorer scores, measured independently of how it scores it.
 
-    Halving the Laplacian variance moves a log score by a constant, not by a constant
-    fraction of the sharp value. Testing the shape means a future rewrite that keeps
-    the endpoints but straightens the curve is caught.
+    This mirrors the *measurement* — greyscale, contrast stretch, Laplacian variance —
+    and deliberately not the *scale*, which is what the tests below are about. Without
+    a variance to compare against there is no way to say anything about the shape of
+    the curve, and asserting the shape is the whole point.
     """
-    span = np.log10(thresholds.SHARP_LAPLACIAN_VARIANCE / thresholds.BLUR_HOPELESS_VARIANCE)
-    midpoint_variance = np.sqrt(
-        thresholds.SHARP_LAPLACIAN_VARIANCE * thresholds.BLUR_HOPELESS_VARIANCE
+    gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY).astype(np.float32)
+    low, high = float(gray.min()), float(gray.max())
+    if high - low > 1.0:
+        gray = (gray - low) * (255.0 / (high - low))
+    return float(cv2.Laplacian(gray.astype(np.uint8), cv2.CV_64F).var())
+
+
+#: Radii whose variances land strictly inside the band, so no score is clipped at 0 or
+#: 1 and every comparison is about the curve rather than about the clamp.
+_UNCLIPPED_RADII = (1.0, 2.0, 3.0, 4.0)
+
+
+def _linear_score(variance: float) -> float:
+    """What a linear normalization would have produced — the shipped defect."""
+    return float(
+        np.clip(variance / thresholds.SHARP_LAPLACIAN_VARIANCE, 0.0, 1.0)
     )
-    expected = np.log10(midpoint_variance / thresholds.BLUR_HOPELESS_VARIANCE) / span
-    assert expected == pytest.approx(0.5, abs=0.01)
+
+
+#: Ordered pairs, enumerated rather than filtered at run time. A `pytest.skip` for the
+#: reversed and equal cases would report ten skips per run, and a suite that routinely
+#: prints skips is one where a real skip goes unnoticed.
+_UNCLIPPED_PAIRS = list(itertools.combinations(_UNCLIPPED_RADII, 2))
+
+
+@pytest.mark.parametrize(("sharper", "blurrier"), _UNCLIPPED_PAIRS, ids=str)
+def test_the_blur_score_moves_with_the_logarithm_of_the_variance(
+    sharper: float, blurrier: float
+) -> None:
+    """The scale itself, asserted by calling the scorer on real images.
+
+    An earlier version of this test asserted
+    `log(sqrt(S*B)/B) / log(S/B) == 0.5`, which is a mathematical identity — true for
+    every positive S != B, checked at (100,1), (7,3), (1e6,2) — and never called
+    `blur_score` at all. Rewriting the scale as perfectly linear left it green. That is
+    the `or True` genus, inside the file whose job is to pin a scale defect.
+
+    What actually characterises a log scale is that a *ratio* of variances maps to a
+    *difference* of scores, with the span as the constant. That holds for every pair
+    below, and it is false for any linear normalization.
+    """
+    sharp_image, blurred_image = _blurred(sharper), _blurred(blurrier)
+    sharp_variance = _laplacian_variance(sharp_image)
+    blurred_variance = _laplacian_variance(blurred_image)
+
+    span = np.log10(
+        thresholds.SHARP_LAPLACIAN_VARIANCE / thresholds.BLUR_HOPELESS_VARIANCE
+    )
+    expected_gap = np.log10(sharp_variance / blurred_variance) / span
+    actual_gap = quality.blur_score(sharp_image) - quality.blur_score(blurred_image)
+
+    assert actual_gap == pytest.approx(expected_gap, abs=0.01), (
+        f"variances {sharp_variance:.1f} -> {blurred_variance:.1f}"
+    )
+
+
+def test_a_linear_scale_would_fail_the_test_above() -> None:
+    """The teeth. If a linear scorer satisfied that relation, it would prove nothing.
+
+    Run the same comparison against a linear normalization and show it is wrong by a
+    wide margin — so the assertion is discriminating between two scales rather than
+    being satisfied by both.
+    """
+    span = np.log10(
+        thresholds.SHARP_LAPLACIAN_VARIANCE / thresholds.BLUR_HOPELESS_VARIANCE
+    )
+    sharp_image, blurred_image = _blurred(1.0), _blurred(4.0)
+    sharp_variance = _laplacian_variance(sharp_image)
+    blurred_variance = _laplacian_variance(blurred_image)
+
+    expected_gap = np.log10(sharp_variance / blurred_variance) / span
+    linear_gap = _linear_score(sharp_variance) - _linear_score(blurred_variance)
+
+    assert abs(linear_gap - expected_gap) > 0.2, (
+        f"a linear scale is indistinguishable here: {linear_gap:.3f} vs {expected_gap:.3f}"
+    )
+
+
+def test_a_linear_scale_would_collapse_soft_and_illegible_together() -> None:
+    """The consequence the log scale exists to prevent, shown on the real images.
+
+    Under a linear normalization both radius 2 and radius 12 score near zero, so
+    "slightly soft — parts may not be readable" and "too blurry to read, retake it"
+    become the same answer and every soft image gets the harshest advice. The real
+    scorer separates them; the linear one does not.
+    """
+    soft_variance = _laplacian_variance(_blurred(2.0))
+    illegible_variance = _laplacian_variance(_blurred(12.0))
+
+    assert _linear_score(soft_variance) - _linear_score(illegible_variance) < 0.1
+    assert quality.blur_score(_blurred(2.0)) - quality.blur_score(_blurred(12.0)) > 0.4
 
 
 # --------------------------------------------------------------------------------------
