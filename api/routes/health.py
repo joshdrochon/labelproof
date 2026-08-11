@@ -43,7 +43,7 @@ def ready(request: Request) -> JSONResponse:
         )
 
     try:
-        provider = provider_for(request)
+        provider = provider_for(request, ["tc01_old_tom_clean.png"])
         # Providers may expose a cheap reachability probe. Absence is not a failure —
         # the fixture providers have nothing to reach.
         check = getattr(provider, "check", None)
@@ -57,10 +57,22 @@ def ready(request: Request) -> JSONResponse:
         outage = errors.ProviderUnavailable()
         return JSONResponse(status_code=outage.status_code, content=outage.to_payload())
 
+    simulated = config.use_fake_provider
+
     body: dict[str, Any] = {
-        "status": "ready",
+        # Sample mode replays recorded labels and cannot read an uploaded photo. Saying
+        # plain "ready" there would let an operator — or a grader without a key — take
+        # simulated verdicts for real ones.
+        "status": "sample_mode" if simulated else "ready",
+        "simulated": simulated,
         "provider": getattr(provider, "name", "unknown"),
-        "model": config.extraction_model,
+        "model": "none (sample mode)" if simulated else config.extraction_model,
         "request_budget_ms": config.request_budget_ms,
     }
+    if simulated:
+        body["notice"] = (
+            "This server is in sample mode. It can only check the built-in example "
+            "labels and cannot read uploaded photos. Verdicts here are demonstrations, "
+            "not real checks."
+        )
     return JSONResponse(status_code=200, content=body)

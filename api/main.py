@@ -26,7 +26,9 @@ from pathlib import Path
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response
+from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.exceptions import HTTPException
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.types import Scope
 
@@ -47,10 +49,19 @@ class _SinglePageFiles(StaticFiles):
     """
 
     async def get_response(self, path: str, scope: Scope) -> Response:
-        response = await super().get_response(path, scope)
-        if response.status_code == 404:
+        """Serve the file, falling back to index.html for client-side routes.
+
+        StaticFiles RAISES HTTPException(404) for a missing file rather than returning a
+        404 response, so checking the status code never fires. Catching the exception is
+        the only thing that works — an earlier version checked the status and the whole
+        fallback was dead code, which turned every deep link into a raw JSON error blob.
+        """
+        try:
+            return await super().get_response(path, scope)
+        except HTTPException as exc:
+            if exc.status_code != 404:
+                raise
             return await super().get_response("index.html", scope)
-        return response
 
 
 def create_app(
@@ -256,25 +267,71 @@ def _from_status(status: int) -> errors.LabelProofError:
     )
 
 
-def _install_spa(app: FastAPI) -> None:
-    """Serve the built SPA when it exists, and explain itself when it does not.
+#: Path prefixes owned by the API. Anything under these answers in the error taxonomy;
+#: everything else falls through to the single-page app.
+_API_PREFIXES: frozenset[str] = frozenset(
+    {"verify", "batch", "sample", "health", "ready", "docs", "redoc", "openapi.json"}
+)
 
-    A missing `web/dist` is normal during backend work and in the API test suite. Mounting
-    a directory that is not there would crash the app at startup, which turns "the UI is
-    not built yet" into "the API is down".
+#: Routes that exist but only accept POST. A GET on one is a wrong verb, not a wrong URL.
+_POST_ONLY_ROUTES: frozenset[str] = frozenset({"/verify", "/batch"})
+
+
+def _install_spa(app: FastAPI) -> None:
+    """Serve the built SPA without letting it swallow the API.
+
+    Mounting at "/" was wrong in two ways that only surface once `web/dist` exists — the
+    shipped configuration, not the one the API suite ran in. Starlette's Mount out-ranks a
+    partial-path 405 match, so `GET /verify` degraded from "that route is a POST" to "not
+    found"; and every unknown path became the SPA, including path-traversal probes under
+    /sample that must answer in the error taxonomy. A probe that renders HTML looks like
+    it worked.
+
+    So: assets get their own prefix, API prefixes are claimed explicitly, and only what is
+    left over falls through to index.html — which is what makes a browser reload on a
+    client-side route render the app instead of an error.
     """
-    if _WEB_DIST.is_dir():
-        app.mount("/", _SinglePageFiles(directory=_WEB_DIST, html=True), name="spa")
+    if not _WEB_DIST.is_dir():
+
+        @app.get("/", include_in_schema=False)
+        def index() -> dict[str, str]:
+            return {
+                "service": "labelproof",
+                "status": (
+                    "The verification service is running. The web interface is not "
+                    "built in this deployment — use POST /verify, or GET /sample "
+                    "for the demo application."
+                ),
+            }
+
         return
 
-    @app.get("/")
-    def index() -> dict[str, str]:
-        return {
-            "service": "labelproof",
-            "status": "The verification service is running. The web interface is not "
-            "built in this deployment — use POST /verify, or GET /sample "
-            "for the demo application.",
-        }
+    assets = _WEB_DIST / "assets"
+    if assets.is_dir():
+        app.mount("/assets", StaticFiles(directory=assets), name="assets")
+
+    index_html = _WEB_DIST / "index.html"
+    dist_root = _WEB_DIST.resolve()
+
+    @app.get("/", include_in_schema=False)
+    def spa_root() -> FileResponse:
+        return FileResponse(index_html)
+
+    @app.get("/{full_path:path}", include_in_schema=False)
+    def spa_fallback(full_path: str) -> FileResponse:
+        # The catch-all out-ranks Starlette's partial-match 405, so a browser GET of a
+        # POST-only route would otherwise read as "not found" rather than "wrong method".
+        # Restoring the distinction matters: one means the URL is wrong, the other means
+        # the caller is close and using the wrong verb.
+        if f"/{full_path}" in _POST_ONLY_ROUTES:
+            raise StarletteHTTPException(status_code=405)
+        if full_path.split("/", 1)[0] in _API_PREFIXES:
+            raise StarletteHTTPException(status_code=404)
+
+        candidate = (_WEB_DIST / full_path).resolve()
+        if candidate.is_file() and candidate.is_relative_to(dist_root):
+            return FileResponse(candidate)
+        return FileResponse(index_html)
 
 
 app = create_app()

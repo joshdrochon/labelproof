@@ -57,7 +57,17 @@ def provider_for(request: Request, filenames: Sequence[str] = ()) -> ExtractionP
 
 
 def _fixture_provider(filenames: Sequence[str]) -> ExtractionProvider:
-    """Fixture replay keyed off the uploaded filename, defaulting to the demo label."""
+    """Fixture replay keyed off the uploaded filename.
+
+    FAILS CLOSED on an unrecognized name. An earlier version fell back to the clean Old
+    Tom fixture, which meant uploading arbitrary bytes under any filename returned
+    `ready_to_approve` with a verbatim government warning that was never on the image —
+    a false pass with fabricated evidence, and the exact failure the PRD names as the
+    worst this product can produce.
+
+    Sample mode replays *recorded* labels. It cannot read pixels, so when it does not
+    recognize a filename the only honest answer is that nothing was checked.
+    """
     from api.provider.fake import SpecBackedProvider, spec_name_for_image
     from fixtures.generator.catalog import by_name
 
@@ -69,7 +79,14 @@ def _fixture_provider(filenames: Sequence[str]) -> ExtractionProvider:
             return SpecBackedProvider(by_name(key))
         except KeyError:
             continue
-    return SpecBackedProvider(by_name("tc16_front_back"))
+
+    raise errors.ProviderUnavailable(
+        "This server is running in sample mode, which can only check the built-in "
+        "example labels — it cannot read an uploaded photo. Nothing has been checked. "
+        "Use the \u201cTry a sample\u201d button, or ask whoever runs this service to "
+        "add the label reading service.",
+        next_step="try_sample",
+    )
 
 
 def _live_provider(request: Request, config: Config) -> ExtractionProvider:

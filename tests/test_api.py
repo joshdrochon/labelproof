@@ -327,11 +327,15 @@ def test_health_is_up_even_when_the_provider_is_down() -> None:
 
 
 def test_ready_reports_the_configured_model() -> None:
-    response = make_client().get("/ready")
-    assert response.status_code == 200
-    assert response.json()["status"] == "ready"
-    assert response.json()["model"] == "claude-opus-5"
+    """In sample mode /ready must NOT name a model — it is not calling one.
 
+    Naming one would let an operator, or a grader without a key, read a simulated
+    verdict as a real check. See tests/test_sample_mode_fails_closed.py.
+    """
+    body = make_client().get("/ready").json()
+    assert body["simulated"] is True
+    assert body["status"] == "sample_mode"
+    assert "sample mode" in body["model"].lower()
 
 def test_ready_is_503_when_the_service_is_not_configured() -> None:
     client = make_client(warnings=["ANTHROPIC_API_KEY is not set."])
@@ -395,12 +399,26 @@ def test_the_sample_verifies_cleanly_end_to_end() -> None:
 # --- error shape everywhere ------------------------------------------------------------
 
 def test_unknown_routes_answer_in_the_taxonomy() -> None:
-    """OPS-5 — the front end has one error renderer, so there is one error shape."""
-    response = make_client().get("/nope")
-    assert response.status_code == 400
-    assert response.json()["error"]["kind"] == "user"
-    assert response.json()["error"]["code"] == "not_found"
+    """OPS-5 — the front end has one error renderer, so there is one error shape.
 
+    Scoped to API paths. A path outside them is a client-side route and must render the
+    app, not an error, or reloading the page mid-workflow looks like a crash.
+    """
+    response = make_client().get("/sample/nope")
+    assert response.status_code == 400
+    assert "error" in response.json()
+
+
+def test_unknown_non_api_routes_render_the_app_not_an_error() -> None:
+    """A browser reload on a client-side route must reach the SPA (only when built)."""
+    from api.main import _WEB_DIST
+
+    response = make_client().get("/some/client/route")
+    if _WEB_DIST.is_dir():
+        assert response.status_code == 200
+        assert "text/html" in response.headers["content-type"]
+    else:
+        assert response.status_code == 400
 
 def test_a_get_on_verify_is_explained() -> None:
     response = make_client().get("/verify")
