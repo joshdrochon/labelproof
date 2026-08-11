@@ -1,0 +1,148 @@
+/**
+ * The wire contract, mirrored from `api/models.py`.
+ *
+ * These types are a copy of the server's pydantic models, not an interpretation of them.
+ * Nothing is added here that the server does not send. Where BUILD.md §3 and
+ * `api/models.py` disagree on a spelling, `models.py` is what actually serializes, so
+ * that is what these types name — with the older spelling accepted at the parse boundary
+ * in `api.ts` so a stale server cannot blank the screen.
+ */
+
+export type Commodity = 'spirits' | 'wine' | 'malt';
+
+/** Exactly six. Adding a seventh is a product decision (MATCH-1). */
+export type Verdict =
+  | 'match'
+  | 'acceptable_variation'
+  | 'mismatch'
+  | 'missing'
+  | 'unreadable'
+  | 'not_applicable';
+
+/** The app recommends; the agent decides (HITL-1). */
+export type Recommendation =
+  | 'ready_to_approve'
+  | 'needs_review'
+  | 'return_for_correction';
+
+export type FieldName =
+  | 'brand_name'
+  | 'class_type'
+  | 'alcohol_content'
+  | 'net_contents'
+  | 'producer'
+  | 'country_of_origin'
+  | 'government_warning';
+
+export interface Application {
+  commodity: Commodity;
+  brand_name: string;
+  class_type: string;
+  alcohol_content: number | null;
+  net_contents: string;
+  producer_name: string;
+  producer_address: string;
+  country_of_origin: string | null;
+  is_import: boolean;
+}
+
+/** Normalized 0..1 against the PREPROCESSED image. */
+export interface BoundingBox {
+  x0: number;
+  y0: number;
+  x1: number;
+  y1: number;
+}
+
+export interface Evidence {
+  image_index: number;
+  /** Absent when the extractor gave no region. Absent means draw nothing. */
+  bbox: BoundingBox | null;
+}
+
+export interface Finding {
+  code: string;
+  message: string;
+  citation: string | null;
+  severity: string;
+}
+
+export interface FieldResult {
+  field: FieldName;
+  verdict: Verdict;
+  extracted: string | null;
+  expected: string | null;
+  confidence: number;
+  rationale: string;
+  tier: number | null;
+  evidence: Evidence | null;
+  findings: Finding[];
+}
+
+export interface Aggregate {
+  recommendation: Recommendation;
+  rationale: string;
+  driving_field: FieldName | null;
+}
+
+export interface ImageQuality {
+  blur: number;
+  exposure: number;
+  glare: number;
+  skew_deg: number;
+  resolution_ok: boolean;
+  /** "ok" | "degraded" | "hopeless" */
+  verdict: string;
+  reason: string | null;
+}
+
+export interface ImageReport {
+  index: number;
+  role: string | null;
+  quality: ImageQuality;
+  /**
+   * URL of the PREPROCESSED image the evidence boxes were measured against.
+   *
+   * Optional because the server does not send it today (see the contract gap noted in
+   * `EvidenceOverlay.tsx`). When it is absent the UI falls back to the local upload.
+   */
+  url?: string | null;
+}
+
+export interface Timings {
+  ingest: number;
+  quality: number;
+  preprocess: number;
+  extract: number;
+  compare: number;
+  adjudicate: number;
+  total: number;
+}
+
+export interface Cost {
+  input_tokens: number;
+  output_tokens: number;
+  usd: number;
+}
+
+export interface VerificationResult {
+  request_id: string;
+  aggregate: Aggregate;
+  fields: FieldResult[];
+  images: ImageReport[];
+  timings_ms: Timings;
+  cost: Cost;
+}
+
+/** Error envelope. `kind` and `next_step` drive what the UI offers to do next (UX-6). */
+export type ErrorKind = 'user' | 'image' | 'provider' | 'internal';
+
+export interface ApiError {
+  kind: ErrorKind;
+  code: string;
+  message: string;
+  next_step?: string | null;
+}
+
+/** What the agent did with a row. Session only — nothing is filed anywhere (SCOPE-3). */
+export type AgentDecision = 'confirmed' | 'overridden';
