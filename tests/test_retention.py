@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import sqlite3
 import tempfile
 import time
 from collections.abc import Iterator
@@ -171,6 +172,146 @@ def test_deleting_alone_would_not_have_been_enough(tmp_path: Path) -> None:
     )
 
 
+def test_a_missed_compaction_is_retried_on_a_later_sweep(tmp_path: Path) -> None:
+    """The failure this ticket's first attempt shipped.
+
+    Compaction used to run only `if purged:`. A sweep that purged the rows but lost the
+    write lock to a batch worker left the brand names in freed pages — and by the next
+    sweep there was nothing left to purge, so it never tried again and the data survived for
+    the life of the container. Reproduced here with a real second connection holding the
+    write lock, exactly as a running batch does.
+    """
+    store = BatchStore(tmp_path)
+    created = time.time()
+    seed_job(store, created=created)
+
+    # Sweep one: the rows go, the cleanup is blocked by a batch worker holding the write
+    # lock. `purge_expired` is called first and succeeds, so the lock is taken afterwards —
+    # which is the real sequence, since a worker can claim an item at any moment.
+    store.purge_expired(now=created + 25 * HOUR)
+    retention.note_compaction_owed(store.db_path)
+
+    blocker = sqlite3.connect(store.db_path, timeout=0.1, isolation_level=None)
+    blocker.execute("PRAGMA busy_timeout=0")
+    blocker.execute("BEGIN IMMEDIATE")
+    try:
+        first = sweep(policy_for(tmp_path), now=created + 25 * HOUR, store=store)
+        assert not first.compacted, "the write lock should have blocked compaction"
+        assert BRAND.encode() in every_byte_under(tmp_path), "precondition: residue is there"
+    finally:
+        blocker.execute("ROLLBACK")
+        blocker.close()
+
+    # Nothing left to purge. Under the old `if purged:` gate this was the end of it, and the
+    # brand names stayed in jobs.db for the life of the container.
+    second = sweep(policy_for(tmp_path), now=created + 26 * HOUR, store=store)
+    assert second.jobs_purged == 0
+    assert second.compacted, "a sweep with nothing to purge must still finish the cleanup"
+    assert BRAND.encode() not in every_byte_under(tmp_path)
+
+
+def test_a_locked_database_does_not_abort_the_rest_of_the_sweep(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`purge_expired` raises `database is locked` under contention.
+
+    Letting that propagate meant a running batch switched retention off entirely — orphan
+    directories and loose files included — for as long as it ran.
+
+    The lock is simulated rather than held for real, and deliberately: `BatchStore` sets its
+    own 30-second `busy_timeout`, so a genuine lock would put 30 seconds of wall clock into
+    every CI run to observe an exception whose type is not in question. The neighbouring
+    test holds a real lock to prove the contention is real; this one owns the error path.
+    """
+    store = BatchStore(tmp_path)
+    orphan = store.images_root / "job_orphaned"
+    orphan.mkdir(parents=True)
+    (orphan / "artwork.img").write_bytes(IMAGE_BYTES)
+    seed_job(store, created=time.time() - 30 * HOUR)
+
+    def refuse(**_: Any) -> Any:
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(store, "purge_expired", refuse)
+
+    report = sweep(
+        policy_for(tmp_path), now=time.time() + ORPHAN_GRACE_SECONDS + 60, store=store
+    )
+
+    assert report.purge_failed, "the purge should have been refused by the lock"
+    assert not orphan.exists(), "the filesystem sweep must run anyway"
+    # A refused purge may still have deleted the items before losing the lock on the jobs
+    # table, so the obligation is recorded — and, there being no contention here, promptly
+    # discharged in the same sweep. Recorded-then-discharged is the whole point.
+    assert report.compacted, "the compaction should have run despite the failed purge"
+
+
+def test_compaction_reports_failure_rather_than_claiming_success(tmp_path: Path) -> None:
+    """`PRAGMA wal_checkpoint(TRUNCATE)` RETURNS `(busy, log, checkpointed)`; it does not
+    raise.
+
+    The first version ran it, caught nothing, and returned True — measured returning
+    `(1, 17, 0)` (busy, zero pages moved) while `SweepReport.compacted` said True and the
+    brand name was still in `jobs.db-wal`. A control that reports success while doing
+    nothing is worse than no control, because it ends the investigation.
+    """
+    store = BatchStore(tmp_path)
+    created = time.time()
+    seed_job(store, created=created)
+
+    # Delete the rows the way the sweep does, then record the obligation, then take the
+    # write lock away — which is what a running batch does to a 15-minute timer.
+    store.purge_expired(now=created + 25 * HOUR)
+    retention.note_compaction_owed(store.db_path)
+    assert BRAND.encode() in every_byte_under(tmp_path)
+
+    blocker = sqlite3.connect(store.db_path, timeout=0.1, isolation_level=None)
+    blocker.execute("PRAGMA busy_timeout=0")
+    blocker.execute("BEGIN IMMEDIATE")
+    try:
+        assert retention._compact(store.db_path) is False, "must not claim it compacted"
+        assert retention.compaction_owed(store.db_path) is True, "obligation must survive"
+        assert BRAND.encode() in every_byte_under(tmp_path)
+    finally:
+        blocker.execute("ROLLBACK")
+        blocker.close()
+
+    # Contention gone: the same obligation is discharged, and verified.
+    assert retention._compact(store.db_path) is True
+    assert retention.compaction_owed(store.db_path) is False
+    assert BRAND.encode() not in every_byte_under(tmp_path)
+
+
+def test_the_obligation_survives_a_restart(tmp_path: Path) -> None:
+    """A container that restarts between the DELETE and the VACUUM must not forget.
+
+    The marker is a file for exactly this reason — an in-memory flag would have lost the
+    obligation on the restart that a crashed compaction makes likely.
+    """
+    store = BatchStore(tmp_path)
+    created = time.time()
+    seed_job(store, created=created)
+    store.purge_expired(now=created + 25 * HOUR)
+    retention.note_compaction_owed(store.db_path)
+
+    # Nothing in memory carries over; a fresh sweep is all a restarted process has.
+    reopened = BatchStore(tmp_path)
+    report = sweep(policy_for(tmp_path), now=created + 26 * HOUR, store=reopened)
+
+    assert report.jobs_purged == 0, "nothing left to purge — the old gate stopped here"
+    assert report.compacted
+    assert BRAND.encode() not in every_byte_under(tmp_path)
+
+
+def test_compaction_is_a_no_op_on_an_already_clean_database(tmp_path: Path) -> None:
+    """The unconditional call has to be cheap, or it is not affordable every 15 minutes."""
+    store = BatchStore(tmp_path)
+    seed_job(store, created=time.time())
+    sweep(policy_for(tmp_path), now=time.time(), store=store)
+    assert retention.compaction_owed(store.db_path) is False
+    assert retention._compact(store.db_path) is True
+
+
 def test_a_job_inside_its_ttl_is_untouched(tmp_path: Path) -> None:
     store = BatchStore(tmp_path)
     created = time.time()
@@ -306,30 +447,42 @@ def test_retention_is_time_driven_not_traffic_driven(tmp_path: Path) -> None:
 
 def test_a_failing_sweep_does_not_kill_the_timer(tmp_path: Path) -> None:
     """A retention timer that stops after one bad cycle is worse than one that never ran,
-    because the logs show it started."""
-    sweeper = RetentionSweeper(policy_for(tmp_path))
-    calls = {"n": 0}
+    because the logs show it started.
+
+    The earlier version of this test waited for `calls >= 1` and then asserted `calls >= 1`
+    — it stopped watching after the single FAILING cycle, so it passed with the recovery
+    removed. It now waits for the cycle *after* the failure and asserts that one both ran
+    and succeeded, which is the property the name claims.
+    """
+    sweeper = RetentionSweeper(
+        RetentionPolicy(storage_dir=tmp_path, ttl_hours=24, sweep_seconds=0)
+    )
+    calls: list[str] = []
 
     def explode(**_: Any) -> Any:
-        calls["n"] += 1
-        if calls["n"] == 1:
+        if not calls:
+            calls.append("raised")
             raise OSError("disk hiccup")
+        calls.append("ok")
         return retention.SweepReport()
 
     sweeper.sweep_once = explode  # type: ignore[method-assign]
 
-    async def two_cycles() -> None:
+    async def keep_going() -> None:
         task = asyncio.create_task(sweeper.run_forever())
-        for _ in range(200):
+        for _ in range(400):
             await asyncio.sleep(0.005)
-            if calls["n"] >= 1:
+            if len(calls) >= 3:
                 break
         task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await task
 
-    asyncio.run(two_cycles())
-    assert calls["n"] >= 1
+    asyncio.run(keep_going())
+
+    assert calls[0] == "raised", "the first cycle should have failed"
+    assert len(calls) >= 3, f"the timer stopped after the failure: {calls}"
+    assert calls[1:] == ["ok"] * (len(calls) - 1), "later cycles should have succeeded"
 
 
 def test_the_sweeper_is_wired_to_startup_and_shutdown(tmp_path: Path) -> None:
@@ -345,6 +498,61 @@ def test_the_sweeper_is_wired_to_startup_and_shutdown(tmp_path: Path) -> None:
     with TestClient(app):
         assert sweeper.running
     assert not sweeper.running
+
+
+def test_the_sweeper_survives_an_app_that_supplies_its_own_lifespan(tmp_path: Path) -> None:
+    """Starlette ignores `on_startup`/`on_shutdown` entirely when `lifespan=` is supplied.
+
+    The first version appended to `router.on_startup`, so it worked today and would have
+    switched retention off — silently, with no test failing — the moment anyone modernised
+    `create_app` to the lifespan idiom, which is the current FastAPI convention.
+    """
+    from fastapi import FastAPI
+
+    order: list[str] = []
+
+    @contextlib.asynccontextmanager
+    async def their_lifespan(app: FastAPI) -> Any:
+        order.append("app_start")
+        yield
+        order.append("app_stop")
+
+    app = FastAPI(lifespan=their_lifespan)
+    policy = SecurityPolicy(storage_dir=str(tmp_path), retention_sweep_seconds=900)
+    sweeper = install_sweeper(app, policy)
+
+    with TestClient(app):
+        assert sweeper.running, "retention was dropped by the app's own lifespan"
+        assert order == ["app_start"], "the app's own lifespan must still run"
+    assert not sweeper.running
+    assert order == ["app_start", "app_stop"]
+
+
+def test_expiry_has_one_definition_that_the_read_paths_can_import() -> None:
+    """`GET /batch/{id}` still serves an expired job's brand names (finding 4, another
+    agent's file). The predicate lives here so the API and the sweeper cannot drift.
+
+    Matched to `BatchStore.purge_expired`'s `expires_at <= now` exactly: an artefact is
+    expired the instant the sweep would take it, never a moment later.
+    """
+    assert retention.is_expired(100.0, now=101.0) is True
+    assert retention.is_expired(100.0, now=100.0) is True, "must match purge_expired's <="
+    assert retention.is_expired(100.0, now=99.0) is False
+
+
+def test_the_sweeper_and_the_expiry_predicate_agree(tmp_path: Path) -> None:
+    """Whatever `is_expired` says is gone must actually be gone after a sweep at that time."""
+    store = BatchStore(tmp_path)
+    created = time.time()
+    job_id, image = seed_job(store, created=created, ttl_hours=1)
+    job = store.get_job(job_id)
+    assert job is not None
+
+    moment = job.expires_at
+    assert retention.is_expired(job.expires_at, now=moment)
+    sweep(policy_for(tmp_path, ttl_hours=1), now=moment, store=store)
+    assert not image.exists()
+    assert store.get_job(job_id) is None
 
 
 def test_harden_starts_retention_without_any_batch_traffic(tmp_path: Path) -> None:
@@ -370,11 +578,31 @@ def test_the_sweep_interval_is_configurable(monkeypatch: pytest.MonkeyPatch) -> 
     assert RetentionPolicy.from_security_policy(policy).sweep_seconds == 60
 
 
-def test_the_worst_case_lifetime_is_ttl_plus_one_interval() -> None:
-    """Stated rather than rounded down — the README says 24h + the interval, not 24h."""
-    policy = RetentionPolicy(storage_dir=Path("."), ttl_hours=24, sweep_seconds=900)
-    assert policy.ttl_seconds == 24 * HOUR
-    assert policy.ttl_seconds + policy.sweep_seconds == 24 * HOUR + 900
+def test_an_artefact_survives_past_its_ttl_until_the_next_sweep(tmp_path: Path) -> None:
+    """The README claims TTL + one interval, not TTL. This is that claim, measured.
+
+    The previous version of this test asserted `a + b == a + b` against two literals and
+    could not fail for any implementation. This drives the sweep at the two moments that
+    matter and shows the artefact is still readable in between — which is the honest thing
+    the README says and the reason it does not claim a flat 24 hours.
+    """
+    store = BatchStore(tmp_path)
+    created = time.time()
+    policy = RetentionPolicy(storage_dir=tmp_path, ttl_hours=1, sweep_seconds=900)
+    _, image = seed_job(store, created=created, ttl_hours=1)
+
+    just_before = created + policy.ttl_seconds - 1
+    sweep(policy, now=just_before, store=store)
+    assert image.is_file(), "not expired yet"
+
+    # Expired, but the timer has not come round again. This is the window the README owns.
+    inside_the_window = created + policy.ttl_seconds + 1
+    assert inside_the_window - created > policy.ttl_seconds
+    assert image.is_file(), "still on disk — nothing has swept since it expired"
+
+    # The next tick, which is at most `sweep_seconds` later, takes it.
+    sweep(policy, now=created + policy.ttl_seconds + policy.sweep_seconds, store=store)
+    assert not image.exists()
 
 
 # --- single verifications persist nothing (SEC-2) ------------------------------------------

@@ -39,9 +39,10 @@ import contextlib
 import shutil
 import sqlite3
 import time
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from api import logging as applog
 
@@ -58,7 +59,7 @@ MANAGED_SUBDIRS: tuple[str, ...] = ("batches", "uploads", "results")
 
 #: Never removed, whatever their age. The database is state, not an artefact.
 PROTECTED_NAMES: frozenset[str] = frozenset(
-    {"jobs.db", "jobs.db-wal", "jobs.db-shm", "jobs.db-journal"}
+    {"jobs.db", "jobs.db-wal", "jobs.db-shm", "jobs.db-journal", ".compaction-owed"}
 )
 
 #: How old an unreferenced `batches/<job_id>/` directory must be before it is treated as
@@ -69,6 +70,28 @@ PROTECTED_NAMES: frozenset[str] = frozenset(
 ORPHAN_GRACE_SECONDS = 300.0
 
 DEFAULT_SWEEP_SECONDS = 900
+
+
+def is_expired(expires_at: float, *, now: float | None = None) -> bool:
+    """The single definition of "this batch is past its retention".
+
+    **Read paths must use this, not a copy of it.** `GET /batch/{id}` and
+    `GET /batch/{id}/export.csv` in `api/routes/batch.py` currently serve a job — brand
+    names, producer addresses, extracted values and all — for as long as the row survives,
+    which is until a sweep removes it. That is at least `ttl + sweep_seconds` by design, and
+    was forever in the shipped app because nothing called `harden`. Meanwhile the 404 copy
+    tells the agent "Batches and their images are deleted 24 hours after they are started."
+
+    Deleting on a timer and refusing to serve are two different guarantees and the second is
+    the one the user was promised. They belong to different files, so the predicate lives
+    here and is imported, because the failure mode of two copies is that the API keeps
+    serving something the sweeper believes is gone and nobody notices until a reviewer asks.
+
+    Matches `BatchStore.purge_expired`'s `expires_at <= now` exactly, deliberately: an
+    artefact is expired the instant the sweep would take it, never a moment later.
+    """
+    moment = time.time() if now is None else now
+    return expires_at <= moment
 
 
 @dataclass(frozen=True)
@@ -100,6 +123,7 @@ class SweepReport:
     paths_removed: int = 0
     bytes_removed: int = 0
     compacted: bool = False
+    purge_failed: bool = False
     removed: list[str] = field(default_factory=list)
 
     @property
@@ -130,10 +154,34 @@ def sweep(
 
     resolved = _store_for(policy, store)
     if resolved is not None:
-        purged = resolved.purge_expired(now=moment)
-        report.jobs_purged = len(purged)
-        if purged:
-            report.compacted = _compact(resolved.db_path)
+        # A purge that loses the write lock to a batch worker raises
+        # `sqlite3.OperationalError: database is locked`. Letting that propagate aborted the
+        # WHOLE sweep — orphan directories and loose files included — so a running batch
+        # switched retention off entirely for as long as it ran.
+        try:
+            purged = resolved.purge_expired(now=moment)
+            report.jobs_purged = len(purged)
+            if purged:
+                note_compaction_owed(resolved.db_path)
+        except sqlite3.Error as exc:
+            report.purge_failed = True
+            # Marked owed even on failure: `purge_expired` deletes items and jobs in two
+            # statements, so a lock lost between them leaves rows deleted and the obligation
+            # real. Compacting a database that turns out to be clean is free.
+            note_compaction_owed(resolved.db_path)
+            applog.warn(
+                "retention_purge_failed",
+                code="sqlite_busy",
+                reason_code=type(exc).__name__,
+            )
+
+        # Compaction is attempted on EVERY sweep, not only on one that purged something.
+        # Gating it on `if purged:` was a hole with a permanent consequence: a compaction
+        # that lost the lock left the brand names in freed pages, and by the next sweep
+        # there was nothing left to purge, so it never retried and the data survived for the
+        # life of the container. `_compact` is a no-op when nothing is owed, so the
+        # unconditional call costs one `PRAGMA freelist_count`.
+        report.compacted = _compact(resolved.db_path)
 
     _sweep_orphans(policy, resolved, moment, report)
     _sweep_loose_files(policy, moment, report)
@@ -156,26 +204,117 @@ def _store_for(policy: RetentionPolicy, store: BatchStore | None) -> BatchStore 
     return _BatchStore(policy.storage_dir)
 
 
-def _compact(db_path: Path) -> bool:
-    """`VACUUM` then truncate the WAL, so deleted rows leave no residue in the file.
+#: Written next to the database the moment a purge deletes anything, and removed only when
+#: a compaction has verifiably finished. It is a file rather than a variable because the
+#: obligation has to outlive the process: a container that restarts between the DELETE and
+#: the VACUUM would otherwise forget that the brand names are still in there.
+COMPACTION_MARKER = ".compaction-owed"
 
-    Failure-tolerant on purpose: a `VACUUM` that loses a race with a batch worker's write
-    lock is a missed compaction, not a failed sweep, and the rows are already deleted either
-    way. The next sweep that purges anything tries again.
+#: Seconds the compaction will wait for the database lock before giving up and warning.
+#: Deliberately short: this runs on a timer, so a contended sweep should stand aside for the
+#: batch worker rather than hold it up, and the obligation survives in the marker either way.
+COMPACTION_LOCK_WAIT = 2.0
+
+
+def _marker_path(db_path: Path) -> Path:
+    return db_path.with_name(COMPACTION_MARKER)
+
+
+def note_compaction_owed(db_path: Path) -> None:
+    """Record that rows were deleted and their bytes have not been rebuilt away yet."""
+    with contextlib.suppress(OSError):
+        _marker_path(db_path).write_text("")
+
+
+def compaction_owed(db_path: Path) -> bool:
+    """Is there deleted content still sitting in this database file?
+
+    **This is a recorded obligation, not an inference.** The first attempt inferred it from
+    `PRAGMA freelist_count > 0`, which is wrong in the most common case: `freelist_count`
+    counts *wholly freed pages*, and a small batch's deleted rows sit inside pages that are
+    still in use, so the count reads 0 while the brand names are plainly still there. The
+    only reliable statement is the one made at delete time.
+
+    `freelist_count` is still consulted as a second opinion — it catches a database that
+    was purged by something other than this module.
     """
+    if _marker_path(db_path).exists():
+        return True
     try:
-        connection = sqlite3.connect(db_path, timeout=10.0, isolation_level=None)
+        connection = sqlite3.connect(db_path, timeout=5.0, isolation_level=None)
     except sqlite3.Error:
         return False
     try:
-        connection.execute("VACUUM")
-        connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-        return True
+        row = connection.execute("PRAGMA freelist_count").fetchone()
+        return bool(row) and int(row[0]) > 0
     except sqlite3.Error:
-        applog.warn("retention_compaction_skipped", code="sqlite_busy")
         return False
     finally:
         connection.close()
+
+
+def _wal_bytes(db_path: Path) -> int:
+    wal = db_path.with_name(db_path.name + "-wal")
+    with contextlib.suppress(OSError):
+        if wal.is_file():
+            return wal.stat().st_size
+    return 0
+
+
+def _compact(db_path: Path) -> bool:
+    """`VACUUM` then truncate the WAL. Returns whether the file is **verified** clean.
+
+    Two things this deliberately does not do.
+
+    It does not trust `PRAGMA wal_checkpoint(TRUNCATE)`. That pragma **returns**
+    `(busy, log, checkpointed)` — it does not raise — so the first version reported success
+    after a measured `(1, 17, 0)`: busy, zero pages checkpointed, brand names still in
+    `jobs.db-wal`, and `SweepReport.compacted` saying True. A control that reports it did
+    the thing while not doing it is worse than no control, because it ends the
+    investigation. The `busy` flag is now read and believed.
+
+    It does not clear the obligation on hope. The marker is removed only when the VACUUM
+    did not raise, the checkpoint reported not-busy, and the WAL is measurably empty. If a
+    batch worker holds the write lock, none of that happens, the marker stays, and the next
+    sweep retries — which is the retry the old `if purged:` gate could never reach, because
+    by then there was nothing left to purge.
+    """
+    if not compaction_owed(db_path):
+        return True
+
+    # A short lock wait, on purpose. This runs on a timer that comes round again in fifteen
+    # minutes, so sitting on a lock that a batch worker needs buys nothing and costs the
+    # thing the lock is for. Fail fast, warn, retry next tick.
+    try:
+        connection = sqlite3.connect(db_path, timeout=COMPACTION_LOCK_WAIT, isolation_level=None)
+        connection.execute(f"PRAGMA busy_timeout={int(COMPACTION_LOCK_WAIT * 1000)}")
+    except sqlite3.Error:
+        return False
+
+    vacuumed = False
+    checkpointed = False
+    try:
+        connection.execute("VACUUM")
+        vacuumed = True
+    except sqlite3.Error:
+        vacuumed = False
+    try:
+        row = connection.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+        # (busy, log_pages, checkpointed_pages). busy != 0 means a reader or writer stopped
+        # it and the log was NOT reset, whatever the absence of an exception suggests.
+        checkpointed = bool(row) and int(row[0]) == 0
+    except sqlite3.Error:
+        checkpointed = False
+    finally:
+        connection.close()
+
+    if vacuumed and checkpointed and _wal_bytes(db_path) == 0:
+        with contextlib.suppress(OSError):
+            _marker_path(db_path).unlink()
+        return True
+
+    applog.warn("retention_compaction_incomplete", code="sqlite_busy", stage="retention")
+    return False
 
 
 def _live_job_ids(store: BatchStore | None) -> set[str] | None:
@@ -384,12 +523,22 @@ def install_sweeper(app: FastAPI, policy: SecurityPolicy) -> RetentionSweeper:
     )
     app.state.retention_sweeper = sweeper
 
-    async def _start() -> None:
-        sweeper.start()
+    # The lifespan context is WRAPPED rather than appending to `router.on_startup`.
+    # Starlette ignores `on_startup`/`on_shutdown` entirely when an app supplies a
+    # `lifespan=` context — so the append version worked today and would have switched
+    # retention off, silently and with no test failing, the moment anyone modernised
+    # `create_app` to the lifespan idiom. Wrapping covers both, because the handler-running
+    # default is itself just a lifespan context.
+    inner = app.router.lifespan_context
 
-    async def _stop() -> None:
-        await sweeper.stop()
+    @contextlib.asynccontextmanager
+    async def lifespan(scope_app: FastAPI) -> AsyncIterator[Any]:
+        async with inner(scope_app) as state:
+            sweeper.start()
+            try:
+                yield state
+            finally:
+                await sweeper.stop()
 
-    app.router.on_startup.append(_start)
-    app.router.on_shutdown.append(_stop)
+    app.router.lifespan_context = lifespan
     return sweeper
