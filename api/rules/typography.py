@@ -48,6 +48,12 @@ unscaled photograph, and the ratio is a proxy for an evasion pattern rather than
 restatement of any rule. A concerning ratio raises a finding; an abstention says so
 plainly and holds nothing up, because the tool never claimed to measure it.
 
+A note on `adopt_reread` and violations. `_combine` collapses a recorded `False` and a
+rereader's `True` to `None`, which turns a Mismatch into an Unreadable — a softening, not
+a pass. It is unreachable today because `escalation_reason` refuses to fire once a
+violation is established, and that refusal is tested; recorded here so the two facts are
+known to depend on each other.
+
 A note on the asymmetry in contrast's two answers. `None` blocks Match, while `False`
 routes to Needs review rather than to Mismatch. That is not timidity: exposure, white
 balance and compression all change how much a background appears to contrast, so a
@@ -219,15 +225,10 @@ def check_body_not_bold(signals: WarningTypography) -> list[Finding]:
 
 def check_prominence(signals: WarningTypography) -> list[Finding]:
     """WARN-5 / LP-211 — is the warning shrunk relative to the rest of the label?"""
+    if not size_was_measured(signals):
+        return []
     ratio = signals.relative_size
-    if ratio is None:
-        return []
-    # A ratio outside this range is not a measurement, it is a broken reading: a warning
-    # cannot be a negative size, and a hundredfold difference is not something a label
-    # does. Reporting "printed about 200% smaller" from a -1.0 would be the tool
-    # inventing a finding out of a bad input.
-    if not 0.0 < ratio < 100.0:
-        return []
+    assert ratio is not None  # size_was_measured
     if ratio > PROMINENCE_CONCERN_RATIO:
         return []
     percent = round((1.0 - ratio) * 100)
@@ -247,6 +248,20 @@ def check_prominence(signals: WarningTypography) -> list[Finding]:
             severity=SEVERITY_VIOLATION,
         )
     ]
+
+
+def size_was_measured(signals: WarningTypography) -> bool:
+    """Did the reading actually produce a size ratio?
+
+    `None` is the obvious no. So is a ratio outside a plausible range: a warning cannot
+    be a negative size, and a hundredfold difference is not something a label does, so
+    those are broken readings rather than measurements. `0.0` matters most — it is a
+    plausible "could not measure" output from a model asked for a number, and treating it
+    as a measurement meant a label reached Match with neither a prominence finding nor
+    the note admitting size went unassessed. Silence in both directions.
+    """
+    ratio = signals.relative_size
+    return ratio is not None and 0.0 < ratio < 100.0
 
 
 def check_contrast(signals: WarningTypography) -> list[Finding]:
@@ -330,7 +345,7 @@ def assess(signals: WarningTypography) -> TypographyAssessment:
         findings.append(finding)
         prominence.append(finding.code)
 
-    if signals.relative_size is None:
+    if not size_was_measured(signals):
         unassessed.append("relative_size")
         findings.append(_unassessed_note())
 

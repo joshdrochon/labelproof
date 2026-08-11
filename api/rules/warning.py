@@ -862,8 +862,17 @@ def merge_sighting_typography(
     never overrides an answer, and two images that both answered can only agree — a
     signal has one true value per label, and if the readings disagree, the concerning
     one is the one a person needs to see.
+
+    Only legible readings are consulted while there are any.
     """
-    relevant = [s for s in sightings if s.has_text] or list(sightings)
+    # Legible readings first. A sighting the extractor flagged illegible that still
+    # returned some text is not a reading to take compliance from, and taking passing
+    # signals off one could make it the sole basis for a Match.
+    relevant = (
+        [s for s in sightings if s.has_text and s.legible]
+        or [s for s in sightings if s.has_text]
+        or list(sightings)
+    )
 
     def fold(name: str, unsafe: bool) -> bool | None:
         values = [

@@ -72,10 +72,16 @@ def merge_extractions(
     # The warning is chosen across every image at once rather than by taking the first
     # one that had any (LP-217). A front label with a decorative fragment and a back
     # label with the whole statement would otherwise be judged on the fragment.
-    sighting = warn.select_sighting(warning_sightings(extractions))
+    sightings = warning_sightings(extractions)
+    sighting = warn.select_sighting(sightings)
     if sighting is not None:
         warning_image = sighting.image_index
-        typography = sighting.typography
+
+    # The typography is folded across every image, not taken off the chosen sighting.
+    # This function is public and `_warning_result` is not its only possible caller, so
+    # returning the single-sighting signals here would hand the next caller a reading
+    # that silently drops a violation another image established.
+    typography = warn.merge_sighting_typography(sightings)
 
     return merged, warning_image, typography, provenance
 

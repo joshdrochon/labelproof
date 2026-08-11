@@ -467,6 +467,47 @@ def test_signals_from_an_image_with_no_warning_on_it_are_ignored() -> None:
     assert merged.body_is_bold is False
 
 
+def test_an_illegible_reading_does_not_supply_passing_typography() -> None:
+    """A sighting the extractor flagged illegible that still returned text is not a
+    reading to take compliance from. Contrived — both texts have to collapse identically
+    — but the docstring said "the images that actually carried a warning" and meant
+    "the legible ones"."""
+    merged = warning.merge_sighting_typography(
+        [
+            _sighting(0, canon.CANONICAL_WARNING, GOOD, legible=False),
+            _sighting(1, canon.CANONICAL_WARNING, WarningTypography(), legible=True),
+        ]
+    )
+    assert merged.header_is_bold is None
+
+
+def test_the_public_merge_helper_folds_typography_across_images_too() -> None:
+    """`merge_extractions` is public and `_warning_result` is not its only possible
+    caller. It used to return the chosen sighting's signals — the pre-fix behaviour —
+    so the next caller would silently inherit the bug this wave removed."""
+    from api.models import ExtractedField, Extraction
+    from api.verify import merge_extractions
+
+    extractions = [
+        Extraction(
+            image_index=0,
+            fields={FieldName.GOVERNMENT_WARNING: ExtractedField(
+                value=canon.CANONICAL_WARNING, confidence=0.99)},
+            warning_text=canon.CANONICAL_WARNING,
+            warning_typography=GOOD,
+        ),
+        Extraction(
+            image_index=1,
+            fields={FieldName.GOVERNMENT_WARNING: ExtractedField(
+                value=canon.CANONICAL_WARNING, confidence=0.5)},
+            warning_text=canon.CANONICAL_WARNING,
+            warning_typography=_BOLD_BODY,
+        ),
+    ]
+    _merged, _image, signals, _prov = merge_extractions(extractions)
+    assert signals.body_is_bold is True
+
+
 def test_a_reworded_warning_on_another_panel_is_never_a_clean_match() -> None:
     """The second confirmed path: front reworded, back correct, reported as approved."""
     reworded = canon.CANONICAL_WARNING.replace("birth defects", "health risks")
@@ -673,13 +714,31 @@ def test_the_prominence_message_claims_no_check_the_module_disclaims() -> None:
 
 
 @pytest.mark.parametrize("ratio", [-1.0, 0.0, 1000.0])
-def test_an_impossible_size_ratio_raises_no_finding(ratio: float) -> None:
-    """A warning cannot be a negative size. Reporting "printed about 200% smaller" from
-    a -1.0 would be inventing a finding out of a broken reading."""
+def test_an_impossible_size_ratio_is_treated_as_a_reading_that_did_not_happen(
+    ratio: float,
+) -> None:
+    """A warning cannot be a negative size, so it raises no prominence finding — and it
+    must not pass silently either.
+
+    0.0 matters most: it is a plausible "could not measure" from a model asked for a
+    number, and it used to reach Match with neither a prominence finding nor the note
+    admitting size went unassessed. Silence in both directions. The 1000.0 case was
+    vacuous as originally written — any ratio above 0.80 skips the finding regardless —
+    so the assertion is now on the note, which is the part that distinguishes them.
+    """
     signals = WarningTypography(header_is_bold=True, body_is_bold=False, contrast_ok=True,
                                 relative_size=ratio)
-    codes = {f.code for f in warning.evaluate(canon.CANONICAL_WARNING, signals).findings}
-    assert "warning_less_prominent" not in codes
+    findings = {f.code for f in warning.evaluate(canon.CANONICAL_WARNING, signals).findings}
+    assert "warning_less_prominent" not in findings
+    assert "warning_prominence_unassessed" in findings
+
+
+def test_a_measured_size_does_not_claim_to_be_unassessed() -> None:
+    """The other side of the same line, so the two cannot collapse into each other."""
+    signals = WarningTypography(header_is_bold=True, body_is_bold=False, contrast_ok=True,
+                                relative_size=1.0)
+    findings = {f.code for f in warning.evaluate(canon.CANONICAL_WARNING, signals).findings}
+    assert "warning_prominence_unassessed" not in findings
 
 
 @pytest.mark.tc("TC-06")
@@ -839,7 +898,7 @@ def test_altering_any_single_word_is_never_a_match(index: int) -> None:
         for h in (True, False, None)
         for b in (True, False, None)
         for c in (True, False, None)
-        for r in (None, 0.3, 0.8, 1.0)
+        for r in (None, -1.0, 0.0, 0.3, 0.8, 1.0, 1000.0)
     ],
 )
 def test_only_one_typography_combination_can_reach_match(
@@ -852,9 +911,11 @@ def test_only_one_typography_combination_can_reach_match(
     somewhere an agent has to look.
     """
     verdict = warning.evaluate(canon.CANONICAL_WARNING, signals).verdict
+    # The model has to agree with the code at the awkward values too, or "exhaustive" is
+    # a word the test uses about a grid that excludes exactly what it cannot express.
     size_ok = (
-        signals.relative_size is None
-        or signals.relative_size > typography.PROMINENCE_CONCERN_RATIO
+        not typography.size_was_measured(signals)
+        or signals.relative_size > typography.PROMINENCE_CONCERN_RATIO  # type: ignore[operator]
     )
     can_match = (
         signals.header_is_bold is True
@@ -1649,6 +1710,31 @@ def test_each_warning_fixture_produces_what_the_golden_set_claims(
     assert row.verdict is verdict
     if code is not None:
         assert code in {f.code for f in row.findings}
+
+
+def test_every_unread_signal_names_a_real_one() -> None:
+    """A typo in `warning_signals_unread` silently does nothing, and the fixture quietly
+    stops testing the thing it exists to test — a green suite covering less than it
+    says. The field is a bare frozenset of strings, so nothing else would catch it."""
+    from fixtures.generator.catalog import CATALOG
+
+    valid = set(WarningTypography.model_fields)
+    for spec in CATALOG:
+        unknown = spec.warning_signals_unread - valid
+        assert unknown == set(), f"{spec.name} abstains on unknown signal(s) {unknown}"
+
+
+def test_a_fixture_that_claims_to_abstain_actually_abstains() -> None:
+    """The other half: the name is real *and* it reaches the extraction."""
+    from fixtures.generator.catalog import CATALOG
+
+    for spec in CATALOG:
+        if not spec.warning_signals_unread:
+            continue
+        sighting = warning.select_sighting(_sightings_for(spec.name))
+        assert sighting is not None, spec.name
+        for name in spec.warning_signals_unread:
+            assert getattr(sighting.typography, name) is None, f"{spec.name}: {name}"
 
 
 def test_a_fixture_can_express_a_reading_that_could_not_tell() -> None:
