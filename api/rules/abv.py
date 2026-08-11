@@ -111,7 +111,11 @@ def check_format(text: str | None, commodity: Commodity) -> list[Finding]:
                     'Distilled spirits labels may use only "alc." and "vol." '
                     'abbreviations. This label uses "ABV".'
                 ),
-                citation=canon.CITATIONS["spirits_abv"],
+                # Not CITATIONS["spirits_abv"]. 27 CFR 5.65 authorizes four
+                # abbreviations and never mentions "ABV"; the prohibition is TTB
+                # guidance, and citing the regulation for it overstates its authority
+                # to the applicant this finding is written for (LP-328).
+                citation=canon.CITATIONS["spirits_abv_abbreviation"],
                 severity="finding",
             )
         )

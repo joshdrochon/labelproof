@@ -101,9 +101,9 @@ def test_no_citation_is_left_blank() -> None:
 
 
 def test_every_citation_names_a_real_authority() -> None:
-    """CFR sections or TTB guidance documents. Nothing vaguer than that."""
+    """A CFR section, or a named TTB guidance page. Nothing vaguer than that."""
     for key, citation in canon.CITATIONS.items():
-        assert re.match(r"^(27 CFR \d|TTB G \d{4}-\d)", citation), f"{key}: {citation!r}"
+        assert re.match(r"^(27 CFR \d|TTB guidance: \S)", citation), f"{key}: {citation!r}"
 
 
 # --- the type-size table is two steps, not one ------------------------------------------
@@ -203,6 +203,33 @@ def test_the_warning_placement_rule_is_cited_to_the_right_section() -> None:
 
 
 def test_the_abv_abbreviation_rule_cites_guidance_not_the_regulation() -> None:
-    """5.65 authorizes four abbreviations and never mentions "ABV". The prohibition is
-    TTB G 2021-4, and a finding that cites the CFR for it overstates its source."""
-    assert canon.CITATIONS["spirits_abv_abbreviation"] == "TTB G 2021-4"
+    """5.65 authorizes four abbreviations and never mentions "ABV", so a finding that
+    cites the CFR for the prohibition overstates its source.
+
+    Cited by page title rather than G-number: TTB's index lists this page as G 2021-1
+    while the page body is stamped G 2021-4, which the index assigns to a different
+    document. Hardcoding either side of that would assert something genuinely in doubt.
+    """
+    citation = canon.CITATIONS["spirits_abv_abbreviation"]
+    assert citation.startswith("TTB guidance:")
+    assert "2021" not in citation
+
+
+def test_the_abv_abbreviation_finding_cites_the_guidance() -> None:
+    """The user-visible half. A dict entry nothing reads is not a correction."""
+    from api.models import Commodity
+    from api.rules import abv
+
+    finding = abv.check_format("45% ABV", Commodity.SPIRITS)[0]
+    assert finding.citation == canon.CITATIONS["spirits_abv_abbreviation"]
+    assert "27 CFR" not in (finding.citation or "")
+
+
+def test_the_characters_per_inch_table_is_cited_to_its_own_subsection() -> None:
+    """16.22(b) is prose mapping volume to millimetres. The characters-per-inch table
+    is 16.22(a)(4) — an earlier pass cited (b) for both."""
+    record = canon.verification_for(
+        "WARNING_MIN_TYPE_SIZE_BANDS / WARNING_MAX_CHARACTERS_PER_INCH"
+    )
+    assert record is not None
+    assert record.citation == "27 CFR 16.22(a)(4), (b)"

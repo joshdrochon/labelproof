@@ -69,10 +69,13 @@ WARNING_MIN_TYPE_SIZE_BANDS: Final[tuple[tuple[float | None, float], ...]] = (
 )
 
 #: Maximum characters per inch, keyed to *type size* rather than to container volume.
-#: This is the regulation's own shape: 16.22(b)'s table is headed "Minimum required type
-#: size for warning statement" and maps that to a character density. Volume selects the
-#: type size; the type size selects the density. Collapsing the two steps gives the same
-#: answer today and would silently give a wrong one if either half were ever amended.
+#: This is the regulation's own shape, and it lives in a different subsection from the
+#: sizes: **16.22(a)(4)** carries the table, headed "Minimum required type size for
+#: warning statement", mapping millimetres to a character density. 16.22(b) is "Size of
+#: type" and is three paragraphs of prose mapping container volume to millimetres — no
+#: table at all. Volume selects the type size under (b); the type size selects the
+#: density under (a)(4). Collapsing the two steps gives the same answer today and would
+#: silently give a wrong one if either half were ever amended.
 WARNING_MAX_CHARACTERS_PER_INCH: Final[dict[float, int]] = {
     1.0: 40,
     2.0: 25,
@@ -225,7 +228,14 @@ CITATIONS: Final[dict[str, str]] = {
     "spirits_abv": "27 CFR 5.65",
     # The CFR authorizes four abbreviations and is silent on "ABV". The prohibition is
     # TTB guidance, and a finding that cites 5.65 for it is overstating its source.
-    "spirits_abv_abbreviation": "TTB G 2021-4",
+    #
+    # Cited by page rather than by G-number on purpose. TTB's public-guidance index lists
+    # the Alcohol Content page — the one carrying "The abbreviation 'ABV' is not allowed"
+    # — as G 2021-1, while the page body is stamped G 2021-4, which the index assigns to
+    # the Mandatory Label Information checklist. TTB contradicts itself, so pinning
+    # either number would be asserting a fact that is genuinely in doubt; the page title
+    # identifies the source unambiguously and the URL is in VERIFICATIONS.
+    "spirits_abv_abbreviation": "TTB guidance: Distilled Spirits Alcohol Content",
 }
 
 
@@ -285,15 +295,17 @@ VERIFICATIONS: Final[tuple[Verification, ...]] = (
     ),
     Verification(
         subject="WARNING_MIN_TYPE_SIZE_BANDS / WARNING_MAX_CHARACTERS_PER_INCH",
-        citation="27 CFR 16.22(b)",
+        citation="27 CFR 16.22(a)(4), (b)",
         source=f"{_GOVINFO}/CFR-2025-title27-vol1-sec16-22.xml",
         checked=date(2026, 8, 11),
         confirmed=True,
         note=(
             "Boundaries confirmed as '237 mL or less' / 'more than 237 mL "
             "up to 3 liters' / 'more than 3 liters', and 1/2/3 mm mapping "
-            "to 40/25/12 characters per inch. The table is keyed to type size, not to "
-            "volume; encoded here as two steps for that reason."
+            "to 40/25/12 characters per inch. The two halves live in different "
+            "subsections: 16.22(b) is prose mapping volume to millimetres, and the "
+            "characters-per-inch table is 16.22(a)(4). Re-checked 2026-08-11 after an "
+            "earlier pass cited (b) for both."
         ),
     ),
     Verification(
@@ -406,8 +418,11 @@ VERIFICATIONS: Final[tuple[Verification, ...]] = (
     ),
     Verification(
         subject="SPIRITS_FORBIDDEN_ABV_ABBREVIATIONS",
-        citation="TTB G 2021-4",
-        source="ttb.gov/.../ds-labeling-home/ds-alcohol-content",
+        citation="TTB guidance: Distilled Spirits Alcohol Content",
+        source=(
+            "ttb.gov/regulated-commodities/beverage-alcohol/distilled-spirits/"
+            "ds-labeling-home/ds-alcohol-content"
+        ),
         checked=date(2026, 8, 11),
         confirmed=True,
         note=(
