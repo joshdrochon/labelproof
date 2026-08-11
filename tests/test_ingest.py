@@ -1,6 +1,10 @@
 """Upload ingest. Every uploaded byte is hostile input (SEC-5)."""
 
+import asyncio
 import io
+import threading
+import time
+from unittest import mock
 
 import pytest
 from PIL import Image
@@ -252,3 +256,198 @@ def test_malformed_pdf_reports_a_user_error(config: Config) -> None:
 def test_pdf_output_carries_its_source_type(config: Config) -> None:
     result = ingest.ingest_one(_pdf_bytes(), config)[0]
     assert result.source_media_type is MediaType.PDF
+
+
+# --- off the event loop -------------------------------------------------------------------
+#
+# Ingest and quality scoring measured ~700ms for a two-image upload of 2400x3360 PNGs.
+# Run inline on an async server that is 700ms during which every other request in the
+# process is frozen, so two agents submitting at once take 700ms and 1400ms rather than
+# 700ms each. Invisible in single-user testing, which is where it would have stayed.
+
+
+def test_ingest_does_not_run_on_the_event_loop(config: Config) -> None:
+    """Asked directly: is there a running loop in the thread doing the work? If there is,
+    the work is on the loop and every other request is waiting for it."""
+    where: dict[str, bool] = {}
+    real = ingest.ingest
+
+    def spy(files: list[bytes], cfg: Config) -> list[ingest.IngestedImage]:
+        try:
+            asyncio.get_running_loop()
+            where["on_loop"] = True
+        except RuntimeError:
+            where["on_loop"] = False
+        return real(files, cfg)
+
+    with mock.patch.object(ingest, "ingest", spy):
+        asyncio.run(ingest.ingest_async([png_bytes()], config))
+
+    assert where["on_loop"] is False
+
+
+def test_quality_scoring_does_not_run_on_the_event_loop(config: Config) -> None:
+    where: dict[str, bool] = {}
+    real = ingest.assess
+
+    def spy(images: list[ingest.IngestedImage]) -> list[object]:
+        try:
+            asyncio.get_running_loop()
+            where["on_loop"] = True
+        except RuntimeError:
+            where["on_loop"] = False
+        return real(images)
+
+    with mock.patch.object(ingest, "assess", spy):
+        asyncio.run(ingest.assess_async(ingest.ingest([png_bytes()], config)))
+
+    assert where["on_loop"] is False
+
+
+def test_two_uploads_overlap_instead_of_queueing(config: Config) -> None:
+    """The claim, proved without a stopwatch.
+
+    A barrier of two only releases when two threads are inside the work at the same
+    moment. Serialized, the first call waits for a partner that cannot arrive until it
+    returns, the barrier times out, and this fails. No timing assertion, so no flake.
+    """
+    barrier = threading.Barrier(2, timeout=15)
+    real = ingest.ingest
+
+    def gated(files: list[bytes], cfg: Config) -> list[ingest.IngestedImage]:
+        barrier.wait()
+        return real(files, cfg)
+
+    async def both() -> list[list[ingest.IngestedImage]]:
+        return list(
+            await asyncio.gather(
+                ingest.ingest_async([png_bytes()], config),
+                ingest.ingest_async([png_bytes()], config),
+            )
+        )
+
+    with mock.patch.object(ingest, "ingest", gated):
+        results = asyncio.run(both())
+
+    assert len(results) == 2
+
+
+def test_the_event_loop_keeps_serving_while_ingest_runs(config: Config) -> None:
+    """The other half of the same claim: the loop is free to do work meanwhile.
+
+    Driven by a sleeping stand-in rather than a real decode, so the tick count does not
+    depend on how fast the machine is. `time.sleep` releases the GIL, which is exactly
+    what the real OpenCV and Pillow calls do.
+    """
+    ticks = 0
+
+    async def heartbeat() -> None:
+        nonlocal ticks
+        while True:
+            await asyncio.sleep(0.005)
+            ticks += 1
+
+    def slow(files: list[bytes], cfg: Config) -> list[ingest.IngestedImage]:
+        time.sleep(0.25)
+        return ingest.ingest_one(files[0], cfg)
+
+    async def main() -> None:
+        beat = asyncio.create_task(heartbeat())
+        await ingest.ingest_async([png_bytes()], config)
+        beat.cancel()
+
+    with mock.patch.object(ingest, "ingest", slow):
+        asyncio.run(main())
+
+    assert ticks >= 5
+
+
+def test_the_async_wrappers_return_what_the_sync_ones_do(config: Config) -> None:
+    """Moving work to a thread must not change the answer."""
+    data = [png_bytes(1200, 900)]
+    sync = ingest.ingest(data, config)
+    from_thread = asyncio.run(ingest.ingest_async(data, config))
+    assert [i.data for i in sync] == [i.data for i in from_thread]
+
+
+def test_errors_still_surface_through_the_wrapper(config: Config) -> None:
+    """A UserError raised on a worker thread has to arrive as a UserError, not as a
+    concurrent.futures wrapper the error taxonomy has never heard of."""
+    with pytest.raises(errors.UserError, match="empty"):
+        asyncio.run(ingest.ingest_async([b""], config))
+
+
+# --- the route actually uses the wrappers ---------------------------------------------
+#
+# The tests above prove ingest_async and assess_async behave. They say nothing about
+# whether anything calls them, and the two lines in api/routes/verify.py that do sit in a
+# block several other branches rewrite. A conflict resolved the other way would delete the
+# fix and leave every test above green, because they exercise the wrappers directly.
+#
+# So this drives a real request over HTTP and asserts the route went through them.
+
+
+def test_the_verify_route_does_not_block_the_event_loop() -> None:
+    """Goes red if `verify_endpoint` starts doing its CPU-bound work inline.
+
+    This asserts the PROPERTY — the loop stays free — rather than naming the functions
+    that currently deliver it. The version this replaced asserted
+    `calls == ["ingest_async", "assess_async"]`, and a merge that moved the whole shared
+    `prepare_images` call onto a worker thread in ONE hop turned it red while making the
+    loop strictly freer. A guard that fails on an improvement teaches people to delete
+    guards.
+
+    Measured inline, a two-image upload froze the loop for ~700ms. That does not slow the
+    request down; it serializes every other request in the process behind it (PERF-1).
+    """
+    from api.routes import verify as route_mod
+    from tests.test_api import label_files, make_client, post_verify
+
+    # Patch the name the ROUTE bound at import, not the one in the source module.
+    real = route_mod.prepare_images
+    ran_on_the_loop: list[bool] = []
+
+    def spy(*args: object, **kwargs: object):  # type: ignore[no-untyped-def]
+        # A worker thread has no running loop, so this raises there and succeeds only if
+        # the work is happening on the loop itself. That is the property, independent of
+        # which helper delivers it.
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            ran_on_the_loop.append(False)
+        else:
+            ran_on_the_loop.append(True)
+        return real(*args, **kwargs)  # type: ignore[arg-type]
+
+    with mock.patch.object(route_mod, "prepare_images", spy):
+        response = post_verify(make_client(), files=label_files("tc01_old_tom_clean.png"))
+
+    assert response.status_code == 200
+    assert ran_on_the_loop == [False], (
+        "ingest and quality scoring ran on the event loop thread — api/routes/verify.py "
+        "is doing CPU-bound work inline again, which serializes every concurrent request"
+    )
+
+
+def test_the_verify_route_does_not_call_the_blocking_ingest_directly() -> None:
+    """The same claim from the other side, so neither a revert nor a partial one passes."""
+    from tests.test_api import label_files, make_client, post_verify
+
+    on_loop: list[bool] = []
+    real = ingest.ingest
+
+    def watch(*args: object, **kwargs: object):  # type: ignore[no-untyped-def]
+        try:
+            asyncio.get_running_loop()
+            on_loop.append(True)
+        except RuntimeError:
+            on_loop.append(False)
+        return real(*args, **kwargs)  # type: ignore[arg-type]
+
+    with mock.patch.object(ingest, "ingest", watch):
+        response = post_verify(
+            make_client(), files=label_files("tc01_old_tom_clean.png")
+        )
+
+    assert response.status_code == 200
+    assert on_loop == [False], "ingest ran on the event loop during a real request"

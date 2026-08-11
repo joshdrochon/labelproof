@@ -26,7 +26,33 @@ import type {
 import { ERROR_FALLBACK } from './copy';
 
 const LONG_EDGE = 2576;
-const WEBP_Q = 0.9;
+
+/**
+ * Measured, not picked. `python -m scripts.compression_sweep` encodes every robustness
+ * fixture at each quality and measures the structural similarity of the government
+ * warning's region against its own uncompressed pixels — the smallest type on the label,
+ * and the one field where being wrong is disqualifying.
+ *
+ * Worst-case SSIM over the set: 0.9920 at q100, 0.9846 at q95, 0.9593 at q90, 0.7529 at
+ * q60, against a bar of 0.98. So q90 — the value this shipped with before anyone measured
+ * it — visibly damages the warning, and q85 starts flagging labels that are perfectly
+ * readable.
+ *
+ * Pinned at the top rather than at q95, the cheapest level that clears the bar. The
+ * measurement is on generated labels, which are sharp text on flat ground and the easiest
+ * case any encoder will ever see; real photographs carry sensor noise and compress worse.
+ * The difference is ~11KB an image against a budget with room, and the failure it buys
+ * insurance against is a compliance error. `tests/test_robustness.py` fails if this
+ * constant and the sweep's recommendation ever disagree.
+ *
+ * Keep WebP. At an equal byte budget JPEG is far worse on this content — ~45KB buys
+ * WebP q95 at 0.9846 and JPEG q60 at 0.7770 — and comparing the two by quality number
+ * rather than by bytes compares different scales that happen to share a name.
+ *
+ * Caveat on the evidence: the sweep runs libwebp through Pillow, the browser runs libwebp
+ * through Chrome. Close, not identical. Re-run against Tier B before lowering this.
+ */
+const WEBP_Q = 1.0;
 
 /** An error already phrased for an agent. Every throw out of this module is one. */
 export class ApiFailure extends Error {

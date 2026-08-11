@@ -40,6 +40,41 @@ ESCALATION_TRIGGER: Final[float] = 0.60
 # --------------------------------------------------------------------------------------
 #
 # All scores are 0..1 where 1 is best, so they compose and read consistently.
+#
+# **How these were chosen (LP-200).** `python -m scripts.calibrate_quality` sweeps each
+# value below across a range and reports, at every level, false passes (something
+# illegible treated as legible) and false flags (something legible treated as illegible).
+# The rule it exists to enforce: *a threshold change that reduces flags by letting a bad
+# label through is a regression, not an improvement.*
+#
+# Recorded from the run against the 19-condition robustness set. "Margin" is how many
+# sweep steps the value sits from the nearest level that produces a false pass:
+#
+#     HOPELESS                   0.20    clean band 0.10–0.25    margin 3
+#     DEGRADED                   0.45    clean band 0.30–0.70    margin 8 (none in range)
+#     SHARP_GRADIENT_VARIANCE    1200    clean band 600–1600     margin 6 (none in range)
+#     BLUR_HOPELESS_VARIANCE      110    clean band 60–110       margin 3
+#     EXPOSURE_FLOOR               90    clean band 50–160       margin 6 (none in range)
+#     GLARE_SATURATION_FRACTION  0.25    clean band 0.10–0.35    margin 2
+#     MIN_LONG_EDGE_PX           1200    clean band 600–2000     margin 5 (none in range)
+#
+# **How much weaker this is than it looks, specifically.** "Calibrated against rendered
+# fixtures" is too vague to act on, so here is what is actually missing:
+#
+# 1. *The false-pass column is computed over 9 of the 19 conditions.* A condition whose
+#    obligation is `readable` has nothing illegible to miss, so it can only ever produce a
+#    false flag. Only the eight `pregated` cases and the one `warning_illegible` case can
+#    move the column that decides these values.
+# 2. *Rendered labels have no sensor noise*, and noise is what broke the previous blur
+#    measure — it inflated an unreadable photo tenfold and put it through the gate. There
+#    is now one noisy fixture, built by adding Gaussian noise, which is not the same thing
+#    as a real sensor at high ISO.
+# 3. *A band being wide is not the same as a threshold being robust.* DEGRADED, EXPOSURE
+#    FLOOR and MIN_LONG_EDGE_PX show no false pass anywhere in range, which means this set
+#    does not exercise them, not that they are safe.
+#
+# Re-run the sweep with `--photos` when Tier B lands; that run decides these values
+# (LP-292).
 
 #: Below this on any dimension, the image is hopeless: return Unreadable with a retake
 #: reason and make ZERO model calls (LP-321). The pre-gate can only ever spend less and
@@ -50,15 +85,23 @@ HOPELESS: Final[float] = 0.20
 #: suspect and confidence should be discounted.
 DEGRADED: Final[float] = 0.45
 
-#: Laplacian variance treated as fully sharp. Scoring is LOGARITHMIC between the two
-#: bounds below, because the measure spans four orders of magnitude on real content:
-#: a sharp rendered label sits near 1400, the same label at Gaussian radius 2 near 37,
-#: and at radius 12 below 1. Calibrated against rendered fixtures, not photographs —
-#: LP-200 retunes against Tier B.
-SHARP_LAPLACIAN_VARIANCE: Final[float] = 800.0
+#: Directional edge-gradient variance, minimised over eight orientations and measured
+#: after a σ=2 pre-smooth, treated as fully sharp. Scoring is LOGARITHMIC between the two
+#: bounds below because the measure spans two and a half decades on real content.
+#:
+#: Measured on the robustness set at this operator: clean 1255, defocus radius 2 at 926,
+#: radius 6 at 297, radius 12 at 87, radius 16 at 42. A 51-pixel motion smear lands
+#: between 24 and 58 depending on angle, and a 25-pixel smear between 77 and 147.
+#:
+#: Set to 1200 rather than 1255 so a *dark but sharp* label still scores a full 1.0 — it
+#: measures 1236, and the whole point of normalising contrast away first is that "too
+#: dark" and "too blurry" stay separate problems.
+SHARP_GRADIENT_VARIANCE: Final[float] = 1200.0
 
-#: At or below this, treated as fully blurred.
-BLUR_HOPELESS_VARIANCE: Final[float] = 3.0
+#: At or below this, treated as fully blurred. Sits above the radius-12 defocus (87) and
+#: above every 51-pixel motion smear at every angle (24–58), both of which are past
+#: reading, and below the radius-6 defocus (297) which is merely degraded.
+BLUR_HOPELESS_VARIANCE: Final[float] = 110.0
 
 #: Fraction of pixels at or near saturation before glare is considered total.
 GLARE_SATURATION_FRACTION: Final[float] = 0.25

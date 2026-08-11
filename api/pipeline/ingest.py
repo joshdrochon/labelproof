@@ -15,10 +15,20 @@ That last one carries a constraint worth stating: the target is 2576px because t
 high-resolution vision tier, and dropping below it is what makes small warning text
 illegible. Downscaling further would save upload bytes and cost the one field that must
 never be misread.
+
+**All of this is CPU-bound, and none of it may run on the event loop.** Measured on two
+2400x3360 PNGs: 535ms to decode, resize and re-encode, then 173ms of quality scoring on
+top. On an async server that is ~700ms during which *every other request in the process is
+frozen*, so two agents submitting at once do not take 700ms each, they take 700 and 1400.
+Against a five-second budget that is not a rounding error, and it is invisible in
+single-user testing, which is where it would have stayed. `ingest_async` and `assess_async`
+move the work to a worker thread; the synchronous functions stay exactly as they were,
+because the batch worker is already off the loop and does not need a second hop.
 """
 
 from __future__ import annotations
 
+import asyncio
 import io
 from dataclasses import dataclass
 from enum import StrEnum
@@ -29,6 +39,7 @@ from PIL import Image, ImageOps
 
 from api import errors
 from api.config import Config
+from api.models import ImageQuality
 
 pillow_heif.register_heif_opener()
 
@@ -247,3 +258,31 @@ def to_array(image: IngestedImage):  # type: ignore[no-untyped-def]
 
     with Image.open(io.BytesIO(image.data)) as opened:
         return np.array(opened.convert("RGB"))
+
+
+def assess(images: list[IngestedImage]) -> list[ImageQuality]:
+    """Decode and quality-score a sanitized upload set."""
+    from api.pipeline import quality
+
+    return [quality.assess(to_array(image)) for image in images]
+
+
+# --------------------------------------------------------------------------------------
+# Off the event loop
+# --------------------------------------------------------------------------------------
+#
+# Both wrappers hand the whole batch to one worker thread rather than one thread per
+# image. The work is already vectorised inside OpenCV and Pillow, which release the GIL,
+# so the win being chased here is *concurrent requests overlapping*, not one request
+# getting faster. Fanning a single upload across four threads would burn four workers of a
+# shared pool to shave milliseconds off one agent's request while the next agent waits.
+
+
+async def ingest_async(files: list[bytes], config: Config) -> list[IngestedImage]:
+    """`ingest`, on a worker thread. Same errors, same order, same output."""
+    return await asyncio.to_thread(ingest, files, config)
+
+
+async def assess_async(images: list[IngestedImage]) -> list[ImageQuality]:
+    """`assess`, on a worker thread."""
+    return await asyncio.to_thread(assess, images)

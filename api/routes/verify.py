@@ -158,7 +158,15 @@ async def verify_endpoint(
 
     # Ingest, quality, and the pre-gate are `api.verify.prepare_images` — the same call
     # batch makes, so LP-321 cannot be true here and false there.
-    prepared = prepare_images([data for _, data in uploads], config, roles=roles)
+    #
+    # It goes off the event loop WHOLESALE. Inline, ingest and quality measured ~700ms of
+    # frozen loop on a two-image upload, which does not slow this request down — it
+    # serializes every other request in the process behind it (PERF-1). One `to_thread`
+    # around the shared call moves more than wrapping the two phases separately would,
+    # and it does not need an async twin of a function batch calls from its own threads.
+    prepared = await asyncio.to_thread(
+        prepare_images, [data for _, data in uploads], config, roles=roles
+    )
     # The shared path already put a clock on each phase, so the timer is fed from what it
     # measured rather than re-wrapping the work. Wrapping would mean inlining ingest and
     # quality back into this route to have something to wrap — the second copy LP-321

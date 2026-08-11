@@ -1,0 +1,158 @@
+{
+  "base": "tc01_old_tom_clean",
+  "note": "Degradations simulate optics, not physics. A Gaussian is not lens blur and an overlay is not a specular highlight on curved glass. Reproducible, which regression tests need and photographs cannot give \u2014 the gap is Tier B's job.",
+  "conditions": [
+    {
+      "name": "tc11_angle_15",
+      "tc": "TC-11",
+      "description": "photographed 15\u00b0 off-axis on a desk",
+      "expectation": "readable",
+      "why": "A mild angle is the most common real defect and the least excusable to fail on. Composited on a surface rather than warped edge-to-edge, because rectification needs a boundary to find and a borderless warp has none.",
+      "sha256": "0bff0d04fc6ca247"
+    },
+    {
+      "name": "tc11_angle_30",
+      "tc": "TC-11",
+      "description": "photographed 30\u00b0 off-axis on a desk",
+      "expectation": "readable",
+      "why": "The angle the PRD names for TC-11.",
+      "sha256": "473cf43fc1318a7b"
+    },
+    {
+      "name": "tc11_angle_45",
+      "tc": "TC-11",
+      "description": "photographed 45\u00b0 off-axis on a desk",
+      "expectation": "readable",
+      "why": "Past what anyone would call a reasonable photo. Included to find the point where correction stops working, rather than to claim it always does.",
+      "sha256": "009731ac923d5493"
+    },
+    {
+      "name": "tc11_rotate_8",
+      "tc": "TC-11",
+      "description": "held 8\u00b0 crooked, square to the label",
+      "expectation": "readable",
+      "why": "In-plane rotation is a different defect from perspective and takes different machinery. A set with only perspective cases would leave deskew untested.",
+      "sha256": "1e4f210fb1e71ddd"
+    },
+    {
+      "name": "tc12_glare_warning",
+      "tc": "TC-12",
+      "description": "flash reflection across the government warning",
+      "expectation": "warning_illegible",
+      "why": "The case the whole per-region design exists for. One global quality number calls this image fine, because it is fine everywhere except the one place that matters most. The warning must come back Unreadable and the brand two inches above it must still be verified.",
+      "sha256": "3984a28004c99214"
+    },
+    {
+      "name": "tc12_glare_corner",
+      "tc": "TC-12",
+      "description": "specular highlight on the shoulder of the bottle, off the text",
+      "expectation": "readable",
+      "why": "The control for TC-12. Glare that lands on bare label stock must change nothing. Without it, a scorer that marked every image with a bright patch as damaged would pass the glare case and look correct.",
+      "sha256": "82e0d7785b827a20"
+    },
+    {
+      "name": "tc12_glare_total",
+      "tc": "TC-12",
+      "description": "flash across most of the label",
+      "expectation": "pregated",
+      "why": "Past recovery. The obligation here is a retake reason and zero model calls \u2014 spending a token on this image buys nothing, and inpainting it would buy something worse than nothing.",
+      "sha256": "ce88f40e73fbd1c0"
+    },
+    {
+      "name": "tc13_dim",
+      "tc": "TC-13",
+      "description": "underexposed but recoverable",
+      "expectation": "readable",
+      "why": "TC-13 proper. The obligation is to normalize and read it, not to reject it \u2014 an agent told to retake a photograph that was perfectly recoverable has been made slower by the tool, which is the complaint the product exists to answer.",
+      "sha256": "8d0156ab2b4852af"
+    },
+    {
+      "name": "tc13_dim_uneven",
+      "tc": "TC-13",
+      "description": "lit from one side, half the label in shadow",
+      "expectation": "readable",
+      "why": "The realistic form of bad lighting: a bottle under one lamp. A global tone curve either leaves the shadowed half unreadable or blows out the lit half, so this is what separates local normalization from a brightness slider.",
+      "sha256": "d4742aee880e5131"
+    },
+    {
+      "name": "tc13_near_black",
+      "tc": "TC-13",
+      "description": "so underexposed there is nothing left to recover",
+      "expectation": "pregated",
+      "why": "The other side of the line. Lifting this would amplify noise into something that looks like text, which is the failure mode where enhancement turns into invention.",
+      "sha256": "c388a6c32804a53b"
+    },
+    {
+      "name": "tc14_blur_mild",
+      "tc": "TC-14",
+      "description": "slightly soft, still legible",
+      "expectation": "readable",
+      "why": "The lower edge of the blur scale. A soft photograph is still worth reading, and rejecting it would be the tool making the agent slower \u2014 which is the complaint, not the fix.",
+      "sha256": "9af217f0e604cd1d"
+    },
+    {
+      "name": "tc14_blur_hopeless",
+      "tc": "TC-14",
+      "description": "out of focus past legibility",
+      "expectation": "pregated",
+      "why": "TC-14 proper. Nothing here can be read, so the obligation is a retake reason and zero model calls. The dangerous failure is not rejecting it \u2014 it is an extractor confidently returning plausible field values from mush.",
+      "sha256": "16a4b290587d5153"
+    },
+    {
+      "name": "tc14_blur_motion",
+      "tc": "TC-14",
+      "description": "camera shake, 12\u00b0 off horizontal",
+      "expectation": "pregated",
+      "why": "Directional, unlike a Gaussian, and the commoner defect in a hand-held shot. A defocus-only set would leave the blur measure untested against the blur people actually produce.",
+      "sha256": "5d3d4e733dcf6017"
+    },
+    {
+      "name": "tc14_shake_diagonal_30",
+      "tc": "TC-14",
+      "description": "camera shake 30\u00b0 off horizontal, past reading",
+      "expectation": "pregated",
+      "why": "A near-axis smear is the easy case. These three exist because a measure built from image axes is blind between them: at 45\u00b0 both Sobel axes lose the same energy, neither is the destroyed one, and an unreadable label came back 'slightly soft'. A set whose only shake fixture sat at 12\u00b0 could never have shown that, and neither could the calibration table built on it.",
+      "sha256": "959e29bc6d43279d"
+    },
+    {
+      "name": "tc14_shake_diagonal_45",
+      "tc": "TC-14",
+      "description": "camera shake 45\u00b0 off horizontal, past reading",
+      "expectation": "pregated",
+      "why": "The exact worst case for an axis-aligned measure, and the reason the blur score samples eight orientations rather than two. Rendered, the government warning is diagonal hatching.",
+      "sha256": "c803d22e0666d7b9"
+    },
+    {
+      "name": "tc14_shake_diagonal_60",
+      "tc": "TC-14",
+      "description": "camera shake 60\u00b0 off horizontal, past reading",
+      "expectation": "pregated",
+      "why": "The far side of 45\u00b0, so the blind spot is bracketed rather than sampled once.",
+      "sha256": "1551f50c741a061d"
+    },
+    {
+      "name": "tc14_blur_noisy",
+      "tc": "TC-14",
+      "description": "out of focus, with high-ISO sensor noise on top",
+      "expectation": "pregated",
+      "why": "Noise is broadband, so it lifts every direction of a gradient measure at once. Before the measure was pre-smoothed, this image scored ten times its clean equivalent and was sent to the model \u2014 an out-of-focus photo taken in a dim bar, which is exactly the population this set represents.",
+      "sha256": "a74e431ead38fbde"
+    },
+    {
+      "name": "lp201_cylinder",
+      "tc": "LP-201",
+      "description": "wrapped around a bottle",
+      "expectation": "readable",
+      "why": "Curvature is not a projective distortion, so the four-point transform cannot undo it and this fixture exists to prove we do not pretend otherwise. The obligation is that the label stays legible and the pass reports no correction \u2014 an audit trail that says what did not happen.",
+      "sha256": "eeafff651cb678ab"
+    },
+    {
+      "name": "lp201_cylinder_angled",
+      "tc": "LP-201",
+      "description": "bottle photographed slightly off-axis",
+      "expectation": "readable",
+      "why": "The realistic combination: nobody photographs a bottle both curved and perfectly square to the camera. Rectification has a boundary to find here, and it must not make the curvature worse in the process.",
+      "sha256": "d52afb40f0d80cdf"
+    }
+  ]
+}
