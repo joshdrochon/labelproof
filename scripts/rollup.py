@@ -48,6 +48,25 @@ MIN_SAMPLES_FOR_P95 = 20
 REQUEST_SERIES = "request (all HTTP)"
 VERIFY_SERIES = "verification (POST /verify)"
 
+#: Every way a `/verify` request can end. A request emits exactly one of these.
+#:
+#: **All three feed the latency series, and this is the whole point.** An earlier version
+#: fed it from `verify_complete` alone, which quietly deleted the slow tail: a request
+#: stopped at the deadline emits `verify_over_budget`, so on a model whose median is above
+#: the budget, the only requests reaching the percentile are the handful that beat it. The
+#: rollup would have printed a comfortable p95 for a service that verified nothing most of
+#: the time. A filter that removes the slowest responses is a filter that removes the
+#: reason percentiles exist.
+#:
+#: The pre-gate pulls the other way — it answers in ~300ms and would flatter the median —
+#: which is exactly why the gate line always states the unverified share next to the
+#: number rather than leaving it to a separate section nobody quotes.
+TERMINAL_VERIFY_EVENTS: tuple[str, ...] = (
+    "verify_complete",
+    "verify_over_budget",
+    "verify_pregated",
+)
+
 
 # --------------------------------------------------------------------------------------
 # Reading the log
@@ -169,7 +188,7 @@ def read(lines: Iterable[str]) -> Reading:
 
         if event == "request_complete" and isinstance(line.get("duration_ms"), int):
             reading.note(REQUEST_SERIES, line["duration_ms"])
-        elif event == "verify_complete" and isinstance(line.get("duration_ms"), int):
+        elif event in TERMINAL_VERIFY_EVENTS and isinstance(line.get("duration_ms"), int):
             reading.note(VERIFY_SERIES, line["duration_ms"])
         elif event == "stage_complete" and isinstance(line.get("duration_ms"), int):
             stage = str(line.get("stage", "?"))
@@ -315,32 +334,65 @@ def render_latency(reading: Reading) -> list[str]:
 
 
 def _render_gate(reading: Reading) -> list[str]:
-    """PERF-1 is stated against the verification, not against every HTTP request."""
+    """PERF-1 is stated against the verification, not against every HTTP request.
+
+    The verdict is never printed on its own. A p95 is a statement about how long a
+    response took; it says nothing about whether the response contained a verification,
+    and on a model whose median sits above the deadline those are wildly different
+    questions. So the unverified share is part of this line, not a fact filed two
+    sections away.
+    """
     samples = reading.latencies.get(VERIFY_SERIES)
     if not samples:
         return [
-            "PERF-1 gate: no `verify_complete` lines in this input, so the 5-second gate "
-            "is unmeasured here.",
+            "PERF-1 gate: no `/verify` lines in this input, so the "
+            f"{Config().latency_target_ms}ms target is unmeasured here.",
             "",
         ]
 
-    budget = Config().request_budget_ms
+    # `latency_target_ms` is PERF-1's number. `request_budget_ms` is the deadline the
+    # service enforces, which now derives from the configured model's measured latency and
+    # is deliberately allowed to sit above the target rather than 503 on every call
+    # (api/config.py). Grading the gate against the deadline would mark a service as
+    # passing PERF-1 for meeting a budget that was itself relaxed to fit the model.
+    target = Config().latency_target_ms
     p95 = int(percentile(samples, 95))
-    verdict = "within budget" if p95 <= budget else "**OVER BUDGET**"
+    verdict = "within target" if p95 <= target else "**OVER TARGET**"
     caveat = (
         ""
         if len(samples) >= MIN_SAMPLES_FOR_P95
         else f" (only {len(samples)} samples — see the footnote above)"
     )
-    return [
-        f"PERF-1 gate: verification p95 is **{p95}ms** against a {budget}ms budget — "
+    out = [
+        f"PERF-1 gate: verification p95 is **{p95}ms** against a {target}ms target — "
         f"{verdict}{caveat}.",
         "",
+    ]
+
+    attempted = reading.attempted_verifications
+    if reading.unverified and attempted:
+        share = _rate(reading.unverified, attempted)
+        out += [
+            f"**Read that number with this one: {reading.unverified} of {attempted} "
+            f"responses ({share}) verified nothing** — pre-gated or stopped at the "
+            f"deadline. Those responses are in the percentile above, because they are "
+            f"real responses that took real time, but a fast p95 earned by answering "
+            f"“not checked” quickly is not the gate being met.",
+            "",
+        ]
+    elif attempted:
+        out += [
+            f"All {attempted} responses in this window actually verified a label.",
+            "",
+        ]
+
+    out += [
         "This is server-side time. It excludes upload, network and render, so it is a "
         "floor for what a person with a stopwatch sees, never the whole of it. "
         "`scripts/timed_run.py` measures the rest.",
         "",
     ]
+    return out
 
 
 def render_cost(reading: Reading) -> list[str]:

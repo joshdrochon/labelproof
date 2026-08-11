@@ -34,11 +34,12 @@ def images() -> list[tuple[str, bytes]]:
     return [(n, (LABELS / n).read_bytes()) for n in ("tc16_front_back_front.png",)]
 
 
-def verdict_body(total: int = 2400, **overrides: Any) -> bytes:
+def verdict_body(total: int = 2400, *, verified: bool = True, **overrides: Any) -> bytes:
+    verdict = "match" if verified else "unreadable"
     body: dict[str, Any] = {
         "request_id": "req_abc123",
         "aggregate": {"recommendation": "ready_to_approve", "rationale": "", "driving_field": None},
-        "fields": [],
+        "fields": [{"field": "brand_name", "verdict": verdict}],
         "images": [],
         "timings_ms": {
             "ingest": 40, "quality": 18, "preprocess": 58,
@@ -219,19 +220,19 @@ def test_the_gate_verdict_is_withheld_in_sample_mode() -> None:
         report_from(Reply(200, verdict_body(45)), runs=20, simulated=True)
     )
     assert "withheld" in text
-    assert "within budget" not in text
+    assert "within target" not in text
 
 
 def test_a_live_server_gets_a_gate_verdict() -> None:
     text = timed_run.render(report_from(Reply(200, verdict_body(2400)), runs=20))
-    assert "within budget" in text
+    assert "within target" in text
 
 
 def test_a_slow_live_server_is_called_over_budget() -> None:
     """The gate reads whichever clock said more time passed. A server reporting 9.6s
     is over budget even if the caller's own stopwatch somehow said otherwise."""
     text = timed_run.render(report_from(Reply(200, verdict_body(9600)), runs=20))
-    assert "OVER BUDGET" in text
+    assert "OVER TARGET" in text
 
 
 def test_a_gate_verdict_from_too_few_runs_says_so() -> None:
@@ -247,8 +248,105 @@ def test_twenty_runs_carry_no_small_sample_caveat() -> None:
 def test_no_successful_runs_produces_no_gate_claim() -> None:
     text = timed_run.render(report_from(Reply(0, b"refused"), runs=3))
     assert "no successful runs" in text
-    assert "within budget" not in text
+    assert "within target" not in text
 
+
+# --- a 200 is not a verification ------------------------------------------------------
+
+
+def test_a_response_with_every_field_unreadable_did_not_verify_anything() -> None:
+    """What the pre-gate and the deadline stop return. Fast, well-formed, and empty."""
+    run = timed_run.run_once(
+        1, replying(Reply(200, verdict_body(310, verified=False))), application(), images()
+    )
+    assert run.ok
+    assert not run.verified
+
+
+def test_a_run_where_every_request_timed_out_does_not_read_as_the_gate_being_met() -> None:
+    """The defect. Deadline-stopped responses are 200s and they are quick — quicker than
+    a real verification — so counting them as successes prints a comfortable p95 for a
+    service that checked no labels at all."""
+    report = report_from(Reply(200, verdict_body(4800, verified=False)), runs=20)
+    text = timed_run.render(report)
+    assert len(report.unverified) == 20
+    assert "20 of 20 successful responses verified nothing" in text
+    assert "not PERF-1 being met" in text
+
+
+def test_a_healthy_run_says_every_response_contained_a_verification() -> None:
+    """Silence there reads as "not measured" rather than "all good"."""
+    text = timed_run.render(report_from(Reply(200, verdict_body(2400)), runs=20))
+    assert "contained a real" in text
+    assert "verified nothing" not in text
+
+
+def test_the_unverified_share_sits_on_the_gate_line_not_in_a_later_section() -> None:
+    report = report_from(Reply(200, verdict_body(2400, verified=False)), runs=20)
+    text = timed_run.render(report)
+    gate = text[text.index("PERF-1 gate") : text.index("## Every run")]
+    assert "verified nothing" in gate
+
+
+def test_the_gate_is_graded_against_the_target_not_the_enforced_deadline() -> None:
+    """`request_budget_ms` derives from the configured model's measured latency and is
+    allowed above 5s. Grading against it would let a budget relaxed to fit a slow model
+    become a lower bar to clear."""
+    report = report_from(
+        Reply(200, verdict_body(9600)), runs=20, budget_ms=20700, target_ms=5000
+    )
+    text = timed_run.render(report)
+    assert "5000ms target" in text
+    assert "OVER TARGET" in text
+    assert "| Enforced deadline | 20700ms |" in text
+
+
+def test_ready_reports_the_target_separately_from_the_deadline() -> None:
+    """`probe_ready` reads it off the live server, so the two must both be there."""
+    from fastapi.testclient import TestClient
+
+    from api.config import Config
+    from api.main import create_app
+
+    client = TestClient(create_app(config=Config(use_fake_provider=True)))
+    body = client.get("/ready").json()
+    assert body["latency_target_ms"] == 5000
+    assert body["request_budget_ms"] >= body["latency_target_ms"]
+
+
+def test_probe_ready_reads_what_the_server_says(monkeypatch: pytest.MonkeyPatch) -> None:
+    payload = json.dumps(
+        {
+            "status": "ready",
+            "simulated": False,
+            "model": "claude-haiku-4-5",
+            "request_budget_ms": 12500,
+            "latency_target_ms": 5000,
+        }
+    ).encode()
+    monkeypatch.setattr(timed_run, "http_get", lambda url, timeout=60.0: Reply(200, payload))
+
+    facts = timed_run.probe_ready("http://example.com")
+    assert facts.status == "ready"
+    assert facts.model == "claude-haiku-4-5"
+    assert facts.budget_ms == 12500
+    assert facts.target_ms == 5000
+
+
+def test_a_server_that_does_not_report_a_target_falls_back_to_the_perf_1_number(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Falling back to the deadline would silently grade against a relaxed budget."""
+    payload = json.dumps({"status": "ready", "request_budget_ms": 20700}).encode()
+    monkeypatch.setattr(timed_run, "http_get", lambda url, timeout=60.0: Reply(200, payload))
+    assert timed_run.probe_ready("http://example.com").target_ms == 5000
+
+
+def test_an_unreachable_server_is_reported_rather_than_assumed_healthy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(timed_run, "http_get", lambda url, timeout=60.0: Reply(0, b"refused"))
+    assert timed_run.probe_ready("http://example.com").status == "unreachable"
 
 # --- LP-126 across a real boundary ----------------------------------------------------
 

@@ -152,23 +152,85 @@ def test_the_sample_size_is_on_every_row() -> None:
 # --- the PERF-1 gate ------------------------------------------------------------------
 
 
-def test_a_p95_inside_the_budget_says_so() -> None:
+def over_budget(*durations: int) -> list[str]:
+    return [
+        line("verify_over_budget", duration_ms=d, count=2, recommendation="needs_review")
+        for d in durations
+    ]
+
+
+def pregated(*durations: int) -> list[str]:
+    return [line("verify_pregated", duration_ms=d, count=1) for d in durations]
+
+
+def test_a_p95_inside_the_target_says_so() -> None:
     report = rollup.render(read(*verifications(*([1200] * 25))), [])
-    assert "within budget" in report
-    assert "OVER BUDGET" not in report
+    assert "within target" in report
+    assert "OVER TARGET" not in report
 
 
-def test_a_p95_over_the_budget_is_stated_plainly() -> None:
+def test_a_p95_over_the_target_is_stated_plainly() -> None:
     report = rollup.render(read(*verifications(*([9600] * 25))), [])
-    assert "OVER BUDGET" in report
+    assert "OVER TARGET" in report
+
+
+def test_the_gate_is_graded_against_the_perf_1_target_not_the_enforced_deadline() -> None:
+    """`request_budget_ms` now derives from the configured model's measured latency and
+    is deliberately allowed above 5s rather than 503 on every call. Grading against it
+    would mark a service as passing PERF-1 for meeting a budget relaxed to fit the model."""
+    from api.config import Config
+
+    assert Config().request_budget_ms > Config().latency_target_ms, (
+        "this test is only meaningful while the deadline sits above the target"
+    )
+    report = rollup.render(read(*verifications(*([9600] * 25))), [])
+    assert f"{Config().latency_target_ms}ms target" in report
+    assert "OVER TARGET" in report
+
+
+def test_budget_stopped_requests_are_in_the_latency_series() -> None:
+    """The defect this exists to prevent.
+
+    On a model whose median is above the deadline, most requests end in
+    `verify_over_budget`. Feeding the series from `verify_complete` alone deletes exactly
+    the slow tail a percentile exists to measure, and prints a comfortable p95 for a
+    service that verified almost nothing.
+    """
+    reading = read(*verifications(*([4300] * 5)), *over_budget(*([20700] * 95)))
+    assert len(reading.latencies[rollup.VERIFY_SERIES]) == 100
+    assert int(rollup.percentile(reading.latencies[rollup.VERIFY_SERIES], 95)) == 20700
+    assert "OVER TARGET" in rollup.render(reading, [])
+
+
+def test_pregated_requests_are_in_the_latency_series_too() -> None:
+    """The pre-gate pulls the other way — 300ms answers that would flatter the median.
+    It is in the series because it is a real response, and the share that verified
+    nothing is printed next to the number so it cannot be read alone."""
+    reading = read(*verifications(2400, 2500), *pregated(310, 305))
+    assert sorted(reading.latencies[rollup.VERIFY_SERIES]) == [305, 310, 2400, 2500]
+
+
+def test_the_gate_line_names_the_share_that_verified_nothing() -> None:
+    """A fast p95 earned by answering "not checked" quickly is not the gate being met,
+    and the fact has to sit on the same line as the number that gets quoted."""
+    report = rollup.render(read(*verifications(*([2400] * 5)), *over_budget(*([20700] * 95))), [])
+    gate = report[report.index("PERF-1 gate") : report.index("This is server-side time")]
+    assert "verified nothing" in gate
+    assert "95 of 100" in gate
+
+
+def test_a_clean_window_says_every_response_verified_something() -> None:
+    """Silence there would read as "not measured" rather than "all good"."""
+    report = rollup.render(read(*verifications(*([2400] * 25))), [])
+    assert "actually verified a label" in report
 
 
 def test_the_gate_is_measured_on_verifications_not_on_every_request() -> None:
-    """Thousands of 2ms health checks would drag any all-request p95 under the gate."""
+    """Thousands of 2ms health checks would drag any all-request p95 under the target."""
     report = rollup.render(
         read(*requests(*([2] * 500)), *verifications(*([9600] * 25))), []
     )
-    assert "OVER BUDGET" in report
+    assert "OVER TARGET" in report
 
 
 def test_the_gate_says_it_is_a_floor_not_the_stopwatch() -> None:
@@ -182,6 +244,7 @@ def test_the_gate_says_it_is_a_floor_not_the_stopwatch() -> None:
 def test_a_log_with_no_verifications_says_the_gate_is_unmeasured() -> None:
     report = rollup.render(read(*requests(3, 4, 5)), [])
     assert "unmeasured" in report
+
 
 # --- errors (LP-124, OPS-5) -----------------------------------------------------------
 

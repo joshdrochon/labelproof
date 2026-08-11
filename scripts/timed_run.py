@@ -152,10 +152,22 @@ class Run:
     request_id: str = ""
     usd: float = 0.0
     detail: str = ""
+    verdicts: list[str] = field(default_factory=list)
 
     @property
     def ok(self) -> bool:
         return self.status == 200
+
+    @property
+    def verified(self) -> bool:
+        """Whether this 200 actually contained a verification.
+
+        The pre-gate and the deadline stop both answer **200** with every field marked
+        `unreadable` — an honest response that checked nothing. Counting those as
+        successes and nothing else is how a run where every request timed out prints
+        "within target": the responses are fast, well-formed, and empty.
+        """
+        return any(verdict != "unreadable" for verdict in self.verdicts)
 
     @property
     def label(self) -> str:
@@ -201,6 +213,10 @@ def run_once(
         timings = {}
     aggregate = payload.get("aggregate", {})
     cost = payload.get("cost", {})
+    fields = payload.get("fields", [])
+    verdicts = [
+        str(row.get("verdict", "")) for row in fields if isinstance(row, dict)
+    ] if isinstance(fields, list) else []
 
     return Run(
         index=index,
@@ -213,6 +229,7 @@ def run_once(
         ),
         request_id=str(payload.get("request_id", "")),
         usd=float(cost.get("usd", 0.0)) if isinstance(cost, dict) else 0.0,
+        verdicts=verdicts,
     )
 
 
@@ -231,7 +248,12 @@ class Report:
     simulated: bool = False
     ready_status: str = ""
     model: str = ""
+    #: The deadline the service enforces. Derives from the configured model's measured
+    #: latency (api/config.py) and is deliberately allowed above the target.
     budget_ms: int = 5000
+    #: PERF-1's number. The gate is graded against this, never against the deadline —
+    #: a budget relaxed to fit a slow model must not become a lower bar to clear.
+    target_ms: int = 5000
     image_names: list[str] = field(default_factory=list)
     image_bytes: int = 0
 
@@ -256,6 +278,11 @@ class Report:
     @property
     def server_samples(self) -> list[int]:
         return [r.server_total_ms for r in self.successes if r.server_total_ms is not None]
+
+    @property
+    def unverified(self) -> list[Run]:
+        """200s that checked nothing. See `Run.verified`."""
+        return [run for run in self.successes if not run.verified]
 
     @property
     def confident(self) -> bool:
@@ -313,7 +340,8 @@ def render(report: Report) -> str:
         + (" — **simulated**" if report.simulated else "")
         + " |",
         f"| Model reported | {report.model or 'unknown'} |",
-        f"| Request budget | {report.budget_ms}ms |",
+        f"| PERF-1 target | {report.target_ms}ms |",
+        f"| Enforced deadline | {report.budget_ms}ms |",
         f"| Payload | {len(report.image_names)} image(s), "
         f"{report.image_bytes / 1024:.0f} KB total |",
     ]
@@ -361,7 +389,7 @@ def _render_gate(report: Report) -> list[str]:
         return ["PERF-1 gate: **no successful runs**, so nothing was measured.", ""]
 
     p95 = int(percentile(report.gate_samples, 95))
-    verdict = "within budget" if p95 <= report.budget_ms else "**OVER BUDGET**"
+    verdict = "within target" if p95 <= report.target_ms else "**OVER TARGET**"
     caveat = (
         ""
         if report.confident
@@ -371,11 +399,31 @@ def _render_gate(report: Report) -> list[str]:
             f"the maximum."
         )
     )
-    return [
+    out = [
         f"PERF-1 gate: observed p95 is **{p95}ms** against a "
-        f"{report.budget_ms}ms budget — {verdict}{caveat}",
+        f"{report.target_ms}ms target — {verdict}{caveat}",
         "",
     ]
+
+    # A 200 is not a verification. The pre-gate and the deadline stop both answer 200
+    # with every field unreadable, and they are fast — so a run where the model never
+    # finished in time produces quick, well-formed, empty responses and a p95 that looks
+    # like the gate being met. The share sits on the same line as the number.
+    if report.unverified:
+        out += [
+            f"**{len(report.unverified)} of {len(report.successes)} successful responses "
+            f"verified nothing** — every field came back `unreadable`, which is what the "
+            f"pre-gate and the deadline stop return. The p95 above includes them. A fast "
+            f"answer that checked no label is not PERF-1 being met.",
+            "",
+        ]
+    else:
+        out += [
+            f"All {len(report.successes)} successful responses contained a real "
+            f"verification.",
+            "",
+        ]
+    return out
 
 
 def _render_honesty(report: Report) -> list[str]:
@@ -509,16 +557,33 @@ def load_payload(
     return application, fetched
 
 
-def probe_ready(base_url: str) -> tuple[str, bool, str, int]:
+@dataclass
+class ServerFacts:
+    """What `/ready` says about the thing being timed (J-08)."""
+
+    status: str = "unreachable"
+    simulated: bool = False
+    model: str = ""
+    budget_ms: int = 5000
+    target_ms: int = 5000
+
+
+def probe_ready(base_url: str) -> ServerFacts:
     """Ask the server what it is before timing it (J-08)."""
     reply = http_get(f"{base_url.rstrip('/')}/ready")
     payload = reply.json()
     fallback = f"HTTP {reply.status}" if reply.status else "unreachable"
     status = str(payload.get("status", "")) or fallback
-    simulated = bool(payload.get("simulated", False)) or status == "sample_mode"
-    model = str(payload.get("model", ""))
-    budget = int(payload.get("request_budget_ms", 5000) or 5000)
-    return status, simulated, model, budget
+    return ServerFacts(
+        status=status,
+        simulated=bool(payload.get("simulated", False)) or status == "sample_mode",
+        model=str(payload.get("model", "")),
+        budget_ms=int(payload.get("request_budget_ms", 5000) or 5000),
+        # Older builds did not report the target. Falling back to the deadline would
+        # silently grade the gate against a relaxed budget, so fall back to PERF-1's
+        # literal number instead.
+        target_ms=int(payload.get("latency_target_ms", 5000) or 5000),
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -538,14 +603,15 @@ def main(argv: list[str] | None = None) -> int:
     if args.runs < 1:
         raise SystemExit("--runs must be at least 1.")
 
-    status, simulated, model, budget = probe_ready(args.url)
+    facts = probe_ready(args.url)
     application, images = load_payload(args.url, args.application, args.image)
 
     print(
-        f"{args.url} — {args.runs} runs, {len(images)} image(s), server says {status!r}",
+        f"{args.url} — {args.runs} runs, {len(images)} image(s), "
+        f"server says {facts.status!r}",
         file=sys.stderr,
     )
-    if simulated:
+    if facts.simulated:
         print(
             "  WARNING: sample mode. No model call is made; these are not PERF-1 "
             "numbers.",
@@ -567,10 +633,11 @@ def main(argv: list[str] | None = None) -> int:
         started_at=f"{datetime.now(UTC):%Y-%m-%d %H:%M:%S}Z",
         commit=git_commit(),
         note=args.note,
-        simulated=simulated,
-        ready_status=status,
-        model=model,
-        budget_ms=budget,
+        simulated=facts.simulated,
+        ready_status=facts.status,
+        model=facts.model,
+        budget_ms=facts.budget_ms,
+        target_ms=facts.target_ms,
         image_names=[name for name, _ in images],
         image_bytes=sum(len(data) for _, data in images),
     )
