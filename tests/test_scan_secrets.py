@@ -11,6 +11,7 @@ be mistaken for a real value.
 
 from __future__ import annotations
 
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -84,12 +85,26 @@ def test_each_named_credential_shape_is_caught(content: str, expected_rule: str)
     assert [f.rule for f in findings] == [expected_rule]
 
 
+#: Values live here and are interpolated below, so no source line in this file ever spells
+#: out a secret-keyword-and-long-value pair on its own. Writing one would make this module
+#: trip the very rule it is testing — which is exactly what used to justify exempting it
+#: from the scan, and that exemption was a writable blind spot big enough to park a real
+#: key in. In source the cases below read as a keyword followed by `{...}`, which matches
+#: nothing; at runtime they produce the real shape.
+#:
+#: (This comment was itself a finding on the first attempt, for containing an example of
+#: the pattern. Left as a note, because it is a good demonstration that the rule works.)
+LONG_VALUE = "hunter2Sup3rL0ngV4lue!!x"
+ENV_VALUE = "s3cretpasswordvalue123"
+HEX_VALUE = "9f8e7d6c5b4a39281706abcdef"
+
+
 @pytest.mark.parametrize(
     "content",
     [
-        'password = "hunter2Sup3rL0ngV4lue!!x"',
-        "DB_PASSWORD=s3cretpasswordvalue123",
-        "client_secret: 9f8e7d6c5b4a39281706abcdef",
+        f'password = "{LONG_VALUE}"',
+        f"DB_PASSWORD={ENV_VALUE}",
+        f"client_secret: {HEX_VALUE}",
     ],
     ids=["quoted", "unquoted-env", "unquoted-hex"],
 )
@@ -97,6 +112,21 @@ def test_a_long_assigned_credential_is_caught_with_no_known_prefix(content: str)
     assert [f.rule for f in scan_secrets.scan_text("app.conf", content)] == [
         "Assigned credential"
     ]
+
+
+def test_this_test_module_is_not_exempt_from_the_scanner() -> None:
+    """No file gets a free pass, least of all the scanner's own tests.
+
+    `tests/test_scan_secrets.py` and `scripts/scan_secrets.py` were both on a content
+    exemption list. Anyone could have parked a live key in either and both the pre-commit
+    hook and CI's `--all` sweep would have waved it through.
+    """
+    assert scan_secrets.CONTENT_EXEMPT == ()
+
+    for path in ("tests/test_scan_secrets.py", "scripts/scan_secrets.py"):
+        source = (REPO_ROOT / path).read_bytes()
+        assert scan_secrets.reduced_scan_reason(path, source) is None, f"{path} not scanned"
+        assert scan_secrets.scan_path(path, source) == [], f"{path} trips its own scanner"
 
 
 @pytest.mark.parametrize(
@@ -160,10 +190,67 @@ def test_the_committed_env_example_is_clean() -> None:
     assert scan_secrets.scan_path(".env.example", example.read_bytes()) == []
 
 
-def test_binary_content_is_skipped_rather_than_decoded() -> None:
+def test_a_key_hidden_in_a_binary_file_is_still_caught() -> None:
+    """Binary files used to return no findings at all.
+
+    A key pasted into a PNG's metadata, or into any file with a NUL byte in its first
+    8KB, was simply not looked at. Binary content still cannot be split into lines, so it
+    gets the prefix rules over raw bytes instead of nothing.
+    """
     png = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR" + ANTHROPIC_KEY.encode()
 
-    assert scan_secrets.scan_path("fixtures/labels/whatever.png", png) == []
+    findings = scan_secrets.scan_path("fixtures/labels/whatever.png", png)
+
+    assert [f.rule for f in findings] == ["Anthropic API key"]
+    assert ANTHROPIC_KEY not in findings[0].render()
+
+
+def test_a_key_in_an_oversized_file_is_still_caught() -> None:
+    big = b"x" * (scan_secrets._MAX_TEXT_BYTES + 1) + ANTHROPIC_KEY.encode()
+
+    assert [f.rule for f in scan_secrets.scan_path("huge.txt", big)] == ["Anthropic API key"]
+
+
+@pytest.mark.parametrize(
+    ("path", "data", "expected"),
+    [
+        ("art.png", b"\x89PNG\x00\x00 nothing here", "binary"),
+        ("huge.txt", b"y" * (scan_secrets._MAX_TEXT_BYTES + 1), "over the text-scanning"),
+        ("fine.py", b"x = 1\n", None),
+    ],
+    ids=["binary", "oversized", "ordinary"],
+)
+def test_a_file_that_cannot_be_read_as_text_says_so(
+    path: str, data: bytes, expected: str | None
+) -> None:
+    """Skipping is defensible. Skipping without saying so is not.
+
+    A gap in the check that nobody is told about is indistinguishable from a clean
+    result, so the reason is reported up to `main` and printed whether or not anything
+    was found.
+    """
+    reason = scan_secrets.reduced_scan_reason(path, data)
+
+    if expected is None:
+        assert reason is None
+    else:
+        assert reason is not None and expected in reason
+
+
+def test_the_reduced_scan_is_announced_on_stderr(tmp_path: Path) -> None:
+    art = tmp_path / "art.png"
+    art.write_bytes(b"\x89PNG\x00\x00 harmless")
+
+    result = subprocess.run(
+        [sys.executable, str(SCANNER), str(art)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0
+    assert "prefixes only" in result.stderr
+    assert "binary" in result.stderr
 
 
 # --- forbidden files, whatever is inside them ------------------------------------------
@@ -201,6 +288,12 @@ def test_a_finding_never_reprints_the_credential() -> None:
 
 def _run_git(repo: Path, *args: str) -> None:
     subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True)
+
+
+def _run_git_out(repo: Path, *args: str) -> str:
+    return subprocess.run(
+        ["git", "-C", str(repo), *args], check=True, capture_output=True, text=True
+    ).stdout
 
 
 @pytest.fixture
@@ -297,6 +390,71 @@ def test_the_hook_actually_blocks_a_commit(sandbox_repo: Path) -> None:
         check=True,
     )
     assert "oops" not in log.stdout
+
+
+# --- the commit message, which the pre-commit hook cannot see -------------------------
+
+
+def test_a_key_in_a_commit_message_is_caught(tmp_path: Path) -> None:
+    """`git commit -m "temp, key is sk-ant-..."` used to sail straight through.
+
+    pre-commit scans the index and the message is not in the index, so a key pasted into
+    a commit message went into history untouched — exactly as permanently as one in a
+    file, and considerably harder to notice afterwards.
+    """
+    message = tmp_path / "COMMIT_EDITMSG"
+    message.write_text(f"wip, remember the key is {ANTHROPIC_KEY}\n")
+
+    result = subprocess.run(
+        [sys.executable, str(SCANNER), "--message-file", str(message)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 1
+    assert "Anthropic API key" in result.stderr
+    assert ANTHROPIC_KEY not in result.stderr
+
+
+def test_an_ordinary_commit_message_passes(tmp_path: Path) -> None:
+    message = tmp_path / "COMMIT_EDITMSG"
+    message.write_text("Add the verdict card\n\nCloses: LP-100\n")
+
+    result = subprocess.run(
+        [sys.executable, str(SCANNER), "--message-file", str(message)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0
+
+
+def test_the_commit_msg_hook_blocks_the_commit(sandbox_repo: Path) -> None:
+    """End to end through git, with the real hook file from .githooks/."""
+    hooks = sandbox_repo / ".githooks"
+    hooks.mkdir()
+    (sandbox_repo / "scripts").mkdir()
+    shutil.copy2(SCANNER, sandbox_repo / "scripts" / "scan_secrets.py")
+    hook = hooks / "commit-msg"
+    hook.write_text(
+        (REPO_ROOT / ".githooks" / "commit-msg").read_text().replace("python3", sys.executable)
+    )
+    hook.chmod(0o755)
+    _run_git(sandbox_repo, "config", "core.hooksPath", ".githooks")
+
+    (sandbox_repo / "fine.py").write_text("x = 1\n")
+    _run_git(sandbox_repo, "add", "fine.py")
+    result = subprocess.run(
+        ["git", "-C", str(sandbox_repo), "commit", "-m", f"wip key {ANTHROPIC_KEY}"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode != 0, "the commit should have been refused"
+    assert "wip key" not in _run_git_out(sandbox_repo, "log", "--oneline")
 
 
 # --- the regression guard --------------------------------------------------------------

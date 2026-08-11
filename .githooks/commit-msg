@@ -1,0 +1,9 @@
+#!/bin/sh
+# Refuse a commit whose MESSAGE carries a credential (SEC-6, LP-010).
+#
+# The pre-commit hook scans the index. It cannot see the message, so
+# `git commit -m "temp, key is sk-ant-api03-..."` sailed straight through — and a key in
+# a commit message is in history exactly as permanently as a key in a file.
+#
+# Bypass with `git commit --no-verify` if you are certain it is a false positive.
+python3 "$(git rev-parse --show-toplevel)/scripts/scan_secrets.py" --message-file "$1"

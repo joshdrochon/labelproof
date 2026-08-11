@@ -185,17 +185,40 @@ FORBIDDEN_PATHS: tuple[re.Pattern[str], ...] = (
     re.compile(r"(?:^|/)\.pypirc$"),
 )
 
-#: Paths whose *content* is not scanned. Lock files and this scanner itself are all
-#: hash-dense or pattern-dense by nature.
-CONTENT_EXEMPT: tuple[re.Pattern[str], ...] = (
-    re.compile(r"(?:^|/)scripts/scan_secrets\.py$"),
-    re.compile(r"(?:^|/)tests/test_scan_secrets\.py$"),
-    re.compile(r"(?:^|/)package-lock\.json$"),
-    re.compile(r"(?:^|/)uv\.lock$"),
-    re.compile(r"(?:^|/)poetry\.lock$"),
-)
+#: Paths whose *content* is not scanned. **Deliberately empty.**
+#:
+#: It used to hold this file, its test module, and the lock files. Every one of those was
+#: a permanent, writable blind spot: anyone could park a live key in
+#: `tests/test_scan_secrets.py` and both the hook and CI's `--all` sweep would wave it
+#: through. Removing all five entries produces exactly zero false positives across the
+#: repository, because the test module now assembles its fixture values at runtime rather
+#: than writing them as literals — which is the right way to keep a scanner's own tests
+#: from tripping it. Left in place as a named extension point so that if an exemption ever
+#: becomes genuinely necessary, it lands here with a reason attached instead of being
+#: hidden in a regex somewhere.
+CONTENT_EXEMPT: tuple[re.Pattern[str], ...] = ()
 
-_MAX_SCAN_BYTES = 2_000_000
+#: Above this, a file is scanned for prefix patterns over raw bytes rather than parsed
+#: into lines. Not skipped — see `scan_path`.
+_MAX_TEXT_BYTES = 2_000_000
+
+#: The rules whose patterns are unambiguous enough to run against raw bytes, where there
+#: are no line numbers and no surrounding syntax to reason about. "Assigned credential" is
+#: excluded: it needs `key = value` context, and without it the false-positive rate on
+#: compressed data would be absurd.
+_BYTE_RULE_NAMES = frozenset(
+    {
+        "Anthropic API key",
+        "OpenAI-style API key",
+        "Private key block",
+        "AWS access key ID",
+        "GitHub token",
+        "Slack token",
+        "Google API key",
+        "Stripe live key",
+        "Fly.io API token",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -248,6 +271,44 @@ def scan_text(path: str, text: str) -> list[Finding]:
     return findings
 
 
+def reduced_scan_reason(path: str, data: bytes) -> str | None:
+    """Why this file cannot be parsed as lines of text, if it cannot.
+
+    Returned rather than swallowed, because "the scanner skipped 47 files" is something
+    the operator has to be able to find out. Silence here is how a key inside a PNG's
+    metadata gets committed under a green check.
+    """
+    if _exempt(path, CONTENT_EXEMPT):
+        return "exempted by configuration"
+    if b"\x00" in data[:8192]:
+        return "binary"
+    if len(data) > _MAX_TEXT_BYTES:
+        return f"{len(data) // 1_000_000}MB, over the text-scanning limit"
+    return None
+
+
+def scan_bytes(path: str, data: bytes) -> list[Finding]:
+    """Prefix-pattern scan over raw bytes, for content that has no lines.
+
+    Binary and oversized files used to return `[]`. A key pasted into a document's
+    metadata, or into a file that happens to be 3MB, was simply not looked at. This does
+    not recover line numbers or the assignment-shaped rule, but it does catch every
+    credential family with an unmistakable prefix, which is the ones that matter most.
+    """
+    findings: list[Finding] = []
+    text = data.decode("latin-1")  # total, lossless byte->char mapping; never raises
+    for rule in RULES:
+        if rule.name not in _BYTE_RULE_NAMES:
+            continue
+        match = rule.pattern.search(text)
+        if match is None or _is_placeholder(match.group(0)):
+            continue
+        findings.append(
+            Finding(path, 0, rule.name, redact(match.group(rule.value_group)), rule.advice)
+        )
+    return findings
+
+
 def scan_path(path: str, data: bytes) -> list[Finding]:
     """Content and filename checks for one file."""
     for pattern in FORBIDDEN_PATHS:
@@ -263,8 +324,8 @@ def scan_path(path: str, data: bytes) -> list[Finding]:
                 )
             ]
 
-    if b"\x00" in data[:8192] or len(data) > _MAX_SCAN_BYTES:
-        return []  # binary, or too large to be hand-written source
+    if reduced_scan_reason(path, data) is not None:
+        return scan_bytes(path, data)
 
     return scan_text(path, data.decode("utf-8", errors="replace"))
 
@@ -311,12 +372,32 @@ def worktree_content(path: str) -> bytes:
 # --- entry point -----------------------------------------------------------------------
 
 
-def run(mode: str, paths: list[str]) -> list[Finding]:
+@dataclass(frozen=True)
+class Scan:
+    findings: list[Finding]
+    #: `path -> why it got the reduced byte-level scan`. Reported, never silent.
+    reduced: dict[str, str]
+
+
+def _collect(sources: list[tuple[str, bytes]]) -> Scan:
+    findings: list[Finding] = []
+    reduced: dict[str, str] = {}
+    for path, data in sources:
+        reason = reduced_scan_reason(path, data)
+        if reason is not None and not any(p.search(path) for p in FORBIDDEN_PATHS):
+            reduced[path] = reason
+        findings.extend(scan_path(path, data))
+    return Scan(findings, reduced)
+
+
+def run(mode: str, paths: list[str]) -> Scan:
     if mode == "staged":
-        return [f for p in staged_files() for f in scan_path(p, staged_content(p))]
+        return _collect([(p, staged_content(p)) for p in staged_files()])
     if mode == "all":
-        return [f for p in tracked_files() for f in scan_path(p, worktree_content(p))]
-    return [f for p in paths for f in scan_path(p, worktree_content(p))]
+        return _collect([(p, worktree_content(p)) for p in tracked_files()])
+    if mode == "message":
+        return _collect([(p, worktree_content(p)) for p in paths])
+    return _collect([(p, worktree_content(p)) for p in paths])
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -333,17 +414,41 @@ def main(argv: list[str] | None = None) -> int:
     group.add_argument(
         "--all", action="store_true", help="scan every tracked file — what CI uses"
     )
+    group.add_argument(
+        "--message-file",
+        metavar="PATH",
+        help=(
+            "scan a commit message — what the commit-msg hook uses. A key pasted into "
+            "a commit message is in history forever, exactly like one in a file."
+        ),
+    )
     parser.add_argument("paths", nargs="*", help="specific files to scan")
     args = parser.parse_args(argv)
 
     if args.all:
-        mode = "all"
+        mode, targets = "all", []
+    elif args.message_file:
+        mode, targets = "message", [args.message_file]
     elif args.paths and not args.staged:
-        mode = "paths"
+        mode, targets = "paths", args.paths
     else:
-        mode = "staged"
+        mode, targets = "staged", []
 
-    findings = run(mode, args.paths)
+    scan = run(mode, targets)
+    findings = scan.findings
+
+    # Announced whether or not anything was found. A file the scanner could not read as
+    # text is a gap in the check, and a gap nobody is told about is indistinguishable
+    # from a clean result.
+    if scan.reduced:
+        print(
+            f"note: {len(scan.reduced)} file(s) scanned for key prefixes only, not line "
+            f"by line:",
+            file=sys.stderr,
+        )
+        for path, reason in sorted(scan.reduced.items()):
+            print(f"  {path} ({reason})", file=sys.stderr)
+
     if not findings:
         return 0
 
