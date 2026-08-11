@@ -13,6 +13,17 @@ regulation.
 **Fail closed.** Uncertainty about the warning is Needs review or Unreadable, never Match
 (PRD §Constraints). Every function here returns "cannot confirm" rather than a pass when
 its input is missing or ambiguous.
+
+**No verdict here is Acceptable variation.** Five of the six verdicts can apply to the
+warning statement; that one cannot. A brand name has acceptable variations — STONE'S
+THROW is Stone's Throw. The statement required by 27 CFR 16.21 does not: it is exact or
+it is wrong, and a row reading "Acceptable variation" against the government warning
+would be the tool telling an agent that a variation was fine. Where the wording is right
+but the appearance could not be confirmed, the verdict is Unreadable — which means
+exactly what happened, and can never be misread as a pass.
+
+Appearance rules (bold, capitals, prominence) live in `typography.py`; this module owns
+the text and the verdict.
 """
 
 from __future__ import annotations
@@ -23,14 +34,29 @@ from dataclasses import dataclass, field
 
 from api import canon
 from api.models import Finding, Verdict, WarningTypography
+from api.rules import typography
 
 _WHITESPACE = re.compile(r"\s+")
 _TOKEN = re.compile(r"\S+")
 
+#: Characters that are pure layout artefacts of printing and OCR, carrying no meaning.
+_INVISIBLE = str.maketrans({c: None for c in "­​‌‍﻿"})
+
+#: A hyphen immediately followed by a line break is word wrapping, not punctuation.
+#: Rejoining is safe in this one module because the canonical statement contains no
+#: hyphen at all — so no real difference in the required words can hide behind it.
+_HYPHEN_WRAP = re.compile("[-\u2010\u2011]\\s*\\n\\s*")
+
 
 def collapse_layout_whitespace(text: str) -> str:
-    """Collapse line breaks and runs of spaces. Case and punctuation are untouched."""
-    return _WHITESPACE.sub(" ", text).strip()
+    """Reduce the text to its words, changing nothing about how they are written.
+
+    Line breaks, runs of spaces, soft hyphens and end-of-line hyphenation are label
+    layout — the same statement set in a narrower column. Case and punctuation are the
+    regulation and are never touched here. This is the entire reason this module does
+    not call `normalize.normalize()`.
+    """
+    return _WHITESPACE.sub(" ", _HYPHEN_WRAP.sub("", text.translate(_INVISIBLE))).strip()
 
 
 def tokenize(text: str) -> list[str]:
@@ -80,7 +106,10 @@ def diff_summary(segments: list[DiffSegment]) -> str:
             case "delete":
                 return f'The label is missing the words "{" ".join(seg.expected)}".'
             case "insert":
-                return f'The label adds the words "{" ".join(seg.found)}", which are not part of the required statement.'
+                return (
+                    f'The label adds the words "{" ".join(seg.found)}", which are not '
+                    f"part of the required statement."
+                )
     return "The warning statement matches the required text word for word."
 
 
@@ -107,95 +136,69 @@ def header_as_written(found_text: str) -> str | None:
     return m.group(0) if m else None
 
 
-def check_header_caps(found_text: str) -> list[Finding]:
-    """WARN-2 / WARN-3 — Jenny's catch. Title case is a violation."""
+def check_header_caps(
+    found_text: str, signals: WarningTypography | None = None
+) -> list[Finding]:
+    """WARN-2 / WARN-3 — Jenny's catch. Title case is a violation.
+
+    Capitalization is read off the text itself rather than off a model signal, because
+    the text *is* the evidence: if the label says `Government Warning:` the characters
+    say so and nothing needs to be inferred.
+
+    The `header_is_all_caps` signal is used only as a contradiction check. An extractor
+    that tidied the statement into canonical form before returning it would hand us a
+    perfect string and erase the violation silently, and that is the one failure mode
+    text-only checking cannot see. When the signal says the heading was not in capitals
+    and the returned text says it was, we believe neither and route to a human.
+    """
     header = header_as_written(found_text)
     if header is None:
         return [
             Finding(
                 code="warning_header_missing",
-                message='The label does not begin with "GOVERNMENT WARNING:".',
+                message=(
+                    'The warning does not carry the heading "GOVERNMENT WARNING:". '
+                    "The statement must begin with it."
+                ),
                 citation=canon.CITATIONS["warning_format"],
+                severity=typography.SEVERITY_VIOLATION,
             )
         ]
 
     words_only = header.rstrip(":, ").strip()
-    if words_only.isupper():
-        return []
+    if not words_only.isupper():
+        return [
+            Finding(
+                code="warning_header_not_all_caps",
+                message=(
+                    f'The words "GOVERNMENT WARNING" must appear in capital letters. '
+                    f'This label reads "{words_only}".'
+                ),
+                citation=canon.CITATIONS["warning_format"],
+                severity=typography.SEVERITY_VIOLATION,
+            )
+        ]
 
-    return [
-        Finding(
-            code="warning_header_not_all_caps",
-            message=(
-                f'The words "GOVERNMENT WARNING" must appear in capital letters. '
-                f'This label reads "{words_only}".'
-            ),
-            citation=canon.CITATIONS["warning_format"],
-        )
-    ]
+    if signals is not None and signals.header_is_all_caps is False:
+        return [
+            Finding(
+                code="warning_header_caps_disputed",
+                message=(
+                    "The wording came back in capital letters, but the reading of the "
+                    "image says the heading is not capitalised. The two disagree, so "
+                    "this has not been settled — look at the heading yourself."
+                ),
+                citation=canon.CITATIONS["warning_format"],
+                severity=typography.SEVERITY_UNVERIFIED,
+            )
+        ]
+
+    return []
 
 
 def check_typography(signals: WarningTypography) -> list[Finding]:
-    """Bold requirements from the extractor's typography signals.
-
-    Every signal is tri-state. `None` means the extractor could not determine it, which
-    produces a *cannot-confirm* finding rather than silence — silence would read as a
-    pass, and the warning statement fails closed.
-    """
-    findings: list[Finding] = []
-
-    match signals.header_is_bold:
-        case False:
-            findings.append(
-                Finding(
-                    code="warning_header_not_bold",
-                    message=(
-                        'The words "GOVERNMENT WARNING" must appear in bold type. '
-                        "On this label they do not."
-                    ),
-                    citation=canon.CITATIONS["warning_format"],
-                )
-            )
-        case None:
-            findings.append(
-                Finding(
-                    code="warning_header_bold_unverified",
-                    message=(
-                        "Could not determine whether the warning heading is bold. "
-                        "Check this by eye."
-                    ),
-                    citation=canon.CITATIONS["warning_format"],
-                    severity="unverified",
-                )
-            )
-
-    # WARN-7 — the inverse rule. 16.22 requires the remainder NOT be bold.
-    match signals.body_is_bold:
-        case True:
-            findings.append(
-                Finding(
-                    code="warning_body_is_bold",
-                    message=(
-                        "Only the words \"GOVERNMENT WARNING\" may be bold. The rest of "
-                        "the statement must not be in bold type, and on this label it is."
-                    ),
-                    citation=canon.CITATIONS["warning_format"],
-                )
-            )
-        case None:
-            findings.append(
-                Finding(
-                    code="warning_body_bold_unverified",
-                    message=(
-                        "Could not determine whether the body of the warning is bold. "
-                        "Check this by eye."
-                    ),
-                    citation=canon.CITATIONS["warning_format"],
-                    severity="unverified",
-                )
-            )
-
-    return findings
+    """Every 16.22 appearance rule. Delegates to `typography.assess` (WARN-2, WARN-7)."""
+    return list(typography.assess(signals).findings)
 
 
 def type_size_context(net_contents_ml: float | None) -> str:
@@ -269,10 +272,12 @@ def evaluate(
         )
 
     diff = tokenized_diff(found_text)
-    findings = check_header_caps(found_text) + check_typography(signals)
-    text_matches = is_verbatim(found_text)
+    text_findings = check_header_caps(found_text, signals)
+    look = typography.assess(signals)
+    findings = text_findings + list(look.findings)
 
-    if not text_matches:
+    # 1. The words themselves. Everything else is secondary to "does it say the thing".
+    if not is_verbatim(found_text):
         return WarningResult(
             verdict=Verdict.MISMATCH,
             rationale=diff_summary(diff),
@@ -280,22 +285,44 @@ def evaluate(
             findings=findings,
         )
 
-    hard_findings = [f for f in findings if f.severity != "unverified"]
-    if hard_findings:
+    # 2. The label does not comply with 16.22's type-style rules. It says the right
+    #    words in the wrong type, which is a correction the applicant has to make.
+    violations = [
+        f for f in findings if f.severity in typography.ASSERTED_SEVERITIES
+    ]
+    hard_style = [f for f in violations if f.code not in look.prominence_concerns]
+    if hard_style:
         return WarningResult(
             verdict=Verdict.MISMATCH,
-            rationale=hard_findings[0].message,
+            rationale=hard_style[0].message,
             diff=diff,
             findings=findings,
         )
 
-    if findings:
-        # Text is verbatim but something could not be confirmed. Fails closed.
+    # 3. Prominence. WARN-5 puts these in front of a human rather than returning the
+    #    application: "smaller than the rest of the label" is a judgement about a
+    #    photograph, and the regulation's own line is in millimetres we cannot measure.
+    if look.prominence_concerns:
+        prominence = next(
+            f for f in findings if f.code in look.prominence_concerns
+        )
         return WarningResult(
-            verdict=Verdict.ACCEPTABLE_VARIATION,
+            verdict=Verdict.UNREADABLE,
+            rationale=prominence.message,
+            diff=diff,
+            findings=findings,
+        )
+
+    # 4. The wording is right and nothing is broken, but a bright line was left
+    #    unresolved. Not a match, and not an accusation either.
+    unresolved = [f for f in findings if f.severity == typography.SEVERITY_UNVERIFIED]
+    if unresolved:
+        return WarningResult(
+            verdict=Verdict.UNREADABLE,
             rationale=(
-                "The wording is exactly right, but some formatting could not be "
-                "confirmed from this image. Check it by eye."
+                "The wording is exactly right, but the type styling could not be "
+                "confirmed from this image, so the warning has not been fully "
+                "checked. Look at it with your own eye."
             ),
             diff=diff,
             findings=findings,
@@ -305,4 +332,5 @@ def evaluate(
         verdict=Verdict.MATCH,
         rationale="The warning statement matches the required text word for word.",
         diff=diff,
+        findings=findings,
     )
