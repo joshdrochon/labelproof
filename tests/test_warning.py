@@ -913,6 +913,14 @@ def test_only_one_typography_combination_can_reach_match(
     verdict = warning.evaluate(canon.CANONICAL_WARNING, signals).verdict
     # The model has to agree with the code at the awkward values too, or "exhaustive" is
     # a word the test uses about a grid that excludes exactly what it cannot express.
+    #
+    # CAVEAT, and do not delete the test it points at. This oracle calls
+    # `size_was_measured`, which is the function under test, so on the size dimension it
+    # is circular: it agrees with the code by construction and would keep agreeing if the
+    # code were wrong. The bold and contrast dimensions are independent and this is a real
+    # exhaustive check of those. What actually pins -1.0, 0.0 and 1000.0 is
+    # `test_an_impossible_size_ratio_is_treated_as_a_reading_that_did_not_happen`. It
+    # looks redundant beside this grid and is not.
     size_ok = (
         not typography.size_was_measured(signals)
         or signals.relative_size > typography.PROMINENCE_CONCERN_RATIO  # type: ignore[operator]
@@ -1671,6 +1679,170 @@ def test_every_reason_written_to_the_log_is_true_of_the_verdict() -> None:
         verdict = warning.evaluate_across_images(sightings).verdict
         if "about to be reported as compliant" in reason:
             assert verdict is Verdict.MATCH, f"{spec.name}: {verdict} — {reason}"
+
+
+def test_a_second_look_that_finds_the_warning_smaller_is_never_a_match() -> None:
+    """The one line that used to hold this up.
+
+    `relative_size` was the only merged signal reaching the verdict through a single
+    path — the assignment adopting the merged typography. Deleting that one line left
+    1311 tests green while a second reading measuring the warning 70% smaller came back
+    Match. It now has the second path every other merged signal already had.
+    """
+    smaller = GOOD.model_copy(update={"relative_size": 0.3})
+    stub = _Rereader(
+        typography.WarningReread(
+            warning_text=canon.CANONICAL_WARNING, typography=smaller
+        )
+    )
+    result = warning.evaluate_across_images(
+        [_sighting(0, canon.CANONICAL_WARNING, GOOD)], rereader=stub
+    )
+    assert stub.requests, "escalation did not fire"
+    assert result.verdict is Verdict.UNREADABLE
+    assert "warning_less_prominent" in {f.code for f in result.findings}
+
+
+def test_the_size_disagreement_raises_a_finding_of_its_own() -> None:
+    """The structural half. A finding travels the escalation path, so the verdict does
+    not depend solely on the merged value being adopted."""
+    smaller = GOOD.model_copy(update={"relative_size": 0.3})
+    outcome = typography.adopt_reread(
+        GOOD, typography.WarningReread(typography=smaller)
+    )
+    assert "warning_size_disputed" in {f.code for f in outcome.findings}
+
+
+def test_a_size_the_first_pass_never_measured_also_raises_the_finding() -> None:
+    """The same hole one step over: nothing to disagree with is not agreement."""
+    unmeasured = GOOD.model_copy(update={"relative_size": None})
+    smaller = GOOD.model_copy(update={"relative_size": 0.3})
+    outcome = typography.adopt_reread(
+        unmeasured, typography.WarningReread(typography=smaller)
+    )
+    assert "warning_size_disputed" in {f.code for f in outcome.findings}
+
+
+def test_two_readings_that_agree_the_warning_is_fine_raise_nothing() -> None:
+    outcome = typography.adopt_reread(GOOD, typography.WarningReread(typography=GOOD))
+    assert outcome.findings == ()
+
+
+def test_a_second_look_that_agrees_it_is_small_adds_no_extra_noise() -> None:
+    """Both readings concerned is not a disagreement — the prominence finding already
+    fires off the first pass, so a dispute finding would be a duplicate."""
+    smaller = GOOD.model_copy(update={"relative_size": 0.3})
+    outcome = typography.adopt_reread(
+        smaller, typography.WarningReread(typography=smaller.model_copy(
+            update={"relative_size": 0.25}))
+    )
+    assert "warning_size_disputed" not in {f.code for f in outcome.findings}
+
+
+@pytest.mark.parametrize(
+    ("shape", "value"),
+    [
+        ("a list of lines", ["GOVERNMENT WARNING: ...", "line 2"]),
+        ("an object", {"text": "GOVERNMENT WARNING: ..."}),
+        ("a bool", True),
+        ("a number", 42),
+    ],
+)
+def test_a_rereader_returning_the_wrong_shape_of_text_is_not_fatal(
+    shape: str, value: object
+) -> None:
+    """The guard moved last round and the consumer did not.
+
+    `WarningReread` is a plain dataclass with no runtime validation, so an adapter that
+    json-parses a model response hands over whatever the model produced. When the first
+    pass had no text, `_merge_text` adopted the second reading without touching it, and
+    `.strip()` raised out through verify() — on the escalation case that matters most.
+    """
+
+    class Malformed:
+        name = "malformed"
+
+        def reread_warning(
+            self, request: typography.WarningRereadRequest
+        ) -> typography.WarningReread:
+            return typography.WarningReread(
+                warning_text=value,  # type: ignore[arg-type]
+                typography=GOOD,
+            )
+
+    result = warning.evaluate_across_images(
+        [_sighting(0, None)], rereader=Malformed()
+    )
+    assert result.verdict is Verdict.MISSING
+
+
+def test_disagreeing_panels_on_top_of_a_defective_warning_still_work() -> None:
+    """The path no test covered. Two panels disagree *and* the chosen reading is itself
+    defective, so the verdict is already not Match — the branch that then had to leave
+    the rationale alone. A mutation there raised UnboundLocalError and the suite stayed
+    green, because every disagreeing-panel test used two readable, valid statements."""
+    result = warning.evaluate_across_images(
+        [
+            _sighting(0, _retitled("Government Warning:")),
+            _sighting(1, canon.CANONICAL_WARNING.replace("birth defects", "harm")),
+        ]
+    )
+    assert result.verdict is Verdict.MISMATCH
+    assert result.rationale
+    assert "warning_differs_between_images" in {f.code for f in result.findings}
+
+
+def test_a_demoted_row_is_not_captioned_as_a_perfect_match() -> None:
+    """When the panels disagree and the chosen reading is verbatim, the row becomes
+    Unreadable — and the sentence beside it must stop saying the words are perfect."""
+    reworded = canon.CANONICAL_WARNING.replace("birth defects", "health risks")
+    result = warning.evaluate_across_images(
+        [_sighting(0, canon.CANONICAL_WARNING), _sighting(1, reworded)]
+    )
+    assert result.verdict is Verdict.UNREADABLE
+    assert "word for word" not in result.rationale
+    assert "more than one image" in result.rationale.lower()
+
+
+def test_no_second_look_is_asked_for_when_the_panels_disagree() -> None:
+    """The reason string was wrong for the third time.
+
+    `escalation_reason` sees the chosen sighting, not the other panels, so an
+    application whose two panels carried different warnings — already headed for
+    Unreadable — logged "about to be reported as compliant". The panels are compared
+    before the second look is decided on now, and a second look could not settle it
+    anyway: the request targets one image and the question is which panel to believe.
+    """
+    reworded = canon.CANONICAL_WARNING.replace("birth defects", "health risks")
+    stub = _Rereader(typography.WarningReread(typography=GOOD))
+    result = warning.evaluate_across_images(
+        [_sighting(0, canon.CANONICAL_WARNING), _sighting(1, reworded)], rereader=stub
+    )
+    assert stub.requests == []
+    assert result.verdict is Verdict.UNREADABLE
+
+
+def test_every_reason_is_true_of_the_verdict_beyond_the_fixture_set() -> None:
+    """The pinning test only looped CATALOG, and no fixture has two panels carrying
+    different warning text — so the case that broke it was outside the loop."""
+    reworded = canon.CANONICAL_WARNING.replace("birth defects", "health risks")
+    truncated = canon.CANONICAL_WARNING[: canon.CANONICAL_WARNING.index("(2)")].strip()
+    cases: list[list[warning.WarningSighting]] = [
+        [_sighting(0, canon.CANONICAL_WARNING), _sighting(1, reworded)],
+        [_sighting(0, reworded), _sighting(1, canon.CANONICAL_WARNING)],
+        [_sighting(0, truncated), _sighting(1, canon.CANONICAL_WARNING)],
+        [_sighting(0, None), _sighting(1, canon.CANONICAL_WARNING)],
+        [_sighting(0, canon.CANONICAL_WARNING), _sighting(1, canon.CANONICAL_WARNING)],
+        [_sighting(0, canon.CANONICAL_WARNING, WarningTypography())],
+    ]
+    for sightings in cases:
+        stub = _Rereader(typography.WarningReread(typography=GOOD))
+        result = warning.evaluate_across_images(sightings, rereader=stub)
+        for request in stub.requests:
+            if "about to be reported as compliant" in request.reason:
+                assert result.verdict is Verdict.MATCH, (
+                    f"{request.reason} against {result.verdict}"
+                )
 
 
 def test_escalation_does_not_fire_when_the_first_pass_already_found_a_violation() -> None:

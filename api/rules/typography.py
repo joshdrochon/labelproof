@@ -250,6 +250,11 @@ def check_prominence(signals: WarningTypography) -> list[Finding]:
     ]
 
 
+def size_is_concerning(ratio: float | None) -> bool:
+    """Is this a measured ratio that says the warning is meaningfully smaller?"""
+    return ratio is not None and 0.0 < ratio <= PROMINENCE_CONCERN_RATIO
+
+
 def size_was_measured(signals: WarningTypography) -> bool:
     """Did the reading actually produce a size ratio?
 
@@ -633,6 +638,29 @@ def adopt_reread(
         )
         for name in disagreements
     ]
+
+    # **Size needs a finding of its own, and this is why.** Every other merged signal
+    # reaches the verdict twice: once through the merged value, and once through a
+    # finding raised here. `relative_size` reached it only through the merged value, so
+    # the single assignment that adopts the merge was the only thing holding the
+    # prominence check up — delete that one line and a second look measuring the warning
+    # 70% smaller came back Match. A second, independent path is the fix; another test
+    # would only have pinned the one instance.
+    if size_is_concerning(second.relative_size) and not size_is_concerning(
+        first.relative_size
+    ):
+        findings.append(
+            Finding(
+                code="warning_size_disputed",
+                message=(
+                    "A second reading measured the warning as noticeably smaller than "
+                    "the rest of the label, and the first did not. Its size has not "
+                    "been settled — compare it against the surrounding text yourself."
+                ),
+                citation=canon.CITATIONS["warning_format"],
+                severity=SEVERITY_UNVERIFIED,
+            )
+        )
 
     text, text_finding = _merge_text(first_text, reread.warning_text)
     if text_finding is not None:

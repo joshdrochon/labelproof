@@ -56,6 +56,23 @@ rename it unilaterally.
 
 Appearance rules (bold, capitals, prominence) live in `typography.py`; this module owns
 the text and the verdict.
+
+**A lesson from three rounds of review, worth more than any single fix below.** Three
+times this module shipped a protection on the warning verdict that rested on exactly one
+line, and each time the suite was fully green with that line removed:
+
+1. an `if` inside `evaluate` that demoted an unconfirmed reading;
+2. `_with_findings`, a wrapper bolted beside `evaluate` that demoted a disputed reread;
+3. `signals = merged.typography`, the assignment adopting an escalated reading — deleted,
+   a second look measuring the warning 70% smaller came back Match.
+
+Each was found by mutation, not by review or by adding tests. The conclusion is not "add
+another test", because a test pins one instance and the shape survives. It is that
+**anything protecting this verdict needs a second, independent path to it.** The pattern
+that works is `escalation_findings`: a finding travels to the verdict alongside the value
+it describes, so no single deletion can silence both. `relative_size` was the last merged
+signal without one — every signal has one now, and a new signal without one is a bug
+waiting for the next sweep.
 """
 
 from __future__ import annotations
@@ -627,6 +644,13 @@ CHECK_MANIFEST: Final[tuple[Check, ...]] = (
         outcome="Unreadable — not settled, a person must look",
     ),
     Check(
+        code="warning_size_disputed",
+        checks="two readings agree about whether the warning is printed too small",
+        citation="27 CFR 16.22",
+        evidence="two size ratios that disagreed",
+        outcome="Unreadable — not settled, a person must look",
+    ),
+    Check(
         code="warning_typography_disputed",
         checks="two readings of the same label agree about the type styling",
         citation="27 CFR 16.22",
@@ -818,10 +842,16 @@ def _escalate(
     parses into. Neither is exotic — the second is the obvious shape of a
     half-finished adapter — and both raised `AttributeError` out through `verify()`.
 
-    There is no timeout here. The whole of `verify()` runs inside the request budget the
-    route enforces (LP-079), so a hanging adapter cannot hang the request; it spends the
-    budget and the agent gets Needs review. An adapter still owes its own timeout, the
-    same as the main extraction path.
+    There is no timeout here, and two consequences of that are worth stating rather than
+    leaving for whoever wires the first adapter.
+
+    `POST /verify` runs `verify()` in `asyncio.to_thread` under `wait_for`, so a hanging
+    adapter does return Needs review on time — but the thread is abandoned, not killed,
+    so it leaks one thread per affected request. And `api/batch/worker.py` calls the same
+    `verify()` with no deadline at all, so a hanging rereader would hang a batch worker
+    indefinitely. Neither is reachable today because nothing wires a rereader; both
+    become reachable the moment one is wired, which is when an adapter-side timeout stops
+    being good practice and starts being required.
     """
     request = typography.escalation_request(
         signals,
@@ -839,6 +869,16 @@ def _escalate(
             return None
         supplied: object = returned.typography
         if supplied is not None and not isinstance(supplied, WarningTypography):
+            return None
+        # The text needs the same check as the typography, and for the same reason.
+        # `WarningReread` is a plain dataclass with no runtime validation, so an adapter
+        # that json-parses a model response hands over whatever the model produced — a
+        # list of lines, an object, a bool. It reached `.strip()` and raised out through
+        # verify(), and the path was the escalation case that matters most: the first
+        # pass could not read the statement, so `_merge_text` adopts the second reading
+        # without ever touching it.
+        text_in: object = returned.warning_text
+        if text_in is not None and not isinstance(text_in, str):
             return None
         return typography.adopt_reread(signals, returned, first_text=text)
     except Exception:  # any adapter failure degrades to the first pass (NET-3)
@@ -971,7 +1011,15 @@ def evaluate_across_images(
     legible = chosen.legible if chosen else True
     escalation_findings: list[Finding] = []
 
-    if rereader is not None and typography.needs_escalation(
+    # The panels are compared before the second look is decided on, not after. Asking
+    # `escalation_reason` about the chosen sighting alone produced "about to be reported
+    # as compliant" for an application whose two panels carried different warnings and
+    # whose verdict was already Unreadable — a false line in the audit trail. A second
+    # look could not settle it either: the request targets one image and one region, and
+    # the question is which of two panels to believe.
+    note = conflicting_sightings_note(sightings, chosen)
+
+    if rereader is not None and note is None and typography.needs_escalation(
         signals, warning_text=text, legible=legible
     ):
         merged = _escalate(
@@ -990,20 +1038,19 @@ def evaluate_across_images(
         net_contents_ml=net_contents_ml,
         extra_findings=escalation_findings,
     )
-    note = conflicting_sightings_note(sightings, chosen)
     if note is None:
         return result
 
-    # A disagreement between panels can never leave the label reported as clean.
-    verdict = result.verdict
-    rationale = result.rationale
-    if verdict is Verdict.MATCH:
-        verdict = Verdict.UNREADABLE
-        rationale = note.message
-
+    # A disagreement between panels can never leave the label reported as clean. Written
+    # without rebindable locals: the two-step version had `rationale` assigned on one
+    # line and overwritten on another, so deleting either left the block still working
+    # for some inputs — one of them raising UnboundLocalError only on a path no test
+    # covered, the other quietly captioning an Unreadable row "matches the required text
+    # word for word". Both were mutation survivors.
+    demoted = result.verdict is Verdict.MATCH
     return WarningResult(
-        verdict=verdict,
-        rationale=rationale,
+        verdict=Verdict.UNREADABLE if demoted else result.verdict,
+        rationale=note.message if demoted else result.rationale,
         diff=result.diff,
         findings=[*result.findings, note],
         comparison=result.comparison,
