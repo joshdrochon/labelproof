@@ -26,15 +26,14 @@ app = "labelproof"
 # 60–70 ms from the west coast. Against a multi-second model call that is not decisive,
 # but it is free and it is checkable.
 #
-# Two reasons that used to be here have been removed because nothing supports them:
+# One reason that used to be here is gone: "the shortest hop to the model provider" was
+# plausible and never measured from inside this app against any other region.
 #
-#   - "the shortest hop to the model provider" — plausible, never measured from inside
-#     this app against any other region.
-#   - "the service and its only outbound dependency are both inside the continental US,
-#     so data residency has a one-word answer" — NOT TRUE AS SHIPPED. The adapter does
-#     not set `inference_geo`, so model requests follow the workspace default, which is
-#     global unless configured. The compute is in Virginia; where inference runs is a
-#     separate setting. Do not restate this to an agency until the pin ships.
+# Data residency is a separate matter and is NOT established by this line. The region
+# places the compute; where inference runs is `inference_geo`, set to "us" in
+# api/config.py and asserted on the outgoing request by tests/test_adapter.py. Both are
+# needed, and the second one is the one an agency will ask about — see README.md, which
+# also carries the caveat about the workspace-level allowlist.
 primary_region = "iad"
 
 # In-flight verifications get a chance to finish before a machine goes away, so a deploy

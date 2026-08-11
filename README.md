@@ -34,22 +34,32 @@ region to them — roughly 5–15 ms round trip against 60–70 ms from the west
 budget dominated by a multi-second model call that is not decisive, but it costs nothing
 and it is the reason that survives scrutiny.
 
-Two claims that were here have been removed because we cannot currently support them:
+One claim that used to be here is gone: *"the shortest hop to the provider."* Plausible,
+never measured. Nobody has timed `iad → api.anthropic.com` against another region from
+inside this app, so it stays out until someone does.
 
-- *"the shortest hop to the provider"* — plausible, unmeasured. Nobody has timed
-  `iad → api.anthropic.com` against another region from inside this app. It stays out
-  until someone does.
-- *"the service and its only outbound dependency both sit inside the continental US, so
-  the data-residency question has a one-word answer"* — **not true as shipped.** The
-  adapter does not set `inference_geo`, so requests follow the workspace default, which
-  is global unless configured otherwise. The app's *compute* is in Virginia; where the
-  model runs is a separate setting nobody had set. Told to a federal agency, that was a
-  claim the code did not back, which is worse than making no claim at all.
+### Data residency
 
-Pinning `inference_geo="us"` in the adapter is tracked separately. **Until that ships and
-the workspace allowlist is confirmed, do not tell anyone this deployment guarantees US
-data residency.** When it does ship, this section can say so — and `/ready` reporting the
-geo would make it checkable rather than asserted.
+**The compute runs in Virginia and inference is pinned to the United States.** Both halves
+are in the code rather than inferred from the region: `api/config.py` sets
+`inference_geo = "us"`, `api/provider/anthropic_adapter.py` puts it on every extraction
+request, and `tests/test_adapter.py` asserts the outgoing request carries it. Without that
+parameter a request follows the workspace's default inference geography — `global` unless
+someone configured otherwise — so this is a setting, not a consequence of deploying to
+`iad`.
+
+**The caveat that remains, and it is worth raising before an agency does.** The pin is
+made by this application. It is enforced against the Anthropic workspace's
+`allowed_inference_geos` allowlist, which is configured outside this repository — so the
+guarantee is only as strong as that workspace's configuration, and confirming it is part
+of any procurement conversation rather than something this deployment can demonstrate on
+its own.
+
+*(An earlier version of this section said the adapter did not set `inference_geo` at all.
+That was written while the fix was in flight and became false when it landed — it
+instructed staff to withhold a true compliance property from the customer who most needs
+it. Both directions of that error are the same mistake: describing the code from memory
+instead of reading it.)*
 
 ### Deploying
 
