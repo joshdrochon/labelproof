@@ -9,6 +9,7 @@ import pytest
 from api import canon
 from api.models import (
     Application,
+    BoundingBox,
     Commodity,
     FieldName,
     FieldResult,
@@ -1088,6 +1089,110 @@ def test_the_warning_row_points_at_a_region_on_the_picture() -> None:
     row = _warning_row("tc06_buried_warning")
     assert row.evidence is not None
     assert row.evidence.bbox is not None
+
+
+# --- escalation, wired ----------------------------------------------------------------
+#
+# The hook used to exist only in this file's sibling. It is now a parameter on
+# `evaluate_across_images`, defaulting to None, so a provider adapter can engage it
+# without the pipeline changing shape — and so it can be proved to engage at all.
+
+
+class _Rereader:
+    """A stub stronger model. Records what it was asked, returns what it was told to."""
+
+    name = "stub"
+
+    def __init__(self, reply: typography.WarningReread) -> None:
+        self.reply = reply
+        self.requests: list[typography.WarningRereadRequest] = []
+
+    def reread_warning(
+        self, request: typography.WarningRereadRequest
+    ) -> typography.WarningReread:
+        self.requests.append(request)
+        return self.reply
+
+
+def test_escalation_engages_on_a_warning_about_to_pass() -> None:
+    """The whole point of finding #3: the net has to be under the pass."""
+    stub = _Rereader(typography.WarningReread(typography=GOOD))
+    warning.evaluate_across_images(
+        [_sighting(0, canon.CANONICAL_WARNING, GOOD)], rereader=stub
+    )
+    assert len(stub.requests) == 1
+    assert "compliant" in stub.requests[0].reason
+
+
+def test_a_stronger_model_can_overturn_a_pass() -> None:
+    """A confident wrong answer from the fast model is the measured failure. This is
+    the path that catches it."""
+    stub = _Rereader(
+        typography.WarningReread(typography=WarningTypography(body_is_bold=True))
+    )
+    result = warning.evaluate_across_images(
+        [_sighting(0, canon.CANONICAL_WARNING, GOOD)], rereader=stub
+    )
+    assert result.verdict is not Verdict.MATCH
+    assert "warning_typography_disputed" in {f.code for f in result.findings}
+
+
+def test_escalation_carries_the_region_so_the_crop_is_not_guessed() -> None:
+    stub = _Rereader(typography.WarningReread(typography=GOOD))
+    box = BoundingBox(x0=0.1, y0=0.7, x1=0.9, y1=0.95)
+    warning.evaluate_across_images(
+        [warning.WarningSighting(
+            image_index=2, text=canon.CANONICAL_WARNING, typography=GOOD, bbox=box
+        )],
+        rereader=stub,
+    )
+    assert stub.requests[0].image_index == 2
+    assert stub.requests[0].bbox == box
+
+
+def test_escalation_recovers_a_warning_the_first_pass_could_not_read() -> None:
+    """Unreadable is the only verdict a second look can improve, and it can only improve
+    it by supplying words the first pass never had."""
+    stub = _Rereader(
+        typography.WarningReread(warning_text=canon.CANONICAL_WARNING, typography=GOOD)
+    )
+    result = warning.evaluate_across_images(
+        [_sighting(0, None, GOOD, legible=False)], rereader=stub
+    )
+    assert result.verdict is Verdict.MATCH
+
+
+def test_no_rereader_leaves_the_first_pass_exactly_as_it_was() -> None:
+    with_hook = warning.evaluate_across_images(
+        [_sighting(0, canon.CANONICAL_WARNING, GOOD)], rereader=None
+    )
+    assert with_hook.verdict is Verdict.MATCH
+
+
+def test_a_rereader_that_blows_up_does_not_take_the_verification_with_it() -> None:
+    """NET-3. The first pass already fails closed, so losing the second look costs
+    certainty, never safety."""
+
+    class Broken:
+        name = "broken"
+
+        def reread_warning(
+            self, request: typography.WarningRereadRequest
+        ) -> typography.WarningReread:
+            raise RuntimeError("provider unreachable")
+
+    result = warning.evaluate_across_images(
+        [_sighting(0, canon.CANONICAL_WARNING, GOOD)], rereader=Broken()
+    )
+    assert result.verdict is Verdict.MATCH
+
+
+def test_escalation_does_not_fire_when_the_first_pass_already_found_a_violation() -> None:
+    stub = _Rereader(typography.WarningReread(typography=GOOD))
+    warning.evaluate_across_images(
+        [_sighting(0, canon.CANONICAL_WARNING, _BOLD_BODY)], rereader=stub
+    )
+    assert stub.requests == []
 
 
 # --- LP-216: the warning fixture set, exercised end to end -----------------------------

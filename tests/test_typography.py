@@ -262,31 +262,49 @@ def test_escalation_fires_when_the_warning_could_not_be_read() -> None:
     assert typography.needs_escalation(answered, warning_text="text", legible=False)
 
 
-def test_escalation_does_not_fire_when_everything_was_answered() -> None:
-    signals = WarningTypography(header_is_bold=True, body_is_bold=False)
-    assert not typography.needs_escalation(signals, warning_text="GOVERNMENT WARNING: ...")
+def test_escalation_fires_on_the_pass() -> None:
+    """The change that matters. The spike measured the fast model abstaining zero times
+    in sixty signals and answering wrongly several times, toward compliance — so a net
+    strung across abstentions alone would have caught nothing at all.
+
+    A warning about to be reported compliant on the strength of a model's opinion about
+    pixels is exactly the case worth a second reading.
+    """
+    clean = WarningTypography(header_is_bold=True, body_is_bold=False, contrast_ok=True)
+    assert typography.needs_escalation(clean, warning_text="GOVERNMENT WARNING: ...")
+    reason = typography.escalation_reason(clean, warning_text="GOVERNMENT WARNING: ...")
+    assert reason is not None and "compliant" in reason
 
 
 def test_escalation_does_not_fire_on_a_violation() -> None:
-    """A `False` is an answer. Re-asking until the model relents is not a design."""
-    signals = WarningTypography(header_is_bold=False, body_is_bold=True)
-    assert not typography.needs_escalation(signals, warning_text="GOVERNMENT WARNING: ...")
+    """A `False` is an answer, and the merge refuses to clear it, so a second reading
+    could only cost a call. Re-asking until the model relents is not a design."""
+    for signals in (
+        WarningTypography(header_is_bold=False, body_is_bold=True, contrast_ok=True),
+        WarningTypography(header_is_bold=True, body_is_bold=False, contrast_ok=False),
+        WarningTypography(header_is_bold=True, body_is_bold=False, contrast_ok=True,
+                          relative_size=0.3),
+    ):
+        assert not typography.needs_escalation(
+            signals, warning_text="GOVERNMENT WARNING: ..."
+        )
 
 
-def test_escalation_ignores_prominence_signals() -> None:
+def test_escalation_does_not_ask_about_size() -> None:
     """A stronger model cannot measure millimetres either (WARN-9)."""
-    signals = WarningTypography(header_is_bold=True, body_is_bold=False, relative_size=None)
-    assert not typography.needs_escalation(signals, warning_text="x")
+    assert "relative_size" not in typography.ESCALATION_SIGNALS
 
 
-def test_unresolved_signals_lists_only_the_bright_lines() -> None:
+def test_unresolved_signals_lists_every_bright_line() -> None:
     signals = WarningTypography(header_is_bold=None, body_is_bold=None, contrast_ok=None)
-    assert typography.unresolved_signals(signals) == ("header_is_bold", "body_is_bold")
+    assert typography.unresolved_signals(signals) == (
+        "header_is_bold", "body_is_bold", "contrast_ok",
+    )
 
 
 def test_escalation_request_says_what_it_wants_and_why() -> None:
     request = typography.escalation_request(
-        WarningTypography(header_is_bold=None, body_is_bold=False),
+        WarningTypography(header_is_bold=None, body_is_bold=False, contrast_ok=True),
         image_index=1,
         bbox=BoundingBox(x0=0.1, y0=0.7, x1=0.9, y1=0.9),
         warning_text="GOVERNMENT WARNING: ...",
@@ -294,6 +312,15 @@ def test_escalation_request_says_what_it_wants_and_why() -> None:
     assert request.image_index == 1
     assert request.wanted == ("header_is_bold",)
     assert "header is bold" in request.reason
+
+
+def test_a_request_on_a_clean_reading_re_asks_every_bright_line() -> None:
+    request = typography.escalation_request(
+        WarningTypography(header_is_bold=True, body_is_bold=False, contrast_ok=True),
+        image_index=0,
+        warning_text="GOVERNMENT WARNING: ...",
+    )
+    assert request.wanted == typography.ESCALATION_SIGNALS
 
 
 def test_escalation_request_for_an_unreadable_warning_asks_for_the_text_too() -> None:
@@ -311,74 +338,134 @@ def _reread(**kwargs: bool | None) -> typography.WarningReread:
 
 
 def test_a_second_look_fills_a_blank() -> None:
-    merged, findings = typography.adopt_reread(
+    outcome = typography.adopt_reread(
         WarningTypography(header_is_bold=None, body_is_bold=False),
         _reread(header_is_bold=True),
     )
-    assert merged.header_is_bold is True
-    assert merged.body_is_bold is False
-    assert findings == ()
+    assert outcome.typography.header_is_bold is True
+    assert outcome.typography.body_is_bold is False
+    assert outcome.findings == ()
 
 
 def test_a_second_look_can_report_a_violation_the_first_pass_missed() -> None:
-    merged, _ = typography.adopt_reread(
+    outcome = typography.adopt_reread(
         WarningTypography(body_is_bold=None), _reread(body_is_bold=True)
     )
-    assert merged.body_is_bold is True
+    assert outcome.typography.body_is_bold is True
 
 
 def test_a_second_look_cannot_overturn_a_recorded_violation() -> None:
     """The whole safety case. A bigger model does not get to clear a violation."""
-    merged, findings = typography.adopt_reread(
+    outcome = typography.adopt_reread(
         WarningTypography(header_is_bold=False), _reread(header_is_bold=True)
     )
-    assert merged.header_is_bold is None
-    assert "warning_typography_disputed" in _codes(findings)
+    assert outcome.typography.header_is_bold is None
+    assert "warning_typography_disputed" in _codes(outcome.findings)
 
 
 def test_a_second_look_cannot_erase_an_answer_by_abstaining() -> None:
-    merged, findings = typography.adopt_reread(
+    outcome = typography.adopt_reread(
         WarningTypography(header_is_bold=False, body_is_bold=True), _reread()
     )
-    assert merged.header_is_bold is False
-    assert merged.body_is_bold is True
-    assert findings == ()
+    assert outcome.typography.header_is_bold is False
+    assert outcome.typography.body_is_bold is True
+    assert outcome.findings == ()
 
 
 def test_disagreement_collapses_to_unknown_not_to_the_stronger_model() -> None:
-    merged, findings = typography.adopt_reread(
+    outcome = typography.adopt_reread(
         WarningTypography(body_is_bold=True), _reread(body_is_bold=False)
     )
-    assert merged.body_is_bold is None
-    assert findings[0].severity == typography.SEVERITY_UNVERIFIED
+    assert outcome.typography.body_is_bold is None
+    assert outcome.findings[0].severity == typography.SEVERITY_UNVERIFIED
 
 
 def test_agreement_stands() -> None:
-    merged, findings = typography.adopt_reread(
+    outcome = typography.adopt_reread(
         WarningTypography(header_is_bold=True, body_is_bold=False),
         _reread(header_is_bold=True, body_is_bold=False),
     )
-    assert merged.header_is_bold is True
-    assert findings == ()
+    assert outcome.typography.header_is_bold is True
+    assert outcome.findings == ()
 
 
 def test_a_reread_with_nothing_in_it_changes_nothing() -> None:
     first = WarningTypography(header_is_bold=True, body_is_bold=False, relative_size=0.9)
-    merged, findings = typography.adopt_reread(first, typography.WarningReread())
-    assert merged == first
-    assert findings == ()
+    outcome = typography.adopt_reread(first, typography.WarningReread())
+    assert outcome.typography == first
+    assert outcome.findings == ()
 
 
-def test_relative_size_is_kept_not_averaged() -> None:
-    merged, _ = typography.adopt_reread(
-        WarningTypography(relative_size=0.4), _reread_size(0.9)
-    )
-    assert merged.relative_size == 0.4
+def test_relative_size_takes_the_more_concerning_reading() -> None:
+    """The asymmetry the booleans use, pointing the same way.
+
+    Keeping the first reading discarded a stronger model's 0.4 in favour of a weaker
+    model's 1.0 — a measured violation thrown away on the grounds that it arrived
+    second. The two are not averaged either; nobody took that measurement.
+    """
+    for first, second in ((0.4, 0.9), (0.9, 0.4)):
+        outcome = typography.adopt_reread(
+            WarningTypography(relative_size=first), _reread_size(second)
+        )
+        assert outcome.typography.relative_size == 0.4
 
 
 def test_relative_size_is_filled_when_absent() -> None:
-    merged, _ = typography.adopt_reread(WarningTypography(), _reread_size(0.9))
-    assert merged.relative_size == 0.9
+    outcome = typography.adopt_reread(WarningTypography(), _reread_size(0.9))
+    assert outcome.typography.relative_size == 0.9
+
+
+# --- escalation: the words, not just the type styling ---------------------------------
+#
+# `escalation_request` asks for `warning_text` when the first pass could not read the
+# statement, and the merge used to ignore it entirely — so the one escalation case that
+# could turn an Unreadable into a real verdict had no path home.
+
+
+def _reread_text(text: str | None, **signals: bool | None) -> typography.WarningReread:
+    return typography.WarningReread(
+        warning_text=text, typography=WarningTypography(**signals), model="strong"
+    )
+
+
+def test_a_second_look_supplies_words_the_first_pass_could_not_read() -> None:
+    """The case escalation exists for."""
+    outcome = typography.adopt_reread(
+        WarningTypography(), _reread_text("GOVERNMENT WARNING: ..."), first_text=None
+    )
+    assert outcome.warning_text == "GOVERNMENT WARNING: ..."
+    assert outcome.findings == ()
+
+
+def test_a_blank_second_look_does_not_erase_the_words_we_had() -> None:
+    outcome = typography.adopt_reread(
+        WarningTypography(), _reread_text(None), first_text="GOVERNMENT WARNING: ..."
+    )
+    assert outcome.warning_text == "GOVERNMENT WARNING: ..."
+
+
+def test_a_second_look_does_not_rewrite_words_the_first_pass_already_read() -> None:
+    """"The stronger model saw different words" is not evidence about the label. It is
+    evidence that one of the two reads is wrong, and that goes to a person."""
+    outcome = typography.adopt_reread(
+        WarningTypography(),
+        _reread_text("GOVERNMENT WARNING: something else"),
+        first_text="GOVERNMENT WARNING: (1) According to the Surgeon General",
+    )
+    assert outcome.warning_text == "GOVERNMENT WARNING: (1) According to the Surgeon General"
+    assert "warning_text_disputed" in _codes(outcome.findings)
+    assert outcome.findings[0].severity == typography.SEVERITY_UNVERIFIED
+
+
+def test_two_readings_that_differ_only_in_line_breaks_do_not_dispute() -> None:
+    """Layout is not wording — the same rule the text comparison uses, and the same
+    implementation, imported rather than copied."""
+    outcome = typography.adopt_reread(
+        WarningTypography(),
+        _reread_text("GOVERNMENT WARNING:\n(1) According\nto the Surgeon General"),
+        first_text="GOVERNMENT WARNING: (1) According to the Surgeon General",
+    )
+    assert outcome.findings == ()
 
 
 def _reread_size(value: float) -> typography.WarningReread:
@@ -391,13 +478,13 @@ def _reread_size(value: float) -> typography.WarningReread:
 def test_merge_never_invents_compliance(first: bool | None, second: bool | None) -> None:
     """Exhaustive: the merged value is True only when somebody actually saw True and
     nobody saw otherwise."""
-    merged, _ = typography.adopt_reread(
+    outcome = typography.adopt_reread(
         WarningTypography(header_is_bold=first), _reread(header_is_bold=second)
     )
     expected_true = (first is True and second is not False) or (
         first is None and second is True
     )
-    assert (merged.header_is_bold is True) is expected_true
+    assert (outcome.typography.header_is_bold is True) is expected_true
 
 
 def test_the_rereader_protocol_accepts_a_stub() -> None:
@@ -435,11 +522,11 @@ def test_a_stub_that_abstains_is_a_valid_rereader() -> None:
             return typography.WarningReread(typography=WarningTypography())
 
     first = WarningTypography(header_is_bold=None, body_is_bold=False, contrast_ok=True)
-    merged, findings = typography.adopt_reread(
+    outcome = typography.adopt_reread(
         first, Abstainer().reread_warning(
             typography.escalation_request(first, image_index=0, warning_text="x")
         )
     )
-    assert merged.header_is_bold is None
-    assert findings == ()
-    assert not typography.assess(merged).is_clean
+    assert outcome.typography.header_is_bold is None
+    assert outcome.findings == ()
+    assert not typography.assess(outcome.typography).is_clean

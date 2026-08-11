@@ -35,7 +35,7 @@ from dataclasses import dataclass, field
 from typing import Final
 
 from api import canon
-from api.models import Finding, Verdict, WarningTypography
+from api.models import BoundingBox, Finding, Verdict, WarningTypography
 from api.rules import typography
 
 _WHITESPACE = re.compile(r"\s+")
@@ -556,6 +556,13 @@ CHECK_MANIFEST: Final[tuple[Check, ...]] = (
         outcome="Unreadable — a person must look",
     ),
     Check(
+        code="warning_text_disputed",
+        checks="two readings of the label agree about what the warning says",
+        citation="27 CFR 16.21",
+        evidence="two readings that disagreed",
+        outcome="Unreadable — not settled, a person must look",
+    ),
+    Check(
         code="warning_typography_disputed",
         checks="two readings of the same label agree about the type styling",
         citation="27 CFR 16.22",
@@ -674,6 +681,9 @@ class WarningSighting:
     legible: bool = True
     confidence: float = 0.0
     typography: WarningTypography = field(default_factory=WarningTypography)
+    bbox: BoundingBox | None = None
+    """The warning's region *on this image*. Carried with the sighting rather than
+    looked up separately, so a region can never be paired with another photograph."""
 
     @property
     def has_text(self) -> bool:
@@ -711,6 +721,59 @@ def select_sighting(sightings: Sequence[WarningSighting]) -> WarningSighting | N
     # warning on it, so an illegible sighting still wins over silence.
     illegible = [s for s in sightings if not s.legible]
     return illegible[0] if illegible else None
+
+
+def _with_findings(result: WarningResult, extra: list[Finding]) -> WarningResult:
+    """Re-run routing with extra findings folded in.
+
+    Escalation can only make the picture worse or leave it alone, so a result that was
+    Match and now carries an unverified finding must stop being Match.
+    """
+    findings = [*result.findings, *extra]
+    verdict = result.verdict
+    rationale = result.rationale
+    if verdict is Verdict.MATCH and any(
+        f.severity != typography.SEVERITY_CONTEXT for f in extra
+    ):
+        verdict = Verdict.UNREADABLE
+        rationale = next(
+            f.message for f in extra if f.severity != typography.SEVERITY_CONTEXT
+        )
+    return WarningResult(
+        verdict=verdict,
+        rationale=rationale,
+        diff=result.diff,
+        findings=findings,
+        comparison=result.comparison,
+    )
+
+
+def _escalate(
+    rereader: typography.WarningRereader,
+    chosen: WarningSighting | None,
+    signals: WarningTypography,
+    *,
+    text: str | None,
+    legible: bool,
+) -> typography.MergedReading | None:
+    """Ask a stronger model to re-read the warning region. Never fatal.
+
+    A provider that is down must degrade to the first pass's answer rather than take the
+    whole verification with it (NET-3, TC-21). The first pass already fails closed, so
+    losing the second look costs certainty, never safety.
+    """
+    request = typography.escalation_request(
+        signals,
+        image_index=chosen.image_index if chosen else 0,
+        bbox=chosen.bbox if chosen else None,
+        legible=legible,
+        warning_text=text,
+    )
+    try:
+        reread = rereader.reread_warning(request)
+    except Exception:  # any adapter failure degrades to the first pass (NET-3)
+        return None
+    return typography.adopt_reread(signals, reread, first_text=text)
 
 
 def merge_sighting_typography(
@@ -795,6 +858,7 @@ def evaluate_across_images(
     sightings: Sequence[WarningSighting],
     *,
     net_contents_ml: float | None = None,
+    rereader: typography.WarningRereader | None = None,
 ) -> WarningResult:
     """The whole application's warning verdict, from every image at once (LP-217).
 
@@ -802,14 +866,36 @@ def evaluate_across_images(
     Those are different questions: "what does the statement say" has one answer that one
     photograph can give best, while "is any of it set in bold" is answered by whichever
     image could see it.
+
+    `rereader` is the escalation hook. Passing None — the default, and what the pipeline
+    passes until an adapter implements the protocol — simply skips the second look; it
+    can never change a verdict from what the first pass established, because the merge
+    refuses to clear a violation.
     """
     chosen = select_sighting(sightings)
+    signals = merge_sighting_typography(sightings)
+    text = chosen.text if chosen else None
+    legible = chosen.legible if chosen else True
+    escalation_findings: list[Finding] = []
+
+    if rereader is not None and typography.needs_escalation(
+        signals, warning_text=text, legible=legible
+    ):
+        merged = _escalate(rereader, chosen, signals, text=text, legible=legible)
+        if merged is not None:
+            signals = merged.typography
+            text = merged.warning_text
+            legible = legible or bool(text and text.strip())
+            escalation_findings = list(merged.findings)
+
     result = evaluate(
-        chosen.text if chosen else None,
-        merge_sighting_typography(sightings),
-        legible=chosen.legible if chosen else True,
+        text,
+        signals,
+        legible=legible,
         net_contents_ml=net_contents_ml,
     )
+    if escalation_findings:
+        result = _with_findings(result, escalation_findings)
     note = conflicting_sightings_note(sightings, chosen)
     if note is None:
         return result
