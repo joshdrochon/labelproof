@@ -121,6 +121,11 @@ def compare_text(
     """Tier 1/2 comparison for a free-text field."""
     findings = findings or []
     evidence = (
+        # image_index is a placeholder, NOT the answer. A comparator is handed one value
+        # and cannot know which of up to four photographs it was read off; the merge does,
+        # and `api.verify._apply_merge` overwrites this index with the real provenance
+        # before the result leaves the pipeline (IMG-8). Read on its own this line is
+        # wrong on every multi-image application.
         Evidence(image_index=0, bbox=extracted.bbox)
         if extracted and extracted.bbox
         else None
@@ -247,6 +252,11 @@ def compare_alcohol_content(
     required = com.is_required(commodity, FieldName.ALCOHOL_CONTENT, context)
     expected_text = f"{expected:g}%" if expected is not None else None
     evidence = (
+        # image_index is a placeholder, NOT the answer. A comparator is handed one value
+        # and cannot know which of up to four photographs it was read off; the merge does,
+        # and `api.verify._apply_merge` overwrites this index with the real provenance
+        # before the result leaves the pipeline (IMG-8). Read on its own this line is
+        # wrong on every multi-image application.
         Evidence(image_index=0, bbox=extracted.bbox)
         if extracted and extracted.bbox
         else None
@@ -319,6 +329,11 @@ def compare_net_contents(
 ) -> FieldResult:
     """Numeric volume comparison, plus an independent standards-of-fill check (TC-10)."""
     evidence = (
+        # image_index is a placeholder, NOT the answer. A comparator is handed one value
+        # and cannot know which of up to four photographs it was read off; the merge does,
+        # and `api.verify._apply_merge` overwrites this index with the real provenance
+        # before the result leaves the pipeline (IMG-8). Read on its own this line is
+        # wrong on every multi-image application.
         Evidence(image_index=0, bbox=extracted.bbox)
         if extracted and extracted.bbox
         else None

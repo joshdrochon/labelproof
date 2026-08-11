@@ -900,6 +900,40 @@ def _escalation_target(
     return max((s.image_index for s in sightings), default=0)
 
 
+#: What one tri-state signal becomes when two pictures of the same panel *contradict*
+#: each other on it — one says True, the other says False. Abstentions are not
+#: contradictions and never reach this table.
+#:
+#: `body_is_bold` is the one signal that resolves to an answer, and the asymmetry is the
+#: point rather than an inconsistency. `True` there is a **sighting**: a picture reporting
+#: it saw bold ink in the paragraph. A second picture reporting `False` has not rebutted
+#: that — it has failed to see it, which is what a softer photograph, a compression
+#: artefact, or a shallower crop produces. A violation the extractor did detect is not
+#: erased by a photograph that missed it (LP-217), and that erasure was a confirmed false
+#: pass: identical text on both panels, the bold-body violation detected on image 1, and
+#: `Match` / `Ready to approve` returned because image 0 won an index tie-break.
+#:
+#: Every other signal is the other way round: its concerning value is the *failure* to see
+#: a compliant property — the heading not bold, the heading not in capitals, the text not
+#: standing out. Two pictures disagreeing there means one of them is wrong and the reading
+#: is contested, so neither answer may be taken. Clearing the label would be a pass granted
+#: on a contested signal, which WARN-6 forbids; asserting the violation would return an
+#: application to its applicant on a reading another photograph of the same panel
+#: contradicts, and a reading we do not trust is no basis for a rejection either (LP-058).
+#: `None` is the honest answer: it raises a cannot-confirm finding, blocks Match, and sends
+#: the label to a person.
+#:
+#: Note what this can and cannot do. Degrading to `None` only ever *removes* routes to
+#: Match — it can never turn a mismatch into a pass — so the fail-closed property holds
+#: for every signal whichever way the pictures disagree.
+_CONTESTED_SIGNAL: Final[dict[str, bool | None]] = {
+    "header_is_all_caps": None,
+    "header_is_bold": None,
+    "body_is_bold": True,
+    "contrast_ok": None,
+}
+
+
 def merge_sighting_typography(
     sightings: Sequence[WarningSighting],
 ) -> WarningTypography:
@@ -912,11 +946,13 @@ def merge_sighting_typography(
     which sighting got chosen came down to an image-index tie-break — the same label
     passed or failed depending on the order the photographs were uploaded.
 
-    So each signal takes its most concerning answer across the images that actually
-    carried a warning. A detected violation on any image is a violation. An abstention
-    never overrides an answer, and two images that both answered can only agree — a
-    signal has one true value per label, and if the readings disagree, the concerning
-    one is the one a person needs to see.
+    So each signal is answered from every image that carried a warning, not from one of
+    them. An abstention never overrides an answer. Two images that both answered and
+    agreed carry it. Two that answered and disagreed are resolved by `_CONTESTED_SIGNAL`,
+    which is where the whole judgement lives — read it before changing anything here.
+
+    Nothing in here is decided by confidence, in either direction. Whichever photograph
+    the extractor was surer of has no vote on how the label is printed.
 
     Only legible readings are consulted while there are any.
     """
@@ -929,15 +965,17 @@ def merge_sighting_typography(
         or list(sightings)
     )
 
-    def fold(name: str, unsafe: bool) -> bool | None:
-        values = [
-            getattr(s.typography, name)
-            for s in relevant
-            if getattr(s.typography, name) is not None
-        ]
+    def fold(name: str) -> bool | None:
+        values: set[bool] = set()
+        for sighting in relevant:
+            claim: bool | None = getattr(sighting.typography, name)
+            if claim is not None:
+                values.add(claim)
         if not values:
             return None
-        return unsafe if unsafe in values else values[0]
+        if len(values) == 1:
+            return values.pop()
+        return _CONTESTED_SIGNAL[name]
 
     sizes = [
         s.typography.relative_size
@@ -945,10 +983,14 @@ def merge_sighting_typography(
         if s.typography.relative_size is not None
     ]
     return WarningTypography(
-        header_is_all_caps=fold("header_is_all_caps", unsafe=False),
-        header_is_bold=fold("header_is_bold", unsafe=False),
-        body_is_bold=fold("body_is_bold", unsafe=True),
-        contrast_ok=fold("contrast_ok", unsafe=False),
+        header_is_all_caps=fold("header_is_all_caps"),
+        header_is_bold=fold("header_is_bold"),
+        body_is_bold=fold("body_is_bold"),
+        contrast_ok=fold("contrast_ok"),
+        # A measurement rather than a claim, and the only rule that consumes it asks
+        # whether the statement is too small (WARN-5). The smallest reading is the
+        # conservative one; rounding a buried warning up to the roomiest photograph of it
+        # is the failure this whole function exists to prevent.
         relative_size=min(sizes) if sizes else None,
     )
 

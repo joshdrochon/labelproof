@@ -8,6 +8,20 @@ Extraction is merged across images before any comparison happens. A two-image ap
 is one label: the brand is on the front and the warning is usually on the back, so
 declaring the warning Missing without searching every image would be a false finding
 (IMG-8, TC-16).
+
+**Two merges, one for the fields and one for the statement, and they do not overlap.**
+
+`api.pipeline.merge` folds the seven ordinary readings: per-field provenance, best
+confidence when the pictures agree, and a refusal to pick when they materially disagree
+(LP-058, LP-067). `api.rules.warning` folds the government warning's *typography* across
+every picture that carried the statement, because a bold-body violation detected on one
+photograph is a violation of the label however the other photograph read it (LP-217).
+
+Those answer different questions, so the warning row is judged once, by the sighting path,
+and `_apply_merge` deliberately leaves it alone. Running both over the same row would
+report one fact twice and would let the generic merge's evidence box — chosen for a
+different reason than the statement was — land on a photograph the quoted text did not
+come from.
 """
 
 from __future__ import annotations
@@ -30,6 +44,7 @@ from api.models import (
     VerificationResult,
     WarningTypography,
 )
+from api.pipeline import merge as merge_images
 from api.provider.base import (
     ExtractionProvider,
     ExtractionRequest,
@@ -47,43 +62,28 @@ def merge_extractions(
 ) -> tuple[dict[FieldName, ExtractedField], int | None, WarningTypography, dict[FieldName, int]]:
     """Combine per-image extractions into one view of the label.
 
-    Highest confidence wins per field, and the image it came from is recorded so the UI
-    can point at the right picture (IMG-8 provenance). A legible reading always beats an
-    illegible one — one image having glare over the warning does not make the warning
-    unreadable when the other image shows it clearly.
+    The field half delegates to `api.pipeline.merge`: highest confidence wins where the
+    pictures agree, a legible reading beats an illegible one, two pictures that materially
+    disagree establish nothing at all, and every winning value records the image it came
+    from so the UI can point at the right picture (IMG-8 provenance).
+
+    The typography half does not, and must not. It is folded across every image that
+    carried the statement rather than taken off the chosen sighting — this function is
+    public and `_warning_result` is not its only possible caller, so returning the single
+    sighting's signals here would hand the next caller a reading that silently drops a
+    violation another image established (LP-217).
     """
-    merged: dict[FieldName, ExtractedField] = {}
-    provenance: dict[FieldName, int] = {}
-    warning_image: int | None = None
-    typography = WarningTypography()
+    label = merge_images.merge(extractions)
 
-    for extraction in extractions:
-        for name, field in extraction.fields.items():
-            current = merged.get(name)
-            better = (
-                current is None
-                or (field.legible and not current.legible)
-                or (field.legible == current.legible and field.confidence > current.confidence)
-            )
-            if better:
-                merged[name] = field
-                provenance[name] = extraction.image_index
-
-    # The warning is chosen across every image at once rather than by taking the first
-    # one that had any (LP-217). A front label with a decorative fragment and a back
-    # label with the whole statement would otherwise be judged on the fragment.
     sightings = warning_sightings(extractions)
-    sighting = warn.select_sighting(sightings)
-    if sighting is not None:
-        warning_image = sighting.image_index
+    chosen = warn.select_sighting(sightings)
 
-    # The typography is folded across every image, not taken off the chosen sighting.
-    # This function is public and `_warning_result` is not its only possible caller, so
-    # returning the single-sighting signals here would hand the next caller a reading
-    # that silently drops a violation another image established.
-    typography = warn.merge_sighting_typography(sightings)
-
-    return merged, warning_image, typography, provenance
+    return (
+        label.extracted(),
+        chosen.image_index if chosen is not None else None,
+        warn.merge_sighting_typography(sightings),
+        {name: field.image_index for name, field in label.fields.items()},
+    )
 
 
 def warning_sightings(extractions: list[Extraction]) -> list[warn.WarningSighting]:
@@ -93,14 +93,24 @@ def warning_sightings(extractions: list[Extraction]) -> list[warn.WarningSightin
     as an ordinary field with a confidence and a region. Both are folded in here, because
     the choice of which image to judge the application on has to be made once, on the
     whole picture, rather than differently in two places.
+
+    Two restrictions on what counts as a sighting at all, both of them fail-closed:
+
+    * Images the extractor flagged `is_label=False` do not appear. A carton photo or a
+      marketing one-sheet in the same upload is a picture of something else, and a warning
+      read off it would answer for artwork that carries none (TC-15).
+    * An image that omitted the `government_warning` field said "I looked, it is not on
+      this one" (LP-067), and a bare `warning_text` does not overturn that. A provider
+      that reports the statement while omitting the field has supplied a warning nothing
+      actually read — the one field that must fail closed (WARN-6).
     """
     sightings: list[warn.WarningSighting] = []
-    for extraction in extractions:
+    for extraction in merge_images.contributing(extractions):
         field = extraction.fields.get(FieldName.GOVERNMENT_WARNING)
         sightings.append(
             warn.WarningSighting(
                 image_index=extraction.image_index,
-                text=extraction.warning_text or (field.value if field else None),
+                text=(extraction.warning_text or field.value) if field else None,
                 legible=field.legible if field else True,
                 confidence=field.confidence if field else 0.0,
                 typography=extraction.warning_typography,
@@ -142,6 +152,45 @@ def _warning_result(
     )
 
 
+def _apply_merge(results: list[FieldResult], label: merge_images.MergedLabel) -> None:
+    """Stamp each row with the picture its value came from, and surface any conflict.
+
+    Two jobs, both of which only the merge knows the answer to. The comparators see one
+    value and cannot know which of four photographs it was read off (IMG-8), and they
+    cannot know that a second picture read the same field differently.
+
+    A conflicted field already arrives from the merge as not-legible, so the comparator
+    has independently produced Unreadable — the right verdict for "we have not established
+    what the label says", and one that routes to Needs review rather than to either
+    Ready to approve or Return for correction. What it cannot produce is the reason, so
+    the rationale is replaced with one that names both readings.
+
+    **The government warning is skipped, and that is not an oversight.** `_warning_result`
+    has already judged it across every image: its evidence comes off the sighting the
+    statement was quoted from, so region and photograph cannot come apart, and two panels
+    carrying different statements already raise `warning_differs_between_images` and
+    demote the row off Match. Stamping the generic merge on top would move the box to a
+    picture chosen by a different rule and report the same disagreement a second time.
+    """
+    for result in results:
+        if result.field is FieldName.GOVERNMENT_WARNING:
+            continue
+
+        merged = label.fields.get(result.field)
+        if merged is None:
+            continue
+
+        if merged.bbox is not None and result.evidence is not None:
+            result.evidence = Evidence(image_index=merged.image_index, bbox=merged.bbox)
+
+        if merged.conflict is not None:
+            result.rationale = merge_images.conflict_rationale(merged.conflict)
+            result.findings = [
+                merge_images.conflict_finding(merged.conflict),
+                *result.findings,
+            ]
+
+
 def verify(
     application: Application,
     images: list[ImageInput],
@@ -180,9 +229,8 @@ def verify(
         )
 
     compare_started = time.perf_counter()
-    merged, _warning_image, _typography, _provenance = merge_extractions(
-        response.extractions
-    )
+    label = merge_images.merge(response.extractions)
+    merged = label.extracted()
 
     context = LabelContext(
         is_import=application.is_import,
@@ -218,8 +266,11 @@ def verify(
             application.country_of_origin,
             is_import=application.is_import,
         ),
+        # The extractions, not the merged label: the warning is judged on sightings, so
+        # that a violation seen on one photograph survives the choice of another (LP-217).
         _warning_result(response.extractions, net.ml),
     ]
+    _apply_merge(results, label)
 
     aggregate = agg.recommend(results)
     timings.compare = int((time.perf_counter() - compare_started) * 1000)

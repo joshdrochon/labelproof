@@ -205,7 +205,11 @@ class NonLabelProvider:
         )
 
 
-_FIXTURE_KEY = re.compile(r"^(tc\d{2}_[a-z0-9_]+?)(?:_(?:front|back))?$")
+#: `tc03b_non_bold_warning_header.png` is a fixture too. The letter suffix marks a variant
+#: of a PRD test case rather than a new one, and leaving it out of the pattern meant every
+#: variant fixture mapped to no spec at all — the offline providers and the recorder both
+#: key off this, so a fixture they cannot name is a fixture they cannot serve.
+_FIXTURE_KEY = re.compile(r"^(tc\d{2}[a-z]?_[a-z0-9_]+?)(?:_(?:front|back))?$")
 
 
 def spec_name_for_image(filename: str) -> str | None:
