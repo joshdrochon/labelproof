@@ -488,10 +488,11 @@ async def create_batch(
     # A sweeper thread would be a second thing to supervise for a job that has a natural
     # hook right here (SEC-2, LP-152). The read paths refuse an expired job in the
     # meantime, so this is a disk sweep and not the guarantee itself.
+    # `purge_expired` sweeps abandoned staging directories too, so this one call covers
+    # both and the timed sweeper in `api/retention.py` inherits the staging sweep without
+    # knowing the directory exists.
     if purged := store.purge_expired():
         applog.log("batch_purged", count=len(purged))
-    if abandoned := store.purge_staging():
-        applog.log("batch_staging_purged", count=abandoned)
 
     with store.staging() as scratch:
         landing = _Landing(scratch)

@@ -655,6 +655,24 @@ def test_staging_a_killed_process_left_behind_is_swept(tmp_path: Path) -> None:
     assert not abandoned.exists()
 
 
+def test_the_ttl_sweep_reaches_staging_too(tmp_path: Path) -> None:
+    """`purge_expired` is the entry point the timed sweeper calls, so staging hangs off it.
+
+    `api/retention.py`'s sweeper walks MANAGED_SUBDIRS = ("batches", "uploads", "results")
+    and has never heard of `staging/`. Without this, a directory left by a SIGKILL — the
+    case where a gigabyte of label artwork is most likely to be sitting there — would be
+    collected only when a new POST /batch arrived, which is precisely the traffic
+    dependence the timed sweeper exists to remove (SEC-2).
+    """
+    store = BatchStore(tmp_path)
+    abandoned = store.staging_root / "up_deadprocess"
+    abandoned.mkdir()
+    (abandoned / "0000001").write_bytes(GOOD_BYTES)
+
+    store.purge_expired(now=time.time() + 7200)
+    assert not abandoned.exists(), "the TTL sweep walked past an abandoned staging directory"
+
+
 # --- the store (LP-147, LP-152, LP-158, BATCH-6) ---------------------------------------
 
 

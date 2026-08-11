@@ -480,10 +480,18 @@ class BatchStore:
         `staging()` removes its own on every ordinary path, so this only ever finds the
         leavings of a SIGKILL or an OOM — which is exactly when a gigabyte of label
         artwork is most likely to be sitting there, and least likely to be noticed.
+
+        Never raises: it is called from inside `purge_expired`, which the retention
+        sweeper wraps in a `sqlite3.Error` handler and nothing wider. A filesystem hiccup
+        here must not be able to abort a sweep that was about to delete expired jobs.
         """
         moment = time.time() if now is None else now
         removed = 0
-        for directory in self.staging_root.glob("up_*"):
+        try:
+            candidates = list(self.staging_root.glob("up_*"))
+        except OSError:
+            return 0
+        for directory in candidates:
             try:
                 if moment - directory.stat().st_mtime <= older_than_seconds:
                     continue
@@ -502,8 +510,18 @@ class BatchStore:
         batch is 300 applications' worth of brand names and addresses sitting on a disk
         nobody is thinking about, which is the retention problem the security review
         names.
+
+        **Abandoned staging goes with it**, and that placement is deliberate. The timed
+        sweeper in `api/retention.py` walks `MANAGED_SUBDIRS = ("batches", "uploads",
+        "results")` — it has never heard of `staging/`, so a directory a SIGKILL left
+        behind would be swept only when a new `POST /batch` happened to arrive, which is
+        exactly the traffic-dependence the timed sweeper exists to remove. Calling it from
+        here means the sweeper picks it up for free, with no change to a file this branch
+        does not own. If `"staging"` is later added to `MANAGED_SUBDIRS` this becomes
+        harmlessly redundant rather than wrong.
         """
         moment = time.time() if now is None else now
+        self.purge_staging(now=moment)
         with self._write_lock, self._conn() as connection:
             rows = connection.execute(
                 "SELECT job_id FROM jobs WHERE expires_at <= ?", (moment,)
