@@ -39,11 +39,13 @@ def perspective(image: np.ndarray, degrees: float) -> np.ndarray:
     """
     h, w = image.shape[:2]
     shift = np.tan(np.radians(min(abs(degrees), 60.0))) * h * 0.25
-    source = np.float32([[0, 0], [w, 0], [w, h], [0, h]])
+    source = np.array([[0, 0], [w, 0], [w, h], [0, h]], dtype=np.float32)
     if degrees >= 0:
-        dest = np.float32([[shift, 0], [w, 0], [w, h], [shift * 0.4, h]])
+        dest = np.array([[shift, 0], [w, 0], [w, h], [shift * 0.4, h]], dtype=np.float32)
     else:
-        dest = np.float32([[0, 0], [w - shift, 0], [w - shift * 0.4, h], [0, h]])
+        dest = np.array(
+            [[0, 0], [w - shift, 0], [w - shift * 0.4, h], [0, h]], dtype=np.float32
+        )
     matrix = cv2.getPerspectiveTransform(source, dest)
     return cv2.warpPerspective(
         image, matrix, (w, h), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE
@@ -76,7 +78,8 @@ def blur(image: np.ndarray, radius: float) -> np.ndarray:
 
 def dim(image: np.ndarray, factor: float = 0.35) -> np.ndarray:
     """Underexposed but recoverable (TC-13). Scales luminance without crushing to black."""
-    return np.clip(image.astype(np.float32) * factor, 0, 255).astype(np.uint8)
+    dimmed: np.ndarray = np.clip(image.astype(np.float32) * factor, 0, 255).astype(np.uint8)
+    return dimmed
 
 
 def glare(
@@ -106,7 +109,8 @@ def glare(
 
     white = np.full_like(image, 255, dtype=np.float32)
     blended = image.astype(np.float32) * (1 - falloff) + white * falloff
-    return np.clip(blended, 0, 255).astype(np.uint8)
+    flared: np.ndarray = np.clip(blended, 0, 255).astype(np.uint8)
+    return flared
 
 
 #: Named degradations per canonical test case, so a fixture name maps to one transform.
