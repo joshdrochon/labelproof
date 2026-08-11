@@ -155,22 +155,45 @@ class Sweep:
         return (min(clean), max(clean)) if clean else None
 
     @property
+    def on_grid(self) -> bool:
+        """Was the shipped value one of the levels actually measured?
+
+        If someone edits a threshold without widening the sweep, every level below was
+        measured and none of them was the value in use. Nothing can be concluded about it,
+        and saying so is the only honest option.
+        """
+        return self.current in [level.value for level in self.levels]
+
+    @property
     def margin(self) -> int:
         """How many sweep steps the current value sits from the nearest false pass.
 
         This is the number to watch when Tier B lands. A threshold that is technically
         correct but one step from producing a false pass is not calibrated, it is lucky,
         and real optics will spend that luck.
+
+        `-1` means the shipped value was never measured — see `on_grid`. It is deliberately
+        not 0 or a large number: either would read as an answer.
         """
-        values = [level.value for level in self.levels]
-        if self.current not in values:
+        if not self.on_grid:
             return -1
+        values = [level.value for level in self.levels]
         here = values.index(self.current)
         regressions = [i for i, level in enumerate(self.levels) if level.regression]
         return min((abs(here - i) for i in regressions), default=len(values))
 
     @property
+    def unproven(self) -> bool:
+        """The shipped value has no measurement behind it, one way or the other."""
+        return not self.on_grid
+
+    @property
     def verdict(self) -> str:
+        if not self.on_grid:
+            return (
+                f"{self.current:g} was never measured — it is not one of the swept levels. "
+                f"Add it to SWEEPS before trusting anything here about it."
+            )
         band = self.safe_band
         if band is None:
             return (
@@ -280,10 +303,18 @@ def render(sweeps: list[Sweep]) -> str:
         out.append("")
 
     broken = regressions(sweeps)
+    unproven = [s for s in sweeps if s.unproven]
     if broken:
         out.append(
             "CURRENT VALUES PRODUCING FALSE PASSES: "
             + ", ".join(s.name for s in broken)
+        )
+    elif unproven:
+        # Never claim a clean bill for values that were not among the levels measured.
+        out.append(
+            "No *measured* threshold produces a false pass — but "
+            + ", ".join(s.name for s in unproven)
+            + " were never swept at their shipped value, so nothing here covers them."
         )
     else:
         out.append("No current threshold produces a false pass on this set.")

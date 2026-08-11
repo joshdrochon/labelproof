@@ -250,9 +250,51 @@ def test_region_content_detection_survives_dim_light(clean: np.ndarray) -> None:
     ).has_content
 
 
-def test_a_degenerate_box_does_not_crash(clean: np.ndarray) -> None:
-    zero = BoundingBox(x0=0.5, y0=0.5, x1=0.5, y1=0.5)
-    assert quality.crop(clean, zero).size > 0
+@pytest.mark.parametrize(
+    ("name", "box"),
+    [
+        ("zero-area, mid-frame", BoundingBox(x0=0.5, y0=0.5, x1=0.5, y1=0.5)),
+        ("flush with the bottom", BoundingBox(x0=0.0, y0=1.0, x1=1.0, y1=1.0)),
+        ("flush with the right", BoundingBox(x0=1.0, y0=0.0, x1=1.0, y1=1.0)),
+        ("the far corner", BoundingBox(x0=1.0, y0=1.0, x1=1.0, y1=1.0)),
+        ("inverted", BoundingBox(x0=0.0, y0=0.8, x1=1.0, y1=0.2)),
+    ],
+)
+def test_a_degenerate_box_never_produces_an_empty_crop(
+    clean: np.ndarray, name: str, box: BoundingBox
+) -> None:
+    """Boxes come from the extractor and `BoundingBox` permits 1.0 on either edge. An
+    empty slice reaches OpenCV as an assertion failure, which leaves here as a 500 rather
+    than as anything in the error taxonomy."""
+    assert quality.crop(clean, box).size > 0, name
+
+
+@pytest.mark.parametrize(
+    ("name", "box"),
+    [
+        ("zero-area, mid-frame", BoundingBox(x0=0.5, y0=0.5, x1=0.5, y1=0.5)),
+        ("flush with the bottom", BoundingBox(x0=0.0, y0=1.0, x1=1.0, y1=1.0)),
+        ("a two-pixel sliver", BoundingBox(x0=0.5, y0=0.5, x1=0.502, y1=0.502)),
+    ],
+)
+def test_an_unmeasurable_region_fails_closed(
+    clean: np.ndarray, name: str, box: BoundingBox
+) -> None:
+    """A box too small to measure is a broken box, not a reading.
+
+    This set is what forces a field to Unreadable, so the default has to be "we could not
+    check this" rather than "it looked fine" — the second is a false pass wearing the
+    clothes of a successful check.
+    """
+    assessment = quality.assess_region(clean, box)
+    assert assessment.verdict == "hopeless", name
+    assert not assessment.legible
+    assert assessment.reason and "could not be measured" in assessment.reason
+
+
+def test_a_broken_box_puts_its_field_in_the_illegible_set(clean: np.ndarray) -> None:
+    broken = {FieldName.GOVERNMENT_WARNING: BoundingBox(x0=0.0, y0=1.0, x1=1.0, y1=1.0)}
+    assert quality.illegible_regions(clean, broken) == {FieldName.GOVERNMENT_WARNING}
 
 
 def test_region_assessment_is_deterministic(clean: np.ndarray) -> None:

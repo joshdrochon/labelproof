@@ -850,3 +850,28 @@ def test_the_document_names_the_tier_a_gap(report: robustness_eval.Report) -> No
 
 def test_regenerating_the_document_is_idempotent(report: robustness_eval.Report) -> None:
     assert robustness_eval.render_docs(report) == robustness_eval.render_docs(report)
+
+
+def test_an_unswept_value_is_reported_as_unmeasured() -> None:
+    """If someone edits a threshold without widening the sweep, every level was measured
+    and none of them was the value in use. The summary must not then report a clean bill
+    of health for a number nothing here covers."""
+    original = T.HOPELESS
+    try:
+        T.HOPELESS = 0.99
+        sweep = calibrate_quality.sweep_one(
+            "HOPELESS", calibrate_quality.SWEEPS["HOPELESS"]
+        )
+    finally:
+        T.HOPELESS = original
+
+    assert sweep.unproven
+    assert sweep.margin == -1
+    assert "never measured" in sweep.verdict
+    assert "never swept at their shipped value" in calibrate_quality.render([sweep])
+
+
+def test_a_swept_value_is_not_reported_as_unmeasured(
+    blur_sweep: calibrate_quality.Sweep,
+) -> None:
+    assert blur_sweep.on_grid and not blur_sweep.unproven

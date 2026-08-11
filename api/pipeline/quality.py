@@ -113,6 +113,13 @@ def exposure_score(image: np.ndarray) -> float:
     return float(np.clip(mean / T.EXPOSURE_FLOOR, 0.0, 1.0))
 
 
+#: Luminance at or above which a pixel carries no detail. The score that *reports* glare
+#: and the mask that *acts* on it (`preprocess.glare_mask`) have to mean the same thing, so
+#: this is the one definition and preprocess imports it. Two copies of the number would let
+#: the report and the mask disagree about which pixels are gone.
+BLOWN_LEVEL = 250
+
+
 def glare_score(image: np.ndarray) -> float:
     """Fraction of near-saturated pixels, inverted.
 
@@ -120,7 +127,7 @@ def glare_score(image: np.ndarray) -> float:
     a small specular highlight barely registers while a flash across the label does.
     """
     gray = _to_gray(image)
-    blown = float((gray >= 250).sum()) / gray.size
+    blown = float((gray >= BLOWN_LEVEL).sum()) / gray.size
     return max(0.0, 1.0 - blown / T.GLARE_SATURATION_FRACTION)
 
 
@@ -206,9 +213,16 @@ def crop(image: np.ndarray, box: BoundingBox) -> np.ndarray:
     geometry, so a box drawn over the original upload drifts.
     """
     h, w = image.shape[:2]
-    y0, y1 = int(box.y0 * h), max(int(box.y1 * h), int(box.y0 * h) + 1)
-    x0, x1 = int(box.x0 * w), max(int(box.x1 * w), int(box.x0 * w) + 1)
-    return image[y0 : min(y1, h), x0 : min(x1, w)]
+    y0 = min(int(box.y0 * h), max(h - 1, 0))
+    x0 = min(int(box.x0 * w), max(w - 1, 0))
+    y1 = min(max(int(box.y1 * h), y0 + 1), h)
+    x1 = min(max(int(box.x1 * w), x0 + 1), w)
+    return image[y0:y1, x0:x1]
+
+
+#: Below this on either side a region carries no measurable signal. A box that small is a
+#: broken box, not a reading.
+_MIN_REGION_PX = 8
 
 
 #: Relative contrast below which a region is treated as bare stock rather than print.
@@ -249,6 +263,18 @@ def assess_region(image: np.ndarray, box: BoundingBox) -> RegionQuality:
     — a wall of false flags, which is its own adoption failure (UX-7).
     """
     region = crop(image, box)
+    if min(region.shape[:2]) < _MIN_REGION_PX:
+        # Fails closed. A region too small to measure is not evidence that it is
+        # readable, and this set is what forces a field to Unreadable.
+        return RegionQuality(
+            blur=0.0,
+            exposure=0.0,
+            glare=0.0,
+            has_content=False,
+            verdict="hopeless",
+            reason="This part of the label could not be measured.",
+        )
+
     blur = blur_score(region)
     exposure = exposure_score(region)
     glare = glare_score(region)

@@ -38,9 +38,10 @@ from api.pipeline import deskew as deskew_mod
 from api.pipeline import quality as quality_mod
 
 #: Luminance at or above which a pixel is treated as blown — no detail survives, and none
-#: will be invented. The same level `quality.glare_score` counts, deliberately: the score
-#: that reports glare and the mask that acts on it have to mean the same thing.
-BLOWN_LEVEL = 250
+#: will be invented. Imported rather than restated: the score that reports glare and the
+#: mask that acts on it have to mean the same thing, and a second copy of the number is a
+#: second thing to get wrong.
+BLOWN_LEVEL = quality_mod.BLOWN_LEVEL
 
 #: CLAHE tile grid. Small enough to lift a shadowed corner independently of a lit one,
 #: large enough that a tile still contains whole letters rather than parts of strokes.
