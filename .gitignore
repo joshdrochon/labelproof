@@ -45,3 +45,6 @@ Thumbs.db
 
 # Spike scratch output (LP-331) — regenerated on demand, never a fixture of record.
 fixtures/spike/
+
+# Runtime storage — uploads, results, batch jobs. Never committed.
+.data/
