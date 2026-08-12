@@ -6,7 +6,6 @@
 |---|---|
 | **Status** | Source of truth for the LabelProof build. Tickets in `TICKETS.md` trace to requirement IDs defined here (Appendix A). |
 | **Source brief** | `TakeHome Project: AI-Powered Alcohol Label Verification App.docx`, sha `7f50443d68066298…` |
-| **Format blueprint** | GFA Week 5 FleetGraph PRD (structure only — content is 100% take-home derived) |
 | **Version** | 1.0 — 2026-08-10 |
 | **Regulatory canon** | Appendix B (verified against eCFR / ttb.gov, retrieved 2026-08-10) |
 

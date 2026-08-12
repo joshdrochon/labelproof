@@ -8,10 +8,14 @@ run it, how do I test it, and how do I undo it.
 carries the approach, the assumptions, and what is not done. This file is the
 operational one: run it, test it, deploy it, undo it.
 
-> **Status.** Seeded at LP-003. The run and test sections are live and verified. The
-> rollback section is a **procedure, not yet a drill** — nothing has been deployed as of
-> this writing, so the deploy-level steps are marked accordingly rather than presented as
-> tested. LP-137 makes them real; LP-244 breaks a deploy on purpose to prove they work.
+> **Status, 2026-08-12.** The app is deployed and live at <https://labelproof.fly.dev>.
+> `scripts/smoke.sh` passes against it, including a real seven-field verification through
+> the live model, and `docs/perf-deployed.md` carries 20 timed runs.
+>
+> Still a **procedure rather than a drill**: the destroy-and-redeploy test (LP-136) and
+> the forced-bad-deploy rollback proof (LP-244) have not been run. Deploying repeatedly
+> is not the same as proving the environment rebuilds from configuration alone, and the
+> results table below stays blank rather than filled with plausible output.
 
 ---
 
@@ -52,7 +56,11 @@ npm --prefix web run dev
 ```
 
 Health endpoints: `GET /health` (process is up) and `GET /ready` (config valid and the
-provider is reachable). `/ready` is the one that tells you whether the API key works.
+provider client is constructible). **`/ready` does NOT prove the API key works** — it
+builds the SDK client and stops, because the client has no reachability probe. A key that
+is present but revoked, expired, or scoped to the wrong workspace answers 200 with
+`"simulated": false`. A key that is entirely MISSING is caught. `scripts/smoke.sh` is what
+actually proves the key: it performs a real verification against the live model.
 
 ### Running without an API key, or without a network
 
@@ -103,11 +111,24 @@ value per line, which separates each constant from its CFR citation and makes th
 compliance reviewer audits by eye harder to audit. The reasoning and the one-commit path
 to turning it on are both in `pyproject.toml`.
 
-`mypy --strict` is clean over `api/` and over every file in `scripts/`, each of which is
-listed individually in `pyproject.toml`'s `files` so the claim can be checked. `tests/`,
-`eval/`, and `fixtures/` are **not** yet strict-clean: `mypy --strict api tests eval
-fixtures` reports **22 errors in 9 files**, broken down per file in `pyproject.toml`.
-That is a measured number with the command that produces it, not an estimate.
+`mypy --strict` is clean over `api/` — 50 source files, and that is the claim CI gates on
+(`.venv/bin/mypy --strict api/`).
+
+The wider claim that used to sit here was wrong twice, and both corrections are worth
+recording because it was phrased as a checkable measurement:
+
+- It said "clean over **every file in** `scripts/`". `pyproject.toml`'s `files` lists 4 of
+  the 12 scripts. Checked individually, 10 of 12 are strict-clean; `triage_merge.py` and
+  `compression_sweep.py` have 3 errors each.
+- It cited "**22 errors in 9 files**" from `mypy --strict api tests eval fixtures`. That
+  command does not produce a count at all — it aborts with `tests/test_api.py: Source file
+  found twice under different module names`, and reports `Found 1 error in 1 file (errors
+  prevented further checking)`. `--explicit-package-bases` does not help. The number could
+  not have come from the command quoted next to it.
+
+`tests/`, `eval/` and `fixtures/` are not strict-clean, and this file no longer puts a
+figure on it, because a number nobody can reproduce is worse than no number — which is
+what `pyproject.toml` says a few lines above the list that made this claim checkable.
 
 #### Why 3.12 and 3.14 both appear
 
@@ -208,10 +229,11 @@ ticket deliberately.
 
 ### A bad deploy
 
-> **Not yet drilled.** Nothing is deployed as of LP-003. The procedure below is the
-> intended one — Fly.io, one always-on machine, see `fly.toml`. LP-137
-> documents it against a real deployment; LP-244 forces a bad deploy and proves the
-> rollback works. Until those close, treat this as a plan, not a runbook.
+> **Not yet drilled.** The app IS deployed — one always-on Fly machine in `iad`, see
+> `fly.toml` — and it has been redeployed cleanly several times, with `scripts/smoke.sh`
+> gating each one. What has not happened is a deliberately bad deploy: LP-244 forces one
+> and proves the rollback fires. Until that closes, the steps below are the intended
+> procedure rather than a tested one, and should be read as a plan.
 
 ```bash
 fly releases                          # find the last known-good version
@@ -269,15 +291,21 @@ would otherwise have to discover.
 
 ## Deploying
 
-> **Status: the pipeline has never completed a run.** On this branch alone the gate is
-> red — `ruff check .` reports 68 errors and `mypy --strict api/` one, essentially all in
-> files outside the deployment wave — so the deploy job correctly refuses to run. Merged
-> with the CI branch it is green: ruff clean, mypy clean, 802 tests passing, verified by
-> test-merging and running the gate rather than by assuming.
+> **Status, 2026-08-12: the deploy pipeline has still never run, and every deploy so far
+> was issued by hand.** `.github/workflows/deploy.yml` triggers on `push` to `main`, and
+> all the work is on `merge/wave-1` — so the release gate, the golden-set eval and the
+> auto-rollback have never executed against the deployed artifact. That is a real gap and
+> it is the reason this section is a plan.
 >
-> That is the gate working, but it means nothing below has been exercised end to end, and
-> it is *why* a production returning 503 on every verification survived long enough to be
-> found by hand. The first green pipeline run is the thing to watch for; until then, read
+> Local gates are green: ruff clean, `mypy --strict api/` clean, 3403 tests passing, the
+> eval at 100% on Tier A with zero warning false passes. CI on this branch was red for
+> eight commits on three environment differences (an SPA build CI does not run, a Linux
+> font rasterizer, and a timing ceiling set from a laptop) — all three fixed, none of them
+> defects in the product.
+>
+> It remains true that nothing below has been exercised end to end, and it is *why* a
+> production returning 503 on every verification survived long enough to be found by hand.
+> The first green pipeline run is the thing to watch for; until then, read
 > this section as intended behaviour rather than observed.
 
 `main` deploys itself. `.github/workflows/deploy.yml` runs the release gate — lint, types,

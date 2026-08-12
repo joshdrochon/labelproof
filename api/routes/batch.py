@@ -45,7 +45,7 @@ import zipfile
 from collections.abc import Awaitable, Callable, Sequence
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Annotated, cast
+from typing import Annotated, Final, cast
 
 from fastapi import APIRouter, FastAPI, File, Request, UploadFile
 from fastapi.responses import PlainTextResponse, Response
@@ -787,6 +787,34 @@ _EXPORT_HEADER: tuple[str, ...] = (
 )
 
 
+#: Characters that make a spreadsheet treat a cell as a formula rather than as text.
+#: `+` and `-` are here because Excel accepts them as formula leads too, and tab and
+#: carriage return because they can push content into the next cell.
+_FORMULA_LEADS: Final[str] = "=+-@\t\r"
+
+
+def _csv_safe(value: object) -> str:
+    """Neutralise a cell that a spreadsheet would otherwise execute.
+
+    `csv.writer` quotes correctly and that is not the same protection: quoting keeps the
+    value in one cell, and Excel still evaluates `=cmd|'/c calc'!A0` when the file is
+    opened. Four columns in this export carry text nobody here controls — `brand_name` and
+    `class_type` come straight from an uploaded manifest, and `findings` and `rationale`
+    quote label text the model read off the artwork. A brand that prints a leading `=` is
+    enough.
+
+    This is the export the PRD says gets printed and handed upward, so the failure lands
+    in a case file rather than in a terminal.
+
+    A leading apostrophe is the conventional fix and it is visible in the cell, which is
+    honest: the value was altered, and a reader can see that it was.
+    """
+    text = "" if value is None else str(value)
+    # `text and ...` is load-bearing: `"" in "=+-@"` is True in Python, so the obvious
+    # `text[:1] in _FORMULA_LEADS` puts an apostrophe in every empty cell in the file.
+    return f"'{text}" if text and text[0] in _FORMULA_LEADS else text
+
+
 def _findings_text(item: BatchItem) -> str:
     if item.result is None:
         return ""
@@ -849,7 +877,7 @@ def export_batch(request: Request, job_id: str) -> PlainTextResponse:
     writer = csv.writer(buffer, lineterminator="\r\n")
     writer.writerow(_EXPORT_HEADER)
     for item in items:
-        writer.writerow(_export_row(item))
+        writer.writerow([_csv_safe(cell) for cell in _export_row(item)])
 
     applog.log("batch_exported", job_id=job_id, count=len(items))
     return PlainTextResponse(

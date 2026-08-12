@@ -2038,3 +2038,71 @@ def test_an_unfinished_item_contributes_nothing() -> None:
     pending = _item("pending", 2, ItemState.QUEUED, None)
 
     assert job_cost([finished, pending]) == job_cost([finished])
+
+
+# --------------------------------------------------------------------------------------
+# CSV export is opened in a spreadsheet, and printed (BATCH-7)
+# --------------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "hostile",
+    [
+        "=cmd|'/c calc'!A0",
+        "+1+1",
+        "-2+3",
+        "@SUM(1:1)",
+        "\tleading tab",
+        "\rleading return",
+    ],
+)
+def test_a_cell_a_spreadsheet_would_execute_is_neutralised(hostile: str) -> None:
+    """`csv.writer` quotes; quoting is not this protection.
+
+    Quoting keeps a value in one cell. Excel still EVALUATES `=cmd|'/c calc'!A0` when the
+    file is opened, and four columns of this export carry text nobody here controls:
+    `brand_name` and `class_type` come straight from an uploaded manifest, and `findings`
+    and `rationale` quote label text the model read off the artwork. A brand that prints a
+    leading `=` is enough — no attacker required.
+
+    This is the export the PRD says gets printed and handed upward, so the consequence
+    lands in a case file.
+    """
+    assert batch_routes._csv_safe(hostile).startswith("'")
+
+
+@pytest.mark.parametrize("ordinary", ["Old Tom Distillery", "750 mL", "45% Alc./Vol.", ""])
+def test_ordinary_values_are_left_exactly_as_they_are(ordinary: str) -> None:
+    """The guard must not put an apostrophe on every cell in the file."""
+    assert batch_routes._csv_safe(ordinary) == ordinary
+
+
+def test_the_export_route_applies_the_guard() -> None:
+    """End to end over HTTP, because the sanitiser existing is not the same as it running.
+
+    A helper defined and not called is how the confidence floor survived this whole build.
+    """
+    config = Config(use_fake_provider=True)
+    app = create_app(config=config, provider=SpecBackedProvider("tc01_old_tom_clean"))
+    client = TestClient(app)
+
+    manifest = (
+        "commodity,brand_name,class_type,alcohol_content,net_contents,producer_name,"
+        "producer_address,country_of_origin,is_import,front_image,back_image\r\n"
+        "spirits,=cmd|'/c calc'!A0,Whiskey,45,750 mL,Someone,Somewhere,,false,"
+        "tc01_old_tom_clean.png,\r\n"
+    )
+    image = (ROOT / "fixtures" / "labels" / "tc01_old_tom_clean.png").read_bytes()
+    accepted = client.post(
+        "/batch",
+        files=[
+            ("manifest", ("m.csv", manifest.encode(), "text/csv")),
+            ("files", ("tc01_old_tom_clean.png", image, "image/png")),
+        ],
+    )
+    assert accepted.status_code == 200, accepted.text
+    job_id = accepted.json()["job_id"]
+
+    body = client.get(f"/batch/{job_id}/export.csv").text
+    assert "=cmd" in body, "the value should still be readable, just not executable"
+    assert ",=cmd" not in body and body.count("'=cmd") == 1, body[:400]
