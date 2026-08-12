@@ -2,7 +2,7 @@
  * The wire contract, mirrored from `api/models.py`.
  *
  * These types are a copy of the server's pydantic models, not an interpretation of them.
- * Nothing is added here that the server does not send. Where BUILD.md §3 and
+ * Nothing is added here that the server does not send. Where the build spec and
  * `api/models.py` disagree on a spelling, `models.py` is what actually serializes, so
  * that is what these types name — with the older spelling accepted at the parse boundary
  * in `api.ts` so a stale server cannot blank the screen.

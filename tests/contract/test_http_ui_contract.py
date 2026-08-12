@@ -442,6 +442,20 @@ def _spa_client() -> TestClient:
     return TestClient(create_app(config=Config(use_fake_provider=True)))
 
 
+def _spa_is_built() -> bool:
+    """Whether `web/dist` exists in this checkout.
+
+    CI lints and tests the API without running `npm run build`, so the app legitimately
+    serves a JSON banner at `/` instead of the shell. The first version of the route tests
+    below did not check, asserted `<!doctype html>`, and turned the whole pipeline red on
+    a difference that is not a defect.
+
+    The property is still worth asserting where a build exists, which is every local run
+    and the image the Dockerfile produces.
+    """
+    return (Path(__file__).resolve().parents[2] / "web" / "dist" / "index.html").is_file()
+
+
 def _declared_ui_paths() -> list[str]:
     """The client-side routes `App.tsx` pushes into history, read from the source.
 
@@ -463,6 +477,8 @@ def test_app_tsx_declares_the_routes_this_test_thinks_it_does() -> None:
 @pytest.mark.parametrize("path", _declared_ui_paths())
 def test_every_ui_route_serves_the_app_shell_on_a_plain_get(path: str) -> None:
     """Reload and deep-link both work, for every route the SPA can put in the address bar."""
+    if not _spa_is_built():
+        pytest.skip("web/dist is absent — run `npm --prefix web run build` to exercise this")
     response = _spa_client().get(path)
 
     assert response.status_code == 200, (

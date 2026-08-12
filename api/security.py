@@ -145,7 +145,7 @@ def _env_int(name: str, default: int) -> int:
 class SecurityPolicy:
     """Everything about the posture that an operator can move, and its defaults."""
 
-    #: Requests per minute per client on `/verify` (SEC-9, BUILD.md §1 default 30).
+    #: Requests per minute per client on `/verify` (SEC-9, the build spec default 30).
     rate_limit_per_minute: int = 30
 
     #: Header naming the real client, checked before the socket peer. **Empty by default.**

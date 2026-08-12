@@ -116,7 +116,7 @@ ignore = [
 [tool.ruff.lint.pep8-naming]
 # Names that are deliberate, not accidents. Each one is a considered choice:
 #   stage                — a context manager used like a verb: `with stage("extract"):`
-#   T                    — `from api.rules import thresholds as T`; BUILD.md §7 puts every
+#   T                    — `from api.rules import thresholds as T`; the build spec puts every
 #                          threshold in one module, and `T.PREGATE_HOPELESS` reads as the
 #                          citation it is.
 #   E, F                 — one-letter result/expectation factories local to a test module.

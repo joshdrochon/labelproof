@@ -4,6 +4,8 @@ A false Match here is the worst possible failure of this product, so the tests w
 toward proving the tool does NOT pass things it should catch.
 """
 
+from pathlib import Path
+
 import pytest
 
 from api import canon
@@ -19,6 +21,7 @@ from api.models import (
     WarningTypography,
 )
 from api.rules import aggregate, typography, warning
+from api.rules.warning import WarningSighting
 
 #: A label the extractor read confidently and completely: every 16.22 signal answered,
 #: and answered the compliant way. This is the only shape of input that can reach Match.
@@ -386,6 +389,16 @@ def _sighting(
     signals: WarningTypography | None = None,
     **kw: object,
 ) -> warning.WarningSighting:
+    """A sighting in the shape the pipeline actually receives.
+
+    `confidence` defaults to 0.95 rather than to the dataclass's 0.0, because
+    `legible=True, confidence=0.0` is a combination no provider can emit: the extraction
+    schema makes confidence REQUIRED, and both the live adapter and the fake pair 0.0
+    with `legible=False`. Leaving it at 0.0 here meant six tests asserted MATCH on a
+    reading the model had disclaimed — which passed only because nothing read confidence
+    at all, and which `low_confidence_note` correctly refuses now.
+    """
+    kw.setdefault("confidence", 0.95)
     return warning.WarningSighting(
         image_index=index,
         text=text,
@@ -2093,3 +2106,87 @@ def test_the_caveat_is_never_mistaken_for_a_check_that_ran() -> None:
     caveat = warning.type_size_finding(750.0)
     assert caveat.severity not in typography.ASSERTED_SEVERITIES
     assert "not verifiable" in caveat.message
+
+
+# --------------------------------------------------------------------------------------
+# Confidence, which nothing was reading (LP-224, MATCH-6)
+# --------------------------------------------------------------------------------------
+
+
+def _confidence_sighting(confidence: float, *, typography_clean: bool = True) -> WarningSighting:
+    signals = WarningTypography(
+        header_is_all_caps=True,
+        header_is_bold=True,
+        body_is_bold=False,
+        relative_size=1.0,
+        contrast_ok=True,
+    ) if typography_clean else WarningTypography(
+        header_is_all_caps=False,
+        header_is_bold=True,
+        body_is_bold=False,
+        relative_size=1.0,
+        contrast_ok=True,
+    )
+    return WarningSighting(
+        image_index=0,
+        text=canon.CANONICAL_WARNING,
+        legible=True,
+        confidence=confidence,
+        typography=signals,
+        bbox=None,
+    )
+
+
+@pytest.mark.parametrize("confidence", [0.74, 0.50, 0.10, 0.01, 0.0])
+def test_a_warning_read_too_uncertainly_cannot_certify_the_label(confidence: float) -> None:
+    """Measured before this existed: `confidence=0.01` returned MATCH.
+
+    Canonical text, clean typography, a reading the model itself was almost certain it
+    could not make — and the aggregate said "Ready to approve". Nothing anywhere in the
+    pipeline read `confidence`: `thresholds.CONFIDENCE_FLOOR` was defined and had no call
+    site in the entire repository.
+
+    This is the shape of the disqualifying failure. The government warning is the single
+    most memorised string a vision model could complete from memory rather than read, so
+    a confident-shaped transcription of the canonical text off a picture too poor to carry
+    it is exactly what a fabricated pass looks like.
+    """
+    result = warning.evaluate_across_images([_confidence_sighting(confidence)])
+
+    assert result.verdict is Verdict.UNREADABLE
+    assert any(f.code == "warning_read_with_low_confidence" for f in result.findings)
+
+
+@pytest.mark.parametrize("confidence", [0.75, 0.80, 0.95, 1.0])
+def test_a_confident_reading_still_reaches_match(confidence: float) -> None:
+    """The floor must not become "always Unreadable" — that is a different failure."""
+    result = warning.evaluate_across_images([_confidence_sighting(confidence)])
+    assert result.verdict is Verdict.MATCH
+
+
+@pytest.mark.parametrize("confidence", [0.99, 0.10])
+def test_low_confidence_never_clears_a_defect(confidence: float) -> None:
+    """The asymmetry runs both ways.
+
+    A demotion that could also PROMOTE would let "we could not read it well" wash out a
+    violation. A low-confidence reading of a defective warning keeps its defect finding at
+    every confidence level.
+    """
+    result = warning.evaluate_across_images(
+        [_confidence_sighting(confidence, typography_clean=False)]
+    )
+
+    assert result.verdict is not Verdict.MATCH
+    assert any(f.code == "warning_header_caps_disputed" for f in result.findings)
+
+
+def test_the_warning_floor_is_actually_wired() -> None:
+    """The constant that started this had no call site. This asserts the new one does.
+
+    A threshold defined and never read is indistinguishable from an enforced one when you
+    are skimming, which is how the first one survived the whole build.
+    """
+    source = (Path(__file__).resolve().parents[1] / "api" / "rules" / "warning.py").read_text()
+    assert "WARNING_CONFIDENCE_FLOOR" in source, (
+        "the warning confidence floor is no longer referenced from warning.py"
+    )

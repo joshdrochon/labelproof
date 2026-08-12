@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import time
 from pathlib import Path
 from typing import Any
@@ -728,12 +729,22 @@ def api_overhead_ms(body: dict[str, Any]) -> int:
 
 
 #: Ceiling on our own overhead for a two-image verification, p95 over a warm process.
-#: Thirty samples on a developer laptop ran 124-134 ms with a ±4% spread, so this is a
-#: little over twice the worst observed. It was 1000 ms, which is 7.5x — wide enough that
-#: an accidental re-decode (~3x) would have passed in silence, and 400 ms of our own
-#: overhead is not noise against a model that takes 9.6s. The margin is for a loaded CI
-#: box, not for regressions.
-API_OVERHEAD_CEILING_MS = 300
+#:
+#: MEASURED IN THREE PLACES, and they are far enough apart that one number cannot serve:
+#:
+#:     developer laptop, 30 samples   124-134 ms
+#:     GitHub Actions runner          330-354 ms
+#:     Fly shared-cpu-2x (production) ~570 ms
+#:
+#: A flat 300 ms was set from the laptop figure alone and turned CI red on every commit
+#: for eight commits. Raising it globally to clear CI would have cost the tightness that
+#: makes it useful locally: the regression it exists to catch is an accidental re-decode,
+#: which is roughly 3x, and 3x of the laptop baseline is ~400 ms — inside a CI-safe
+#: ceiling and therefore invisible.
+#:
+#: So it scales with the machine. Tight where the measurement is stable, loose where the
+#: box is shared and the number says more about the runner than about this code.
+API_OVERHEAD_CEILING_MS = 900 if os.environ.get("CI") else 300
 
 
 def test_the_api_layer_stays_under_its_share_of_the_five_second_budget() -> None:

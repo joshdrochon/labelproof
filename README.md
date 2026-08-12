@@ -10,6 +10,12 @@ recommendation. **It recommends — the agent decides.**
 | **Requirements** | [`PRD.md`](PRD.md) **v1.0** — 2026-08-10. Source of truth; requirement IDs (Appendix A) are cited throughout the code and tests. |
 | **Regulatory canon** | `PRD.md` Appendix B, verified against GPO CFR XML and Cornell LII, with retrieval dates recorded per item in `api/canon.py` |
 | **Developer log** | [`CHANGES.md`](CHANGES.md) — deploy, roll back, operate |
+| **Execution plan** | [`TICKETS.md`](TICKETS.md) — 330 tickets, each traced to a requirement ID |
+| **Accuracy** | [`docs/accuracy.md`](docs/accuracy.md) — Tier A 100%, Tier B 57.1%, confusion matrices, every miss explained |
+| **Cost** | [`docs/cost.md`](docs/cost.md) — $0.031 a verification, $0.018 in batch, measured |
+| **Latency** | [`docs/perf-deployed.md`](docs/perf-deployed.md) — 20 timed runs on the deployed URL |
+| **Robustness** | [`docs/robustness.md`](docs/robustness.md) — angle, blur, glare, occlusion |
+| **Live** | <https://labelproof.fly.dev> |
 | **Licence** | MIT |
 
 If a behaviour here disagrees with `PRD.md` v1.0, the PRD is right and the code is a bug —
@@ -37,7 +43,7 @@ Nothing below needs an API key. The suite and the demo both run offline.
 git clone <this repo> && cd labelproof
 python3.14 -m venv .venv && .venv/bin/pip install -e ".[dev]"
 
-.venv/bin/python -m pytest                        # 3315 tests, offline, ~4 min
+.venv/bin/python -m pytest                        # 3417 tests, offline, ~4 min
 .venv/bin/python -m eval.run                      # the accuracy gate
 LABELPROOF_FAKE_PROVIDER=1 .venv/bin/uvicorn api.main:app --reload
 ```
@@ -198,28 +204,62 @@ here.
   from configuration alone — destroy the app, redeploy from a clean clone, smoke it — has
   not been performed. Its table stays **blank and labelled unrun** rather than filled with
   plausible output.
-- **The batch UI does not exist.** The batch engine does — manifest parsing, the worker
-  pool, per-item isolation, triage ordering, CSV export, all tested — and
-  `POST /batch` serves it. There is no page in the SPA that reaches it, so a reviewer
-  clicking through the app finds a single-label tool. This is the largest gap between what
-  the brief asks for and what a reviewer can see.
-- **Tier B is three photographs.** They earned their place — each found a real defect that
-  19 synthetic fixtures could not — but three is a sample, not a corpus, and every
-  image-quality threshold in the system is still calibrated against rendered PNGs.
+- **Cropped content is reported as Missing, not Unreadable.** The worst defect currently
+  known, found by a photograph whose frame cuts off the right edge of the label. Class
+  type, alcohol content and net contents are not in the picture, and the pipeline calls
+  them **Missing** — a finding against the label and grounds to return an application.
+  The truth is **Unreadable**, a statement about the photograph. Fixing it needs a signal
+  the pipeline does not compute yet: whether the label runs past the frame boundary. Four
+  of the nine Tier B misses are this one bug. See [`docs/accuracy.md`](docs/accuracy.md).
+- **The 300-item batch has not been run.** A real 22-application batch completed on the
+  deployed URL in 42s with no failures, which extrapolates to roughly 9.5 minutes for 300
+  against a 10-minute goal. Extrapolation is not measurement, and rate limiting at that
+  scale is exactly what an extrapolation cannot see.
+- **Tier B is six photographs, three of them scored.** They earned their place — each
+  found a real defect the 19 synthetic fixtures could not — but six is a sample, not a
+  corpus, none of the ground truth is hand-transcribed, and every image-quality threshold
+  in the system is still calibrated against rendered PNGs. Tier B scores **57.1%** against
+  Tier A's 100%; that 42.9-point gap is the honest answer to "does this work", and it is
+  published in [`docs/accuracy.md`](docs/accuracy.md) rather than averaged away.
+- **Accessibility has not been audited.** No axe run, no keyboard-only walkthrough, no
+  screen-reader pass. The markup was written for it — semantic tables, live regions, a
+  focus trap in the batch dialog, a print stylesheet, no colour-only state anywhere — but
+  written-for is not tested-for and the difference is the whole point of an audit.
+- **The 73-year-old test has not been run.** UX-1 asks for three cold users reaching a
+  verdict with no instructions. That needs three people and cannot be simulated.
+- **Geometric correction does not run on a real verification.** `api/pipeline/preprocess.py`
+  and `api/pipeline/deskew.py` — deskew, perspective correction, contrast lifting — have
+  **no caller in the request path**. What does run is ingest (magic-byte sniffing, EXIF and
+  GPS stripping, re-encode, downscale to 2,576px), quality scoring, and the pre-gate. The
+  model receives the cleaned original.
+
+  Not an oversight, and not something to fix in a hurry: the skew estimator was measured
+  returning **-45.0° on square-on photographs** and 34° on a good one, and `correct()`
+  acts on that number at 1.5°. Wiring it as it stood would have rotated compliant labels
+  on the strength of a number the estimator invented. The estimator is fixed now; the
+  correction step still has not been proven to help on real photographs, and the vision
+  model handles rotation natively — a warning sticker applied 90° sideways reads at 0.95
+  confidence with no correction at all. `api/pipeline/limitations.py` marks these
+  `runs_in_production=False`, and [`docs/robustness.md`](docs/robustness.md) measures them
+  as an offline analysis rather than as shipped behaviour.
+
 - **Tier-3 adjudication is not wired.** Gray cases fall through to Mismatch, which is the
   safe direction.
 - **The warning's escalation path is built and unwired.** The interface, the trigger and
   the merge rules are tested against stubs; no adapter implements it.
 
-### What the three real photographs found
+### What the real photographs found
 
-| Bottle | Defect |
-|---|---|
-| Fireball, back label | The warning set in ALL CAPS — legal, and we returned the label for correction |
-| Found North, back label | "DISTILLED IN CANADA" did not match an application saying "Canada" |
-| Found North, back label | "BOTTLED BY X, CAMBRIDGE, WI" did not match an application saying "X, Cambridge, WI" |
+| Bottle | Defect | |
+|---|---|---|
+| Fireball, back label | The warning set in ALL CAPS — legal, and we returned the label for correction | fixed |
+| Found North, back label | "DISTILLED IN CANADA" did not match an application saying "Canada" | fixed |
+| Found North, back label | "BOTTLED BY X, CAMBRIDGE, WI" did not match an application saying "X, Cambridge, WI" | fixed |
+| Courtyard rosé, back label | The skew estimator reported **-45.0°** on a square-on photograph | fixed |
+| Fireball, back label | The same estimator reported **34°** on a good photograph, and `correct()` acts at 1.5° | fixed |
+| Bacardi 151, back label | Content cropped out of frame reported as **Missing** — a finding against the label — rather than Unreadable | **open** |
 
-All three were the same shape: **the label prints the value inside a phrase, the
+The first three were the same shape: **the label prints the value inside a phrase, the
 application holds the bare value, and we called that a mismatch.** All three are fixed and
 pinned in `tests/test_real_photo_regressions.py`. A torn beer label separately confirmed
 the extractor does not recite the warning from memory — occlude a line and it returns
@@ -558,10 +598,11 @@ The honest reading:
   negotiate. A tool 1.9 s over the gate still replaces a 30–40 s vendor pilot and a paper
   checklist. A tool that cannot say where a federal agency's label images were processed
   may not be deployable at all.
-- **The gate has never been measured end-to-end on a deployed URL.** The deployment has
-  not been run. `scripts/timed_run.py` is the instrument for it, PRD §221 defines the
-  measurement (20 consecutive timed runs against the deployed URL, recorded in the repo),
-  and until that is done nobody should quote a p95.
+- **The gate has been measured end-to-end on the deployed URL, and it is missed.**
+  20 consecutive timed runs against <https://labelproof.fly.dev>: p50 8.5s, **p95 9.6s**,
+  max 9.9s, 20/20 successful. Every run, with request ids and stage breakdowns, is in
+  [`docs/perf-deployed.md`](docs/perf-deployed.md) — the file rather than this sentence is
+  the evidence.
 
 The latency target is reported, never enforced. `LABELPROOF_LATENCY_TARGET_MS` (5000) is
 what the product is *held to*; the request budget and the provider timeout default from
@@ -648,11 +689,10 @@ upload, network and render. For the whole number:
   --out docs/perf-deployed.md
 ```
 
-Commit the resulting file. **It does not exist yet — the deployment has not been run**, so
-there is currently no measured end-to-end p95 for this service. When it is produced, that
-file rather than a sentence in a status update is the evidence: it carries the URL, the
-timestamp, the commit, the payload size, every individual run, and whether the server was
-in sample mode.
+Commit the resulting file. It exists: [`docs/perf-deployed.md`](docs/perf-deployed.md),
+20 runs against the live URL at commit `9b04ed7`. That file rather than a sentence in a
+status update is the evidence: it carries the URL, the timestamp, the commit, the payload
+size, every individual run, and whether the server was in sample mode.
 
 Exit codes: `0` measured, `1` nothing succeeded, `2` the server's clock and the caller's
 stopwatch disagreed — see *The honesty check* below.
@@ -785,15 +825,17 @@ artwork and the application field data an agent types in, and nothing else. All 
 and every Tier A fixture is synthetic, and nothing in this repository came from a real
 applicant or a real TTB submission.
 
-The one exception is deliberate and worth naming: **Tier B is three photographs of
-retail bottles** — a Fireball back label, a torn IPA back label, and a Found North back
-label, in `golden/tier_b/photos/`. They are pictures of products already on a shelf, not
-applicant material, and they carry no personal data. Three photographs found three real
-false-rejections, all since fixed and pinned in
-`tests/test_real_photo_regressions.py` — which is the argument for Tier B existing. It is
-also a corpus of three. It is not a sample from which an accuracy claim about real
-photographs can be made, and Tier B is reported separately and never averaged into
-Tier A for exactly that reason.
+The one exception is deliberate and worth naming: **Tier B is six photographs of retail
+bottles** in `golden/tier_b/photos/` — Fireball, a torn IPA, Found North, a Courtyard
+Winery rosé, a Bacardi 151 shot into glare, and a growler. Three of the six are declared
+as scored rows in `golden/tier_b/manifest.json`; the other three are pinned as unit
+regressions in `tests/test_real_photo_regressions.py`. All are pictures of products
+already on a shelf, not applicant material, and they carry no personal data.
+
+Between them they have found six real defects, listed below. That is the argument for
+Tier B existing. It is also a corpus of six, and not a sample from which an accuracy claim
+about real photographs can be made — which is why Tier B is reported separately, never
+averaged into Tier A, and never gates CI.
 
 ### What is stored, and for how long
 

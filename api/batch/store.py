@@ -1,4 +1,4 @@
-"""The job store — SQLite plus a TTL-swept image directory (BUILD.md §1, BATCH-6).
+"""The job store — SQLite plus a TTL-swept image directory (the build spec, BATCH-6).
 
 **Why a database at all.** A 300-item job runs for minutes. An in-memory dict loses it to
 a deploy, a crash, or a machine restart, and the agent who kicked off the importer dump

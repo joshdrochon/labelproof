@@ -1,4 +1,4 @@
-"""`POST /batch` and friends — the importer dump as a job (BUILD.md §3).
+"""`POST /batch` and friends — the importer dump as a job (pinned build decision).
 
 The route owns the upload boundary and the job's lifecycle; everything else lives in
 `api.batch`. Four things here are deliberate.

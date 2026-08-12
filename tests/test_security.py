@@ -12,10 +12,12 @@ buffers would pass while the bytes went out anyway.
 
 from __future__ import annotations
 
+import io
 import json
 import logging
 import sys
 import threading
+import tracemalloc
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -25,11 +27,12 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse, PlainTextResponse
 from fastapi.testclient import TestClient
 
+from api import errors, security
 from api import logging as applog
-from api import security
 from api.config import Config
 from api.main import create_app
 from api.middleware.ratelimit import RateLimitMiddleware
+from api.pipeline import ingest
 from api.provider.base import ExtractionRequest, ExtractionResponse
 from api.security import CONTENT_SECURITY_POLICY, SecurityPolicy, harden
 
@@ -934,3 +937,70 @@ def test_the_allowlist_still_refuses_an_unlisted_field() -> None:
     """Nothing in this wave weakened `api/logging.py`, and this asserts it."""
     with pytest.raises(applog.ContentInLogError):
         applog.log("verify_complete", brand_name="Old Tom Distillery")
+
+
+# --------------------------------------------------------------------------------------
+# Decompression bombs (SEC-5)
+# --------------------------------------------------------------------------------------
+
+
+def _flat_png(width: int, height: int) -> bytes:
+    """A solid-colour PNG. Compresses almost perfectly, which is the whole attack."""
+    from PIL import Image as _Image
+
+    buffer = io.BytesIO()
+    _Image.new("L", (width, height), 200).save(buffer, "PNG", optimize=True)
+    return buffer.getvalue()
+
+
+def test_a_small_file_declaring_enormous_dimensions_is_refused_before_decoding() -> None:
+    """The byte cap does not bound memory, and this is the gap it leaves.
+
+    Measured: a 12000x13000 solid-grey PNG is **170 KB on the wire** — comfortably under
+    the 10 MB limit — and 156 megapixels. It also slips under Pillow's own guard, which
+    only WARNS at `MAX_IMAGE_PIXELS` and does not raise until twice that. Decoding it to
+    RGB is ~470 MB before `_sanitize` downscales anything, on a 2 GB machine that accepts
+    25 concurrent requests and runs six batch workers in the same process.
+
+    Reachable from an unauthenticated `POST /verify`, before any provider call — so it
+    costs the attacker nothing and does not even need a valid label.
+
+    The check has to happen between `Image.open` (which reads the header) and `load()`
+    (which decodes), because that is the only moment the size is known and the pixels are
+    still compressed.
+    """
+    payload = _flat_png(12_000, 13_000)
+    assert len(payload) < 1_000_000, "the point is that it is a SMALL file"
+
+    with pytest.raises(errors.ImageError) as caught:
+        ingest.ingest_one(payload, Config(use_fake_provider=True), 0)
+
+    assert caught.value.code == "image_too_large_to_decode"
+
+
+def test_the_refusal_does_not_decode_the_image() -> None:
+    """Refusing after decoding would be no protection at all — the memory is spent by then."""
+    payload = _flat_png(12_000, 13_000)
+    tracemalloc.start()
+    try:
+        with pytest.raises(errors.ImageError):
+            ingest.ingest_one(payload, Config(use_fake_provider=True), 0)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+
+    # 156 megapixels in RGB is ~470 MB. Anything in that neighbourhood means the guard
+    # ran after the decode rather than before it.
+    assert peak < 50_000_000, f"peaked at {peak / 1e6:.0f} MB — the image was decoded"
+
+
+def test_an_ordinary_photograph_is_not_caught_by_the_bomb_guard() -> None:
+    """A limit that refuses real work is a worse failure than the one it prevents.
+
+    50 megapixels is above any camera a TTB agent plausibly receives, and everything is
+    downscaled to a 2,576px long edge regardless.
+    """
+    assert ingest.ingest_one(_flat_png(3_000, 2_000), Config(use_fake_provider=True), 0)
+    # 9000x6000 is 54 MP — an ordinary high-end camera, and the frame that caught the
+    # first version of this limit at 50 MP.
+    assert ingest.ingest_one(_flat_png(9_000, 6_000), Config(use_fake_provider=True), 0)

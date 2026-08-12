@@ -6,7 +6,7 @@ import { mockApi } from './dev/mockApi';
 
 /**
  * The API lives on the same origin in production — FastAPI serves this build as static
- * files (BUILD.md §1), so every request in `src/api.ts` is a plain relative path.
+ * files (pinned build decision), so every request in `src/api.ts` is a plain relative path.
  *
  * In development there are two ways to satisfy those paths, and the choice is made by
  * the environment, never by anything in the interface:

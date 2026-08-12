@@ -148,7 +148,7 @@ def verify_item(
     Neither is re-implemented here, because the pre-gate is the requirement most likely to
     be lost by copy drift, and an importer dump is exactly where hopeless artwork arrives
     in quantity — a model call on an image nobody could read is the one cost in this
-    product with a guaranteed zero return (BUILD.md §6, LP-321).
+    product with a guaranteed zero return (the build spec, LP-321).
     """
     payloads: list[bytes] = []
     for name in item.images:
@@ -289,7 +289,7 @@ class WorkerPool:
     Threads rather than processes: the work is a network call per item, so it is waiting,
     not computing, and a process pool would mean shipping image bytes across a pipe for
     no gain. Concurrency is configurable because the right number is a measured property
-    of the provider's rate limits, not a constant anyone can reason out (BUILD.md §1).
+    of the provider's rate limits, not a constant anyone can reason out (pinned build decision).
     """
 
     def __init__(

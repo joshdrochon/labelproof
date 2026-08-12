@@ -37,7 +37,7 @@ from fixtures.generator.catalog import by_name
 from fixtures.generator.spec import LabelSpec
 
 #: Where each field sits on a rendered label, roughly. Evidence boxes only ever point an
-#: agent's eye at a region, so approximate is correct here — see BUILD.md §1.
+#: agent's eye at a region, so approximate is correct here — see the note below.
 _APPROX_REGIONS: dict[FieldName, BoundingBox] = {
     FieldName.BRAND_NAME: BoundingBox(x0=0.08, y0=0.06, x1=0.92, y1=0.18),
     FieldName.CLASS_TYPE: BoundingBox(x0=0.08, y0=0.20, x1=0.92, y1=0.28),

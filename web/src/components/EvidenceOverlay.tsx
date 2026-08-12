@@ -11,7 +11,7 @@
  *      reading.
  *   3. **No box, no highlight.** A field with no bbox gets nothing drawn — never a
  *      guessed region. A wrong highlight is worse than none, because the whole argument
- *      of this product is that its evidence is honest (BUILD.md §6).
+ *      of this product is that its evidence is honest (pinned build decision).
  *   4. **Tags never sit on top of each other.** Two regions with close top edges would
  *      stack their number tags into an unreadable smear, so tags are pushed apart in a
  *      deterministic pass before render.

@@ -16,7 +16,7 @@ of a window they had already spent. A token bucket that starts full means the fi
 worth of requests never wait, which is the demo case, while the sustained rate still settles
 at the configured limit.
 
-State is in-process. On the single machine BUILD.md §1 pins that is exactly right; at N
+State is in-process. On the single machine The build spec pinned that is exactly right; at N
 machines the effective ceiling becomes N times the limit, which the README states rather than
 solving with a Redis this prototype's egress table should not carry.
 """

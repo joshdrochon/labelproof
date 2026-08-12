@@ -2,7 +2,7 @@
 
 CSV, because the person assembling an importer dump has the data in Excel and every
 alternative asks them to convert it first. The columns are the `Application` fields plus
-`front_image` and `back_image` (BUILD.md §1).
+`front_image` and `back_image` (pinned build decision).
 
 Three rules govern this module.
 

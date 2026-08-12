@@ -334,7 +334,7 @@ in LP-237, with fixtures across LP-068, 163, 195–198, 216, 226–229.
 - [ ] **LP-221** Invocation policy: gray cases only, past Tier 1/2; trigger rate logged (PRD §Processing Model)
 - [ ] **LP-222** Time budget: adjudication fits the request budget or returns Needs review (PERF-1)
 - [ ] **LP-223** Cost cap per verification; over-cap → Needs review (OPS-4)
-- [ ] **LP-224** Confidence threshold routing → Needs review, never silent (MATCH-6)
+- [x] **LP-224** Confidence threshold routing → Needs review, never silent (MATCH-6)
 - [x] **LP-327** All thresholds in one module as named constants; `eval/run.py --sweep-thresholds` reports false passes per level so tightening is evidence-driven (OPS-3, MATCH-6)
 - [ ] **LP-225** Rationale surfaced in UI on every judged field (MATCH-5, HITL-4)
 - [ ] **LP-226** Fixtures: abbreviations — `Co.`/`Company`, `&`/`and` (MATCH-4)
@@ -367,11 +367,11 @@ in LP-237, with fixtures across LP-068, 163, 195–198, 216, 226–229.
 
 ## F7 · Security & retention
 
-- [ ] **LP-249** EXIF/GPS strip verification test (SEC-3)
+- [x] **LP-249** EXIF/GPS strip verification test (SEC-3)
 - [ ] **LP-250** TTL purge verification incl. batch artifacts (SEC-2)
 - [ ] **LP-251** Log audit test: golden-set run produces zero label strings in logs (SEC-4)
-- [ ] **LP-252** Upload re-encode verification: polyglot file neutralized (SEC-5)
-- [ ] **LP-253** Content-sniffing tests: renamed executable, scripted SVG, absurd dimensions (SEC-5)
+- [x] **LP-252** Upload re-encode verification: polyglot file neutralized (SEC-5)
+- [x] **LP-253** Content-sniffing tests: renamed executable, scripted SVG, absurd dimensions (SEC-5)
 - [ ] **LP-254** PDF renderer constrained: page cap, no external fetches, timeout (SEC-5)
 - [ ] **LP-255** Rate-limit tests: burst → 429 with a plain-language body (SEC-9)
 - [x] **LP-256** Security headers scan in CI (SEC-6)

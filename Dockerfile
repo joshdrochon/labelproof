@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1
-# LabelProof — one container, one URL, one cold start (BUILD.md §1, LP-129).
+# LabelProof — one container, one URL, one cold start (the build spec, LP-129).
 #
 # Three stages. The first two exist only to produce artifacts; neither reaches the
 # published image, so the runtime carries no Node, no npm cache, no compiler, and no
@@ -143,7 +143,7 @@ HEALTHCHECK --interval=15s --timeout=4s --start-period=20s --retries=3 \
 #               the service keeps serving; keep-warm is an optimisation, never a
 #               dependency.
 #
-# `--workers 1`: the batch worker pool and the job store live in-process (BUILD.md §1).
+# `--workers 1`: the batch worker pool and the job store live in-process (pinned build decision).
 # A second worker would be a second pool competing for the same provider budget.
 # `--no-access-log`: the access log prints request paths, and a path can carry a sample
 # filename. The application's own logger allowlists field names for exactly this reason

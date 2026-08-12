@@ -3,7 +3,7 @@
  *
  * Two jobs beyond fetching:
  *
- *   1. **Shrink before sending.** BUILD.md §8 pins the client-side encode: resize the
+ *   1. **Shrink before sending.** The build spec pinned the client-side encode: resize the
  *      long edge to 2576px with `createImageBitmap`, encode WebP off the main thread.
  *      Never below 2576 — that is the high-res tier the small warning text needs.
  *   2. **Be forgiving at the boundary, strict inside.** The server is being built in
@@ -11,7 +11,7 @@
  *      object, the older `reject_candidate` spelling) is normalised here so the rest of
  *      the app sees exactly the shape in `types.ts`. Nothing is invented: a value that
  *      is not there stays absent, and an absent bbox stays absent, because a guessed
- *      region is a false trust signal (BUILD.md §6).
+ *      region is a false trust signal (pinned build decision).
  */
 
 import type {
@@ -198,7 +198,7 @@ const RECOMMENDATION_ALIASES: Record<string, VerificationResult['aggregate']['re
     ready_to_approve: 'ready_to_approve',
     needs_review: 'needs_review',
     return_for_correction: 'return_for_correction',
-    // BUILD.md §3 predates the rename in api/models.py. Accept it rather than blank out.
+    // the build spec predates the rename in api/models.py. Accept it rather than blank out.
     reject_candidate: 'return_for_correction',
   };
 

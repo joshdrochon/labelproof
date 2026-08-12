@@ -252,7 +252,7 @@ class RegionQuality:
 def crop(image: np.ndarray, box: BoundingBox) -> np.ndarray:
     """The pixels inside a normalized 0..1 box, clamped to at least one pixel.
 
-    Normalized against the *preprocessed* image, per BUILD.md §6 — deskew changes
+    Normalized against the *preprocessed* image, per the build spec — deskew changes
     geometry, so a box drawn over the original upload drifts.
     """
     h, w = image.shape[:2]

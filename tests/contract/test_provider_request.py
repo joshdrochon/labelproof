@@ -351,7 +351,7 @@ def test_the_whole_request_is_json_serialisable(captured: _RecordedCall) -> None
 
 
 # --------------------------------------------------------------------------------------
-# Prompt caching (BUILD.md §7) — a contract with the pricing, not just with the API
+# Prompt caching (pinned build decision) — a contract with the pricing, not just with the API
 # --------------------------------------------------------------------------------------
 
 

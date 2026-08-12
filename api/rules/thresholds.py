@@ -24,6 +24,10 @@ from typing import Final
 # --------------------------------------------------------------------------------------
 
 #: Below this, a non-warning field routes to Needs review rather than reporting a verdict.
+#:
+#: NOT YET WIRED for ordinary fields — LP-224 is open and this constant has no call site
+#: on that path. Said here rather than left to be discovered, because a threshold that
+#: exists only as a number reads exactly like one that is enforced.
 CONFIDENCE_FLOOR: Final[float] = 0.75
 
 #: Below this, a gray case escalates to Tier-3 adjudication rather than falling through

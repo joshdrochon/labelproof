@@ -173,7 +173,7 @@ def main(argv: list[str] | None = None) -> int:
         print(
             "  Note: 0 cached tokens. Expected on the first call of a session; if it "
             "stays 0 across repeated runs, something in the system prompt is varying "
-            "and the prompt cache has stopped paying (BUILD.md §7)."
+            "and the prompt cache has stopped paying (pinned build decision)."
         )
     return 0
 

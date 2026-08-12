@@ -1,7 +1,7 @@
 """Strict same-origin policy (SEC-6, LP-082).
 
 This app serves its React SPA from the same origin as its API — one container, one URL
-(BUILD.md §1) — so there is no legitimate cross-origin caller and "strict CORS" here means
+(pinned build decision) — so there is no legitimate cross-origin caller and "strict CORS" here means
 genuinely strict, not permissive with an apology in a comment.
 
 Three rules:

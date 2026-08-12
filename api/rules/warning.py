@@ -770,6 +770,13 @@ CHECK_MANIFEST: Final[tuple[Check, ...]] = (
         evidence="the text read off every image",
         outcome="Unreadable — the other panels have not been checked, a person must look",
     ),
+    Check(
+        code="warning_read_with_low_confidence",
+        checks="the reading is certain enough to certify the statement",
+        citation="27 CFR 16.21",
+        evidence="the extractor's own confidence in its transcription",
+        outcome="Unreadable — a reading the model disclaimed cannot clear the label",
+    ),
 )
 
 #: Every finding code this module and `typography.py` can produce. A test asserts it
@@ -1059,6 +1066,55 @@ def merge_sighting_typography(
     )
 
 
+#: Below this, a government-warning reading cannot certify the label as compliant.
+#:
+#: DEFINED HERE, NOT IN `thresholds.py`, AND THAT IS THE POINT.
+#:
+#: `test_the_warning_path_consults_no_threshold` asserts structurally that this module's
+#: import closure reaches no thresholds module at all (WARN-6). That guard is correct and
+#: it caught this constant when it first landed there. A threshold in the warning path is
+#: a knob, and a knob is something an operator can turn down: `WARNING_CONFIDENCE_FLOOR =
+#: 0.0` in a shared settings module would silently restore the exact fabrication path this
+#: exists to close, in a file nobody reviewing the warning logic would think to open.
+#:
+#: A module-private constant next to the function that reads it is not a knob. Changing it
+#: means editing the warning rules, which is where that decision belongs.
+_CONFIDENCE_FLOOR: Final[float] = 0.75
+
+
+def low_confidence_note(chosen: WarningSighting | None) -> Finding | None:
+    """Say so when the warning was read too uncertainly to certify the label.
+
+    The warning is the one field with a zero-false-pass requirement, and it is also the
+    single most memorised string a vision model could produce from memory rather than
+    from the pixels. A confident-shaped transcription of the canonical text off an image
+    the pipeline itself scored degraded is precisely the shape of a fabricated pass, and
+    nothing else in the pipeline was looking at `confidence` at all —
+    `thresholds.CONFIDENCE_FLOOR` was defined and had no call site anywhere.
+
+    Measured before this existed: canonical text, clean typography, `confidence=0.01`
+    returned MATCH, and the aggregate read "Ready to approve".
+
+    Like `conflicting_sightings_note`, this only ever DEMOTES. A low-confidence reading
+    that shows a defect keeps its defect — the asymmetry runs in both directions, and
+    "we could not read it well" must never clear a violation either.
+    """
+    if chosen is None or not chosen.legible:
+        return None
+    if chosen.confidence >= _CONFIDENCE_FLOOR:
+        return None
+    return Finding(
+        code="warning_read_with_low_confidence",
+        message=(
+            "The government warning was read, but not clearly enough to certify it. "
+            "Nothing about the warning has been verified here — read it off the label "
+            "yourself, or check it against a sharper picture."
+        ),
+        citation=canon.CITATIONS["warning_text"],
+        severity=typography.SEVERITY_UNVERIFIED,
+    )
+
+
 def conflicting_sightings_note(
     sightings: Sequence[WarningSighting], chosen: WarningSighting | None
 ) -> Finding | None:
@@ -1144,8 +1200,13 @@ def evaluate_across_images(
         net_contents_ml=net_contents_ml,
         extra_findings=escalation_findings,
     )
-    if note is None:
+    # Two independent reasons a MATCH cannot stand, applied the same way: neither can
+    # invent a defect, and neither can be overridden by a confident-looking reading.
+    demotions = [n for n in (note, low_confidence_note(chosen)) if n is not None]
+    if not demotions:
         return result
+
+    note = demotions[0]
 
     # A disagreement between panels can never leave the label reported as clean. Written
     # without rebindable locals: the two-step version had `rationale` assigned on one
@@ -1158,7 +1219,7 @@ def evaluate_across_images(
         verdict=Verdict.UNREADABLE if demoted else result.verdict,
         rationale=note.message if demoted else result.rationale,
         diff=result.diff,
-        findings=[*result.findings, note],
+        findings=[*result.findings, *demotions],
         comparison=result.comparison,
     )
 

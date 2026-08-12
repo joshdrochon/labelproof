@@ -25,7 +25,7 @@ phrase and they need different machinery:
    a plausible failure — Hough can lock onto a decorative rule rather than the text — and
    the guard costs one extra measurement.
 
-Bounding boxes are normalized against the *preprocessed* image (BUILD.md §6), which is
+Bounding boxes are normalized against the *preprocessed* image (pinned build decision), which is
 what makes it safe for this module to change geometry at all: the UI shows the same image
 the evidence boxes were drawn on.
 """
@@ -104,7 +104,7 @@ class Deskewed:
     """3x3 homography from input pixels to output pixels, or None when nothing moved.
 
     Carried because a correction that changes geometry silently invalidates every
-    coordinate anyone already holds. BUILD.md §6 handles that for evidence boxes by
+    coordinate anyone already holds. the build spec handles that for evidence boxes by
     declaring them normalized against the *preprocessed* image — which works only as long
     as nothing ever needs to go the other way. Anything holding a box in the original
     frame needs this to follow the pixels, and without it the drift is invisible: the box

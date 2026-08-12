@@ -32,6 +32,7 @@ import asyncio
 import io
 from dataclasses import dataclass
 from enum import StrEnum
+from typing import Final
 
 import pillow_heif
 import pypdfium2
@@ -43,8 +44,26 @@ from api.models import ImageQuality
 
 pillow_heif.register_heif_opener()
 
-#: Guard against decompression bombs. Pillow warns above this and errors at 2x.
+#: Pillow's own bomb guard. It only WARNS at this number and does not raise until 2x it,
+#: which is why it is not the protection — `_refuse_oversized` below is.
 Image.MAX_IMAGE_PIXELS = 80_000_000
+
+#: The real ceiling, checked against the declared dimensions before a single pixel is
+#: decoded.
+#:
+#: The byte cap alone does not bound memory, because PNG compresses flat colour almost
+#: perfectly. Measured: a 12000x13000 solid-grey PNG is **170 KB on the wire** — well
+#: under the 10 MB limit — and 156 megapixels, which slips under Pillow's 160M hard error
+#: too. Decoding it to RGB is ~470 MB before `_sanitize` has downscaled anything, on a
+#: machine with 2 GB and a concurrency limit of 25. Two of them take the process out, and
+#: with it every batch running in it.
+#:
+#: 100 megapixels, chosen to sit well clear of real photographs rather than tight against
+#: them. 50M was the first value and it refused a 9000x6000 frame — 54 MP, an ordinary
+#: high-end camera — which is the failure mode that matters more: a limit that rejects
+#: real work is worse than the attack it prevents. 100M still refuses the 156 MP bomb
+#: above by a wide margin, and everything is downscaled to a 2,576px long edge anyway.
+MAX_DECODED_PIXELS: Final[int] = 100_000_000
 
 
 class MediaType(StrEnum):
@@ -112,6 +131,25 @@ class IngestedImage:
     was_downscaled: bool = False
     metadata_stripped: bool = True
     media_type: str = "image/png"
+
+
+def _refuse_oversized(size: tuple[int, int]) -> None:
+    """Refuse an image whose declared dimensions would not fit in memory.
+
+    Phrased for the agent rather than for the attacker: someone who has been handed a
+    genuinely enormous scan needs to know what to do, and someone probing gets a plain
+    refusal with no detail about limits worth tuning against.
+    """
+    width, height = size
+    if width * height <= MAX_DECODED_PIXELS:
+        return
+    raise errors.ImageError(
+        "That image is far too large to process — it would need several gigabytes of "
+        "memory to open. Save it at a smaller size and upload it again; anything up to "
+        "about 8,000 pixels on the long edge is more than enough detail.",
+        next_step="replace",
+        code="image_too_large_to_decode",
+    )
 
 
 def _sanitize(image: Image.Image, config: Config) -> tuple[Image.Image, bool]:
@@ -206,6 +244,10 @@ def ingest_one(data: bytes, config: Config, index: int = 0) -> list[IngestedImag
 
     try:
         with Image.open(io.BytesIO(data)) as opened:
+            # BEFORE `load()`. `Image.open` reads the header only, so `size` is known
+            # while the pixels are still compressed — which is the only moment this check
+            # is worth anything.
+            _refuse_oversized(opened.size)
             opened.load()
             clean, downscaled = _sanitize(opened, config)
     except errors.LabelProofError:

@@ -157,7 +157,7 @@ export const COMMODITY_LABELS: Record<Commodity, string> = {
 
 /**
  * Stage narration for the wait. These are the real pipeline stages in the real order
- * (BUILD.md §6), so the sentence on screen is a description of what is happening and
+ * (pinned build decision), so the sentence on screen is a description of what is happening and
  * not a decorative animation.
  */
 export const STAGES: string[] = [

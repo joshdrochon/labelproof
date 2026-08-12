@@ -18,7 +18,7 @@ because `False` reads downstream as "we checked, and it is not bold" — a deter
 we did not make. `WarningTypography` is tri-state precisely so uncertainty cannot pass a
 warning check silently (WARN-6).
 
-**Prompt caching** (BUILD.md §7). The system prompt is fully static: it carries all three
+**Prompt caching** (pinned build decision). The system prompt is fully static: it carries all three
 commodity rule sets and never mentions which one is active. The active commodity travels
 in the user message. `cache_control` sits on the last system block, so the images land
 after the cached prefix and never invalidate it. Watch `usage.cache_read_tokens` — if it
@@ -213,7 +213,7 @@ def _bbox_schema() -> dict[str, Any]:
 
     Flattening the box to a string clears both and — this is the reason to prefer it over
     the alternatives — costs nothing that matters. An evidence box points an agent's eye
-    at a region; no verdict depends on one (BUILD.md §1), a malformed one is dropped
+    at a region; no verdict depends on one (pinned build decision), a malformed one is dropped
     rather than raised, and the seven boxes were always the cheapest thing in this schema
     to spend. `value` stays nullable and the typography signals stay `bool | None`, which
     is the part that had to survive (LP-067, WARN-6).
@@ -289,7 +289,7 @@ EXTRACTION_SCHEMA: Final[dict[str, Any]] = build_extraction_schema()
 
 
 # --------------------------------------------------------------------------------------
-# The system prompt — fully static, all three commodities (BUILD.md §7)
+# The system prompt — fully static, all three commodities (pinned build decision)
 # --------------------------------------------------------------------------------------
 
 _FIELD_LABELS: Final[dict[FieldName, str]] = {
@@ -442,7 +442,7 @@ def build_system_blocks() -> list[dict[str, Any]]:
 
     Nothing per-request is interpolated here — not the commodity, not a request id, not a
     timestamp. The bytes are identical on every call the process ever makes, which is the
-    only reason the cache pays (BUILD.md §7).
+    only reason the cache pays (pinned build decision).
     """
     blocks: list[dict[str, Any]] = [
         {"type": "text", "text": _ROLE_BLOCK},
@@ -753,7 +753,7 @@ def _validated_bbox(raw: Any) -> BoundingBox | None:
     """Build the evidence box, or drop it. A bad box never fails an extraction.
 
     An evidence box points an agent's eye at a region and no verdict depends on it
-    (BUILD.md §1). Throwing away a correctly-read brand name because the model returned
+    (pinned build decision). Throwing away a correctly-read brand name because the model returned
     a box with x1 of 1.02 would trade something load-bearing for something decorative.
     """
     # A dict is still accepted so a recorded fixture or an offline provider can hand over

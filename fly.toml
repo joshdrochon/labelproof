@@ -105,8 +105,32 @@ kill_timeout = "15s"
   LABELPROOF_KEEPWARM = "1"
   LABELPROOF_KEEPWARM_INTERVAL_S = "240"
 
+  # --- who a request is charged to (SEC-9) ---------------------------------------------
+  #
+  # WITHOUT THIS LINE THE RATE LIMITER FAILED OPEN IN PRODUCTION. Measured on the
+  # deployed app, same lane, same second:
+  #
+  #   constant  X-Forwarded-For: 203.0.113.7   -> 400 x8, then 429 429 429 429
+  #   rotating  X-Forwarded-For: 198.51.100.N  -> 400 x12, never throttled
+  #
+  # The container runs uvicorn with `--proxy-headers --forwarded-allow-ips='*'`, and
+  # uvicorn OVERWRITES `scope["client"]` with the leftmost X-Forwarded-For entry. So the
+  # fallback in `api.middleware.asgi.client_key` — the branch whose own docstring said it
+  # "can never be spoofed" because it reads the socket peer — was not reading the socket
+  # peer at all. Rotating one request header bought unlimited buckets on every lane,
+  # including /verify, which is the lane that spends money.
+  #
+  # No test could see it: the suite drives the ASGI app directly and uvicorn is not in
+  # the loop. It is only reachable through the real server.
+  #
+  # `fly-client-ip` is set by Fly's edge on every request and cannot be forged by the
+  # client, which is the property the header needs and the one X-Forwarded-For does not
+  # have. `api/security.py` logs at startup whenever this is set, because trusting a
+  # header is a security decision and should appear in the logs as one.
+  LABELPROOF_CLIENT_IP_HEADER = "fly-client-ip"
+
   # LABELPROOF_EXTRACTION_MODEL is deliberately NOT pinned here. The model is an eval
-  # output, not a deployment decision (BUILD.md §1), and api/config.py is its single
+  # output, not a deployment decision (pinned build decision), and api/config.py is its single
   # source of truth. Overriding it from infrastructure would let production and the
   # accuracy report disagree about which model produced the numbers.
 
@@ -157,8 +181,16 @@ kill_timeout = "15s"
   # application because these are properties of how the service is *published*, and
   # because an edge header still stands if the app is mid-restart.
   [http_service.http_options.response.headers]
-    # Two years, subdomains included, preload-eligible.
-    Strict-Transport-Security = "max-age=63072000; includeSubDomains; preload"
+    # Two years, subdomains included. NO `preload`.
+    #
+    # The edge sent `preload` while `api/security.py` deliberately omits it, and README.md
+    # explains why: preload is a commitment made to browser vendors over an entire APEX
+    # domain, and the apex here is `fly.dev` — which is not ours to commit. Submitting a
+    # rented subdomain to the preload list is a promise on someone else's behalf.
+    #
+    # The application header and the edge header now agree, which is the other half of
+    # why this was wrong: two files stating different security postures for one service.
+    Strict-Transport-Security = "max-age=63072000; includeSubDomains"
     # No MIME sniffing: an upload echoed back must never be re-interpreted as script.
     X-Content-Type-Options = "nosniff"
     # No framing. Verdicts carry regulatory weight; they must not be renderable inside

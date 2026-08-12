@@ -23,7 +23,7 @@ a false pass is marked whatever it does to the flag count.
     python -m scripts.calibrate_quality --photos fixtures/photos   # Tier B
     python -m scripts.calibrate_quality --json
 
-Tier A and Tier B are swept separately and never averaged (BUILD.md §5).
+Tier A and Tier B are swept separately and never averaged (pinned build decision).
 """
 
 from __future__ import annotations

@@ -529,3 +529,39 @@ def test_no_volume_is_mounted(fly: dict[str, Any]) -> None:
     """Uploads and results are ephemeral by policy (SEC-2), and a volume would also add a
     manual step ahead of `fly deploy`, falsifying LP-136's rebuild-from-config claim."""
     assert "mounts" not in fly
+
+
+def test_the_deployment_names_a_trusted_client_ip_header(fly: dict[str, Any]) -> None:
+    """Without this, the rate limiter fails open on the deployed URL (SEC-9).
+
+    Measured on production before it was set, same lane and same second:
+
+        constant  X-Forwarded-For: 203.0.113.7   -> 400 x8, then 429 429 429 429
+        rotating  X-Forwarded-For: 198.51.100.N  -> 400 x12, never throttled
+
+    The container runs uvicorn with `--proxy-headers --forwarded-allow-ips='*'`, and
+    uvicorn overwrites `scope["client"]` with the leftmost X-Forwarded-For entry. So
+    `client_key`'s fallback — documented in its own docstring as unspoofable because it
+    reads the socket peer — was reading a client-supplied header. Rotating it bought
+    unlimited buckets on every lane including `/verify`.
+
+    Asserted here because no unit test can reach it: the suite drives the ASGI app
+    directly and uvicorn is not in the loop. The defect lives entirely between the two.
+    """
+    env = fly["env"]
+    header = env.get("LABELPROOF_CLIENT_IP_HEADER", "")
+
+    assert header, (
+        "fly.toml does not set LABELPROOF_CLIENT_IP_HEADER. On Fly, uvicorn's "
+        "--proxy-headers makes scope['client'] client-controlled, so the rate limiter "
+        "identifies callers by a header they choose. Set it to fly-client-ip."
+    )
+    assert header.lower() != "x-forwarded-for", (
+        "x-forwarded-for is an append-only chain and client_key takes the leftmost "
+        "entry, which is whatever the client sent. It is the one header that must not "
+        "be trusted here."
+    )
+    assert header.lower() == "fly-client-ip", (
+        f"{header!r} is not a header this platform overwrites. Fly sets fly-client-ip on "
+        f"every request; anything else is only safe if some hop provably rewrites it."
+    )

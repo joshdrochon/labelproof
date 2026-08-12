@@ -273,7 +273,7 @@ def test_one_failed_image_fails_the_whole_extraction() -> None:
 
 
 # --------------------------------------------------------------------------------------
-# Prompt caching (BUILD.md §7) — the two rules that are easy to get wrong
+# Prompt caching (pinned build decision) — the two rules that are easy to get wrong
 # --------------------------------------------------------------------------------------
 
 
@@ -553,7 +553,7 @@ def test_an_empty_box_string_reads_as_no_box_and_is_not_logged_as_a_defect(
     ids=["too-few", "too-many", "not-numbers", "wrong-separator"],
 )
 def test_a_malformed_box_string_is_dropped_and_the_reading_survives(raw: str) -> None:
-    """A decorative field must never cost a correctly-read value (BUILD.md §1)."""
+    """A decorative field must never cost a correctly-read value (pinned build decision)."""
     labelled = a_label(fields={"brand_name": a_field("OLD TOM", bbox=raw)})
     provider, _ = a_provider(responds_with(labelled))
     brand = provider.extract(a_request()).extractions[0].fields[FieldName.BRAND_NAME]

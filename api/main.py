@@ -1,7 +1,7 @@
 """The application factory (LP-073).
 
 One process serves both the API and the built SPA, because one deployable means one URL,
-one cold start against the 5s gate, and one `docker run` (BUILD.md §1).
+one cold start against the 5s gate, and one `docker run` (pinned build decision).
 
 Two rules hold everywhere in this module:
 

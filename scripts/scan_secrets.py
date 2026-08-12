@@ -108,7 +108,7 @@ RULES: tuple[Rule, ...] = (
         "Roll it in the Stripe dashboard immediately.",
     ),
     Rule(
-        # The deploy target for this project (BUILD.md §1), so worth its own rule.
+        # The deploy target for this project (pinned build decision), so worth its own rule.
         "Fly.io API token",
         re.compile(r"\b(?:FlyV1\s+fm\d|fm\d[a-z]?_[A-Za-z0-9+/=_-]{40,})"),
         "Run `fly tokens revoke` and issue a new deploy token.",

@@ -209,7 +209,7 @@ def enhance_glare(image: np.ndarray) -> np.ndarray:
 
 
 def preprocess(image: np.ndarray, *, allow_perspective: bool = True) -> Preprocessed:
-    """The ordered pass: geometry, then exposure, then glare (BUILD.md §6 step 6).
+    """The ordered pass: geometry, then exposure, then glare (the build spec step 6).
 
     Geometry first because both photometric steps are local operators over tiles, and a
     tile that straddles the label edge and the desk it is lying on is measuring two

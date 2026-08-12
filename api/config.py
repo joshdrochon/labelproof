@@ -275,7 +275,7 @@ class Config:
             raise ConfigError(
                 f"LABELPROOF_TARGET_LONG_EDGE_PX is {config.target_long_edge_px}. Below "
                 f"1568 loses the high-resolution vision tier, which is what makes small "
-                f"warning text legible — see BUILD.md §1."
+                f"warning text legible — see the note below."
             )
         return config
 

@@ -1,7 +1,7 @@
 """LP-330 — day-zero latency spike. One real vision call, timed end to end.
 
 The 5-second budget in `Config.request_budget_ms` is an assumption until this runs. Prior
-art on this exact problem landed around 10 seconds per label (BUILD.md §5a, PERF-1), which
+art on this exact problem landed around 10 seconds per label (the build speca, PERF-1), which
 would make the whole synchronous design wrong. Better to learn that now than at LP-144.
 
 Deliberately runs with a *large* provider timeout rather than the configured 4000ms. The
