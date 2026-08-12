@@ -352,7 +352,8 @@ def test_a_missed_compaction_is_retried_on_a_later_sweep(tmp_path: Path) -> None
     try:
         first = sweep(policy_for(tmp_path), now=created + 25 * HOUR, store=store)
         assert not first.compacted, "the write lock should have blocked compaction"
-        assert BRAND.encode() in every_byte_under(tmp_path), "precondition: residue is there"
+        if _plain_delete_leaves_residue():
+            assert BRAND.encode() in every_byte_under(tmp_path), "precondition: residue is there"
     finally:
         blocker.execute("ROLLBACK")
         blocker.close()
@@ -417,7 +418,9 @@ def test_compaction_reports_failure_rather_than_claiming_success(tmp_path: Path)
     # Delete the rows the way the sweep does, then take the write lock away — which is
     # what a running batch does to a fifteen-minute timer.
     store.purge_expired(now=created + 25 * HOUR)
-    assert BRAND.encode() in every_byte_under(tmp_path)
+    residue_visible = _plain_delete_leaves_residue()
+    if residue_visible:
+        assert BRAND.encode() in every_byte_under(tmp_path)
 
     blocker = sqlite3.connect(store.db_path, timeout=0.1, isolation_level=None)
     blocker.execute("PRAGMA busy_timeout=0")
@@ -425,7 +428,11 @@ def test_compaction_reports_failure_rather_than_claiming_success(tmp_path: Path)
     try:
         assert retention._compact(store.db_path) is False, "must not claim it compacted"
         assert retention.compaction_owed(store.db_path) is True, "obligation must survive"
-        assert BRAND.encode() in every_byte_under(tmp_path)
+        # The load-bearing assertions are the two above: the sweep reported failure and
+        # kept the obligation. Whether the bytes are still readable is a property of the
+        # SQLite build, not of this code.
+        if residue_visible:
+            assert BRAND.encode() in every_byte_under(tmp_path)
     finally:
         blocker.execute("ROLLBACK")
         blocker.close()
