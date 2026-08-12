@@ -283,6 +283,117 @@ CATALOG: list[LabelSpec] = [
             "label is a format finding riding alongside."
         ),
     ),
+
+    # ----------------------------------------------------------------------------------
+    # Cases the real photographs found (LP-233).
+    #
+    # Each of these was a live false-rejection discovered by a bottle on someone's desk,
+    # fixed, and pinned as a unit regression. A unit test proves the rule; a fixture puts
+    # the case through the whole pipeline and inside the accuracy gate, which is where a
+    # regression would actually be felt.
+    # ----------------------------------------------------------------------------------
+
+    OLD_TOM.with_(
+        name="tc23_all_caps_warning",
+        warning_text=canon.WARNING_BODY.upper(),
+        expect={"government_warning": "match"},
+        notes=(
+            "Found on a shipping Fireball bottle. The whole statement set in capitals is "
+            "a printing convention, not a defect: 27 CFR 16.22(a)(2) governs the case of "
+            "the HEADING and says nothing about the statement after it. Comparing "
+            "case-sensitively returned this label for correction, which is the failure "
+            "that stops an agent trusting the tool."
+        ),
+    ),
+
+    OLD_TOM.with_(
+        name="tc24_producer_with_lead_in_phrase",
+        producer="Bottled by Old Tom Distillery, Bardstown, Kentucky",
+        # The application holds the BARE name. Without this override `spec.application()`
+        # derives it from the same string, so the filing carries the lead-in phrase too
+        # and the fixture proves nothing — which is what it did on the first run.
+        application_overrides={"producer_name": "Old Tom Distillery"},
+        expect={"producer": "acceptable_variation"},
+        notes=(
+            "Found on a Found North bottle. Labels print the producer inside a phrase — "
+            "'BOTTLED BY', 'PRODUCED AND BOTTLED BY' — while the application holds the "
+            "bare name. Called a Mismatch before `contains_after_normalization` existed. "
+            "Acceptable variation rather than Match: the difference is real and named."
+        ),
+    ),
+
+    OLD_TOM.with_(
+        name="tc25_country_stated_as_a_phrase",
+        commodity="spirits",
+        brand_name="NORTHERN REACH",
+        country_of_origin="Distilled in Canada",
+        application_overrides={"is_import": True, "country_of_origin": "Canada"},
+        expect={"country_of_origin": "acceptable_variation"},
+        notes=(
+            "The same shape as tc24 on a different field, and the second half of the "
+            "Found North defect. The positive counterpart to TC-19, which is the case "
+            "where origin is genuinely absent."
+        ),
+    ),
+
+    # ----------------------------------------------------------------------------------
+    # Regulatory ground the set did not reach
+    # ----------------------------------------------------------------------------------
+
+    OLD_TOM.with_(
+        name="tc26_wine_above_fourteen_needs_abv",
+        commodity="wine",
+        brand_name="STONEHILL VINEYARD",
+        class_type="Cabernet Sauvignon",
+        alcohol_text="",
+        producer="Stonehill Vineyard, Paso Robles, California",
+        application_overrides={"alcohol_content": 15.5},
+        expect={"alcohol_content": "missing"},
+        notes=(
+            "The complement to TC-17. Below 14% a table wine may omit alcohol content; "
+            "above it the statement is required, so an absent one is Missing rather than "
+            "Not applicable. Without this fixture the exemption had no upper edge and a "
+            "rule that always answered Not applicable would have scored perfectly."
+        ),
+    ),
+
+    OLD_TOM.with_(
+        name="tc27_malt_in_fluid_ounces",
+        commodity="malt",
+        brand_name="IRON GATE BREWING",
+        class_type="India Pale Ale",
+        alcohol_text="",
+        net_contents="12 fl oz",
+        producer="Iron Gate Brewing, Asheville, North Carolina",
+        expect={"alcohol_content": "not_applicable"},
+        notes=(
+            "Every other fixture states net contents in millilitres. US malt beverages "
+            "are labelled in fluid ounces, so the standards-of-fill path had never been "
+            "exercised against the unit an agent actually sees most often."
+        ),
+    ),
+
+    OLD_TOM.with_(
+        name="tc28_brand_with_an_accent",
+        brand_name="CÔTE SAUVAGE",
+        commodity="wine",
+        class_type="Rosé",
+        alcohol_text="12.5% Alc./Vol.",
+        producer="Côte Sauvage, Willamette Valley, Oregon",
+        application_overrides={"brand_name": "Cote Sauvage", "class_type": "Rose"},
+        expect={
+            "brand_name": "acceptable_variation",
+            "class_type": "acceptable_variation",
+        },
+        notes=(
+            "A Courtyard Winery photograph scored 'Dry Rosé' against 'Dry Rose' this way "
+            "and it is the right answer, which is why the fixture expects it. The engine "
+            "names the difference — 'differences in case, diacritics only; same text' — "
+            "rather than folding it into a silent Match. An accent is usually a "
+            "transcription artefact, but 'usually' is the agent's call to make, and a "
+            "tool that quietly equates two spellings of a brand has decided it for them."
+        ),
+    ),
 ]
 
 #: TCs that cannot be produced by this generator and need image degradation or real

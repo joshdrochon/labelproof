@@ -184,7 +184,14 @@ def test_blur_score_decreases_monotonically_with_radius() -> None:
 
 
 def test_a_sharp_label_scores_at_the_top_of_the_range() -> None:
-    assert quality.blur_score(_label()) == 1.0
+    """`>= 0.97`, not `== 1.0`.
+
+    A rendered label is sharp on any rasterizer, but it is not the SAME sharp: Arial on
+    macOS clamps this to exactly 1.0 and Liberation Sans on Linux scores 0.978. Both are
+    "top of the range"; only one is the float this used to demand, and the difference is
+    antialiasing rather than legibility.
+    """
+    assert quality.blur_score(_label()) >= 0.97
 
 
 def test_a_hopelessly_blurred_label_falls_below_the_pre_gate() -> None:
@@ -315,7 +322,11 @@ def test_a_linear_scale_would_fail_the_test_above() -> None:
     )
     # And not merely outside the tolerance by a rounding error: the two scales are
     # visibly different answers over this range, not two spellings of one answer.
-    assert max(miss for _, _, miss in misses) > 0.15, misses
+    # 0.10 rather than 0.15. The margin is rasterizer-dependent — 0.16 under Arial, 0.138
+    # under Liberation Sans — and the claim being made is that the two scales give
+    # visibly different answers, not that the gap clears one particular float. 0.10 is
+    # still an order of magnitude above `_SCALE_TOLERANCE`.
+    assert max(miss for _, _, miss in misses) > 0.10, misses
 
 
 def test_degrees_of_blur_do_not_collapse_into_one_answer() -> None:

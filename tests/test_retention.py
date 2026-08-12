@@ -156,6 +156,34 @@ def test_deleted_rows_leave_no_residue_in_the_database(tmp_path: Path) -> None:
     assert IMAGE_BYTES not in remains, "label artwork survived the purge"
 
 
+#: Whether this platform's SQLite leaves deleted row bytes in the file.
+#:
+#: The tests below assert a PRECONDITION — that a plain delete is not enough, which is
+#: what makes the VACUUM worth having. On a build where `secure_delete` defaults ON, or
+#: where page reuse happens to overwrite the row, the residue is simply not there and the
+#: precondition is false through no fault of the code. That was four red tests in CI while
+#: the guarantee they protect was intact.
+#:
+#: Measured rather than assumed, on the same connection settings the store uses.
+#: Takes NO caller directory on purpose. The first version probed into a subdirectory of
+#: the caller's `tmp_path`, which is the tree the assertions then scan byte by byte — so
+#: the probe's own seeded job supplied the residue the test was looking for, and one of
+#: the two tests started passing for the wrong reason while the other broke outright.
+def _plain_delete_leaves_residue() -> bool:
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as raw:
+        return _probe_residue(Path(raw))
+
+
+def _probe_residue(probe: Path) -> bool:
+    store = BatchStore(probe)
+    created = time.time()
+    seed_job(store, created=created)
+    store.purge_expired(now=created + 25 * HOUR)
+    return BRAND.encode() in every_byte_under(probe)
+
+
 def test_deleting_alone_would_not_have_been_enough(tmp_path: Path) -> None:
     """Names the failure the VACUUM prevents, so a future refactor cannot quietly undo it."""
     store = BatchStore(tmp_path)
@@ -165,6 +193,14 @@ def test_deleting_alone_would_not_have_been_enough(tmp_path: Path) -> None:
 
     # Exactly what `purge_expired` does, and nothing after it.
     store.purge_expired(now=created + 25 * HOUR)
+
+    if not _plain_delete_leaves_residue():
+        pytest.skip(
+            "this platform's SQLite already zeroes deleted rows, so the precondition "
+            "cannot be demonstrated here. The VACUUM stays regardless: secure_delete "
+            "governs future deletes only and does nothing about free pages or WAL frames "
+            "written before it was enabled."
+        )
 
     assert BRAND.encode() in every_byte_under(store_root), (
         "if this stops being true, `PRAGMA secure_delete=ON` landed in api/batch/store.py. "
@@ -199,6 +235,8 @@ def test_a_purge_by_something_other_than_the_sweep_is_still_cleaned_up(
     # Now somebody else deletes the rows. This is `api/routes/batch.py:314` exactly:
     # `purge_expired` and nothing more.
     assert store.purge_expired(now=created + 25 * HOUR)
+    if not _plain_delete_leaves_residue():
+        pytest.skip("this platform's SQLite already zeroes deleted rows — see above")
     assert BRAND.encode() in every_byte_under(tmp_path), "residue is there, unannounced"
 
     assert retention.compaction_owed(store.db_path), (

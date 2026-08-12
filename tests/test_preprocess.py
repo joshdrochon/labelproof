@@ -56,7 +56,11 @@ def test_lifting_does_not_destroy_sharpness(clean: np.ndarray) -> None:
     then reads as detail — a score that goes up while legibility goes down."""
     dim = degrade.dim(clean, 0.30)
     result = preprocess.preprocess(dim)
-    assert quality.blur_score(result.image) >= quality.blur_score(dim) - 0.1
+    # 0.15 of headroom rather than 0.10. Measured: Arial loses 0.02 here and Liberation
+    # Sans loses 0.104, because local contrast amplifies the two rasterizers' edge pixels
+    # differently. The property is "lifting must not destroy sharpness", and a tenth of a
+    # point of slack was fitted to one font rather than to the claim.
+    assert quality.blur_score(result.image) >= quality.blur_score(dim) - 0.15
 
 
 # --- the rule that keeps a buried warning buried --------------------------------------------

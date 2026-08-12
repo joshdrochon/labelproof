@@ -23,6 +23,7 @@ from api.provider.base import (
     ProviderUsage,
 )
 from api.provider.fake import SpecBackedProvider
+from api.rules import warning
 from eval import sweep, tier_b
 from eval.gates import (
     EXIT_ACCURACY,
@@ -2151,13 +2152,26 @@ def renders_a_warning_defect(spec: LabelSpec) -> bool:
     Named and reused so the guard below can exercise the predicate itself rather than a
     tautology over its output.
     """
-    return (
+    typography_defect = (
         not spec.include_warning
         or spec.warning_header_case != "upper"
         or not spec.warning_header_bold
         or spec.warning_body_bold
-        or spec.warning_text is not None
     )
+    if typography_defect:
+        return True
+    if spec.warning_text is None:
+        return False
+
+    # Ask the rules whether the text is actually defective, rather than treating "this
+    # spec overrode the text" as a proxy for it.
+    #
+    # The proxy held until a fixture set the statement in capitals — legal under 27 CFR
+    # 16.22(a)(2), which governs the case of the HEADING and says nothing about the
+    # statement after it, and the exact case a Fireball bottle exposed. Custom text and
+    # defective text stopped being the same thing at that point, and the guard would have
+    # refused a fixture whose whole purpose is that it must PASS.
+    return not warning.classify(spec.rendered_warning()).is_verbatim
 
 
 def expectation_violations(specs: list[LabelSpec]) -> list[str]:

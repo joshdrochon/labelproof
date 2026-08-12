@@ -558,6 +558,169 @@
       },
       "pending": "",
       "notes": "TC-22. Value is correct so the verdict is Match; using 'ABV' on a spirits label is a format finding riding alongside."
+    },
+    {
+      "name": "tc23_all_caps_warning",
+      "commodity": "spirits",
+      "images": [
+        "tc23_all_caps_warning.png"
+      ],
+      "sha256": {
+        "tc23_all_caps_warning.png": "b0f21a62c4d5ecdf"
+      },
+      "application": {
+        "commodity": "spirits",
+        "brand_name": "OLD TOM DISTILLERY",
+        "class_type": "Kentucky Straight Bourbon Whiskey",
+        "alcohol_content": 45.0,
+        "net_contents": "750 mL",
+        "producer_name": "Old Tom Distillery",
+        "producer_address": "Bardstown, Kentucky",
+        "country_of_origin": null,
+        "is_import": false
+      },
+      "expect": {
+        "government_warning": "match"
+      },
+      "expect_findings": {},
+      "pending": "",
+      "notes": "Found on a shipping Fireball bottle. The whole statement set in capitals is a printing convention, not a defect: 27 CFR 16.22(a)(2) governs the case of the HEADING and says nothing about the statement after it. Comparing case-sensitively returned this label for correction, which is the failure that stops an agent trusting the tool."
+    },
+    {
+      "name": "tc24_producer_with_lead_in_phrase",
+      "commodity": "spirits",
+      "images": [
+        "tc24_producer_with_lead_in_phrase.png"
+      ],
+      "sha256": {
+        "tc24_producer_with_lead_in_phrase.png": "5383a16dc4af1c4c"
+      },
+      "application": {
+        "commodity": "spirits",
+        "brand_name": "OLD TOM DISTILLERY",
+        "class_type": "Kentucky Straight Bourbon Whiskey",
+        "alcohol_content": 45.0,
+        "net_contents": "750 mL",
+        "producer_name": "Old Tom Distillery",
+        "producer_address": "Bardstown, Kentucky",
+        "country_of_origin": null,
+        "is_import": false
+      },
+      "expect": {
+        "producer": "acceptable_variation"
+      },
+      "expect_findings": {},
+      "pending": "",
+      "notes": "Found on a Found North bottle. Labels print the producer inside a phrase \u2014 'BOTTLED BY', 'PRODUCED AND BOTTLED BY' \u2014 while the application holds the bare name. Called a Mismatch before `contains_after_normalization` existed. Acceptable variation rather than Match: the difference is real and named."
+    },
+    {
+      "name": "tc25_country_stated_as_a_phrase",
+      "commodity": "spirits",
+      "images": [
+        "tc25_country_stated_as_a_phrase.png"
+      ],
+      "sha256": {
+        "tc25_country_stated_as_a_phrase.png": "27c874ba2f66e6cd"
+      },
+      "application": {
+        "commodity": "spirits",
+        "brand_name": "NORTHERN REACH",
+        "class_type": "Kentucky Straight Bourbon Whiskey",
+        "alcohol_content": 45.0,
+        "net_contents": "750 mL",
+        "producer_name": "Old Tom Distillery",
+        "producer_address": "Bardstown, Kentucky",
+        "country_of_origin": "Canada",
+        "is_import": true
+      },
+      "expect": {
+        "country_of_origin": "acceptable_variation"
+      },
+      "expect_findings": {},
+      "pending": "",
+      "notes": "The same shape as tc24 on a different field, and the second half of the Found North defect. The positive counterpart to TC-19, which is the case where origin is genuinely absent."
+    },
+    {
+      "name": "tc26_wine_above_fourteen_needs_abv",
+      "commodity": "wine",
+      "images": [
+        "tc26_wine_above_fourteen_needs_abv.png"
+      ],
+      "sha256": {
+        "tc26_wine_above_fourteen_needs_abv.png": "f500dab74fa7549b"
+      },
+      "application": {
+        "commodity": "wine",
+        "brand_name": "STONEHILL VINEYARD",
+        "class_type": "Cabernet Sauvignon",
+        "alcohol_content": 15.5,
+        "net_contents": "750 mL",
+        "producer_name": "Stonehill Vineyard",
+        "producer_address": "Paso Robles, California",
+        "country_of_origin": null,
+        "is_import": false
+      },
+      "expect": {
+        "alcohol_content": "missing"
+      },
+      "expect_findings": {},
+      "pending": "",
+      "notes": "The complement to TC-17. Below 14% a table wine may omit alcohol content; above it the statement is required, so an absent one is Missing rather than Not applicable. Without this fixture the exemption had no upper edge and a rule that always answered Not applicable would have scored perfectly."
+    },
+    {
+      "name": "tc27_malt_in_fluid_ounces",
+      "commodity": "malt",
+      "images": [
+        "tc27_malt_in_fluid_ounces.png"
+      ],
+      "sha256": {
+        "tc27_malt_in_fluid_ounces.png": "1cd3756fff115852"
+      },
+      "application": {
+        "commodity": "malt",
+        "brand_name": "IRON GATE BREWING",
+        "class_type": "India Pale Ale",
+        "alcohol_content": null,
+        "net_contents": "12 fl oz",
+        "producer_name": "Iron Gate Brewing",
+        "producer_address": "Asheville, North Carolina",
+        "country_of_origin": null,
+        "is_import": false
+      },
+      "expect": {
+        "alcohol_content": "not_applicable"
+      },
+      "expect_findings": {},
+      "pending": "",
+      "notes": "Every other fixture states net contents in millilitres. US malt beverages are labelled in fluid ounces, so the standards-of-fill path had never been exercised against the unit an agent actually sees most often."
+    },
+    {
+      "name": "tc28_brand_with_an_accent",
+      "commodity": "wine",
+      "images": [
+        "tc28_brand_with_an_accent.png"
+      ],
+      "sha256": {
+        "tc28_brand_with_an_accent.png": "77493784d73b0295"
+      },
+      "application": {
+        "commodity": "wine",
+        "brand_name": "Cote Sauvage",
+        "class_type": "Rose",
+        "alcohol_content": 12.5,
+        "net_contents": "750 mL",
+        "producer_name": "C\u00f4te Sauvage",
+        "producer_address": "Willamette Valley, Oregon",
+        "country_of_origin": null,
+        "is_import": false
+      },
+      "expect": {
+        "brand_name": "acceptable_variation",
+        "class_type": "acceptable_variation"
+      },
+      "expect_findings": {},
+      "pending": "",
+      "notes": "A Courtyard Winery photograph scored 'Dry Ros\u00e9' against 'Dry Rose' this way and it is the right answer, which is why the fixture expects it. The engine names the difference \u2014 'differences in case, diacritics only; same text' \u2014 rather than folding it into a silent Match. An accent is usually a transcription artefact, but 'usually' is the agent's call to make, and a tool that quietly equates two spellings of a brand has decided it for them."
     }
   ]
 }

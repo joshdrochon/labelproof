@@ -446,19 +446,18 @@ def test_the_warning_cases_are_all_generated(entries: list[dict[str, Any]]) -> N
         assert case in generated, f"{case} must be a generated fixture"
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "OPEN (LP-233): the golden set holds 15 labels; the ticket asks for at least 25 "
-        "spanning every TC row. Accuracy on a 15-fixture set is a number with wide error "
-        "bars, and the per-condition breakdown LP-236 wants needs more than one fixture "
-        "per condition. Asserted rather than described so that reaching 25 turns this "
-        "red. Owner: fixtures/generator/catalog.py."
-    ),
-)
 def test_the_golden_set_covers_at_least_twenty_five_labels(
     entries: list[dict[str, Any]]
 ) -> None:
+    """CLOSED (LP-233). This was `xfail(strict=True)` while the set held 19.
+
+    The strict xfail is what closed it: reaching 25 turned the test red as an XPASS,
+    which is the point of asserting a target rather than describing it. Six fixtures were
+    added — three encoding defects real photographs found (an all-caps warning, a producer
+    printed inside a lead-in phrase, a country stated as "Distilled in Canada") and three
+    covering regulatory ground the set never reached (wine above 14% where the ABV
+    exemption stops, malt in fluid ounces, an accented brand name).
+    """
     assert len(entries) >= REQUIRED_LABEL_COUNT
 
 

@@ -349,9 +349,9 @@ in LP-237, with fixtures across LP-068, 163, 195–198, 216, 226–229.
 ## F6 · Test suite & CI hardening
 
 - [x] **LP-233** Golden set → ≥25 labels spanning every TC row (OPS-2)
-- [ ] **LP-234** Label generation prompts/scripts committed — the brief invites AI-generated labels (DEL-5)
+- [x] **LP-234** Label generation prompts/scripts committed — the brief invites AI-generated labels (DEL-5)
 - [ ] **LP-235** Expected-verdicts review: every golden label hand-verified once, initialed in the file (OPS-2)
-- [ ] **LP-236** Eval harness v2: per-field + per-condition accuracy, confusion matrix, trend vs last run (OPS-2)
+- [x] **LP-236** Eval harness v2: per-field + per-condition accuracy, confusion matrix, trend vs last run (OPS-2)
 - [x] **LP-237** Regression suite: TC-01…TC-22 each a named automated test (ENG-1)
 - [x] **LP-238** E2E: Verify Now happy path (ENG-2)
 - [x] **LP-239** E2E: unreadable path (ENG-2)
