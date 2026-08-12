@@ -13,7 +13,7 @@ from api.config import (
 def test_defaults_load(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("LABELPROOF_FAKE_PROVIDER", "1")
     config = Config.from_env()
-    assert config.extraction_model == "claude-opus-5"
+    assert config.extraction_model == Config().extraction_model
     assert config.adjudication_model == "claude-haiku-4-5"
 
 

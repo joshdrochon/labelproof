@@ -91,7 +91,7 @@ def _float(name: str, default: float) -> float:
 class Config:
     # --- provider ---------------------------------------------------------------
     anthropic_api_key: str = ""
-    extraction_model: str = "claude-opus-5"
+    extraction_model: str = "claude-sonnet-5"
     adjudication_model: str = "claude-haiku-4-5"
     effort: str = "low"
     use_fake_provider: bool = False
@@ -184,7 +184,7 @@ class Config:
                 "set LABELPROOF_FAKE_PROVIDER=1 to run against recorded fixtures."
             )
 
-        model = os.environ.get("LABELPROOF_EXTRACTION_MODEL", "claude-opus-5")
+        model = os.environ.get("LABELPROOF_EXTRACTION_MODEL", "claude-sonnet-5")
 
         # Both budgets default FROM the model, so swapping the model can never leave a
         # budget behind that the model cannot meet. An explicit environment override still

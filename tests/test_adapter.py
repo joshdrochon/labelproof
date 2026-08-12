@@ -333,7 +333,7 @@ def test_the_pinned_model_and_effort_are_what_we_send() -> None:
     provider.extract(a_request())
 
     call = client.calls[0]
-    assert call["model"] == "claude-opus-5"
+    assert call["model"] == provider.config.extraction_model
     assert call["thinking"] == {"type": "adaptive"}
     assert call["output_config"]["effort"] == "low"
     assert call["max_tokens"] == MAX_TOKENS
@@ -884,7 +884,7 @@ def test_tokens_are_captured_on_every_call_and_summed_across_images() -> None:
     assert response.usage.input_tokens == 2400
     assert response.usage.output_tokens == 600
     assert response.usage.cache_read_tokens == 8000
-    assert response.usage.model == "claude-opus-5"
+    assert response.usage.model == provider.config.extraction_model
     assert response.latency_ms >= 0
 
 

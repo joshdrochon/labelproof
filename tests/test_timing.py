@@ -517,9 +517,12 @@ def test_the_priced_total_reflects_the_cache_tokens_the_provider_reported() -> N
     """Not just present in the body — actually in the number."""
     body = post_verify(make_client(provider=CountingProvider())).json()
     cost = body["cost"]
+    # Priced at the model the RESPONSE reports, not a literal. Hardcoding one made this
+    # compare the real cost against a different model's rates the moment the default
+    # changed, which is a comparison of two unrelated numbers.
     priced_without_cache = timing.usd_for(
         Cost(input_tokens=cost["input_tokens"], output_tokens=cost["output_tokens"]),
-        "claude-opus-5",
+        cost.get("model") or Config().extraction_model,
     )
     assert cost["usd"] > priced_without_cache
 
