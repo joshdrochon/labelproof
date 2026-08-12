@@ -17,15 +17,29 @@ from fixtures.generator.spec import LabelSpec
 
 #: Font candidates, in preference order. Regular and bold must come from the same family
 #: or the bold checks would be testing a family change rather than a weight change.
+#: Order matters, and DejaVu is LAST for a measured reason.
+#:
+#: Every image-quality threshold in this suite — contrast spread, blur bands, the TC-06
+#: buried-warning ratios — was calibrated against macOS's Arial. A machine that renders
+#: the same spec with DejaVu produces different numbers, and roughly thirty tests failed
+#: in CI while passing locally for ten commits because of it. The rendering was
+#: deterministic on each machine, as documented; it was never identical between them, and
+#: the thresholds assumed it was.
+#:
+#: Liberation Sans is a metric-compatible clone of Arial, so it is the closest thing to
+#: Arial available on a Linux runner and sits directly behind it. DejaVu is kept as a
+#: last resort rather than removed: rendering with the wrong metrics is still better than
+#: refusing to render, and `font_family()` records which face was used so a mismatch reads
+#: as "different family" rather than "the generator is non-deterministic".
 _FONT_CANDIDATES: list[tuple[str, str]] = [
     ("/System/Library/Fonts/Supplemental/Arial.ttf",
      "/System/Library/Fonts/Supplemental/Arial Bold.ttf"),
+    ("/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+     "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf"),
     ("/System/Library/Fonts/Helvetica.ttc",
      "/System/Library/Fonts/Helvetica.ttc"),
     ("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
      "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"),
-    ("/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
-     "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf"),
 ]
 
 

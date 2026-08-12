@@ -64,6 +64,15 @@ jobs:
           cache: pip
           cache-dependency-path: pyproject.toml
 
+      # The fixture generator rasterises labels with whatever font family it finds, and
+      # every image-quality threshold in the suite was calibrated against macOS's Arial.
+      # A runner defaulting to DejaVu measures different contrast, blur and spread on the
+      # same spec — which is why 30-odd image tests failed here while passing locally for
+      # ten commits. Liberation Sans is a metric-compatible clone of Arial, so installing
+      # it and preferring it makes both machines rasterise the same shapes.
+      - name: Install the reference font family
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq fonts-liberation
+
       - name: Install
         run: |
           python -m pip install --upgrade pip
