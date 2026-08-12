@@ -195,7 +195,7 @@ LIMITATIONS: list[Limitation] = [
             "The gap between this set and real bottles is Tier B's job, and the difference "
             "between the two numbers is the honest answer to 'does this work'."
         ),
-        evidence="fixtures/robustness/manifest.json, BUILD.md §5",
+        evidence="fixtures/robustness/manifest.json",
     ),
     Limitation(
         area="Region readability",
@@ -234,7 +234,8 @@ In `api/routes/verify.py`, after ingest and quality scoring:
 
 Send the *preprocessed* pixels to the model rather than the ingested ones, so the
 extractor sees the deskewed and light-corrected image and its bounding boxes are already
-in the coordinate space BUILD.md §6 declares (normalized against the preprocessed image).
+in the coordinate space the API contract declares (normalized against the
+preprocessed image — see `BoundingBox` in `api/models.py`).
 
 Then, after `_verify_within_budget` returns, force Unreadable on any field whose evidence
 region nobody could read:

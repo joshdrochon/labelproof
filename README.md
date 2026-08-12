@@ -1,68 +1,207 @@
 # LabelProof
 
 AI label verification for TTB compliance review. An agent uploads the label artwork and
-the application; LabelProof returns a per-field checklist and a recommendation. It
-recommends — the agent decides.
+the application data; LabelProof returns a per-field checklist with evidence and a
+recommendation. **It recommends — the agent decides.**
 
 | | |
 |---|---|
 | **Source brief** | `TakeHome Project: AI-Powered Alcohol Label Verification App.docx`, sha `7f50443d68066298…` |
 | **Requirements** | [`PRD.md`](PRD.md) **v1.0** — 2026-08-10. Source of truth; requirement IDs (Appendix A) are cited throughout the code and tests. |
-| **Regulatory canon** | `PRD.md` Appendix B, verified against eCFR / ttb.gov on 2026-08-10 |
-| **Developer log** | [`CHANGES.md`](CHANGES.md) — how to run it, how to test it, how to roll it back |
+| **Regulatory canon** | `PRD.md` Appendix B, verified against GPO CFR XML and Cornell LII, with retrieval dates recorded per item in `api/canon.py` |
+| **Developer log** | [`CHANGES.md`](CHANGES.md) — deploy, roll back, operate |
 | **Licence** | MIT |
 
-Everything in this repository traces back to those two pinned documents. If a behaviour
-here disagrees with `PRD.md` v1.0, the PRD is right and the code is a bug — except where a
-trade-off is recorded explicitly, in which case it is written down as one.
-
-The brief's sha is the value recorded in the PRD's own front matter; the `.docx` itself is
-not committed, so the digest is cited from there rather than recomputed.
-
-**Contents**
-
-- [Getting started](#getting-started) — install, run, test
-- [Observability](#observability) — the log, the fields, the timings, what the numbers actually are
-- [Ops runbook](#ops-runbook) — read the log, the timings, the cost; the honesty check
-- [Network egress](#network-egress) — every external domain, allowlist-ready (NET-1)
-- [Security, privacy, and data retention](#security-privacy-and-data-retention) — SEC-1…SEC-10
-
-<!--
-Still missing from this file, and owned by tickets that have not landed:
-
-  LP-004  Architecture defence: stack, host, provider, with rationale
-  LP-139  Setup and run instructions, verified against a cold clone
-  LP-140  Approach and tools used
-  LP-141  Assumptions log — every gap the brief left open, filled and stated
-  LP-294  Accuracy report link
-
-Until they land, `CHANGES.md` carries the working setup, test, and rollback
-instructions. It is not a substitute for LP-139 — it is written for the next engineer
-rather than for a reviewer — but nothing about running this project is undocumented in
-the meantime.
--->
+If a behaviour here disagrees with `PRD.md` v1.0, the PRD is right and the code is a bug —
+except where a trade-off is recorded explicitly, in which case it is written down as one.
+The brief's sha is quoted from the PRD's front matter; the `.docx` is not committed.
 
 ---
 
-## Getting started
+## Contents
 
-Setup, run, and test instructions live in [`CHANGES.md`](CHANGES.md#run-it) until LP-139
-lands the reviewer-facing version here.
+- [Run it](#run-it) · [What it checks](#what-it-checks) · [Approach](#approach) · [Assumptions](#assumptions) · [What is not done](#what-is-not-done)
+- [Observability](#observability) — the log, the fields, the timings, and what the numbers actually are
+- [Ops runbook](#ops-runbook) — read the log, the timings, the cost; the honesty check
+- [Network egress](#network-egress) — every external domain, allowlist-ready (NET-1)
+- [Security, privacy, and data retention](#security-privacy-and-data-retention) — SEC-1…SEC-10
+- [Deployment](#deployment) — host, residency, health, keep-warm, rollback
+
+---
+
+## Run it
+
+Nothing below needs an API key. The suite and the demo both run offline.
 
 ```bash
-./scripts/install_hooks.sh                  # once per clone
-python -m venv .venv && .venv/bin/pip install -e ".[dev]"
-.venv/bin/python -m pytest                  # offline, no API key needed
+git clone <this repo> && cd labelproof
+python3.14 -m venv .venv && .venv/bin/pip install -e ".[dev]"
+
+.venv/bin/python -m pytest                        # 3315 tests, offline, ~4 min
+.venv/bin/python -m eval.run                      # the accuracy gate
+LABELPROOF_FAKE_PROVIDER=1 .venv/bin/uvicorn api.main:app --reload
 ```
 
-Lint and type-check are part of the gate, not an optional extra
-(`.github/workflows/ci.yml` runs all three, with the test job inside `unshare --net` so
-that "the suite is offline" is demonstrated rather than asserted):
+Then open <http://localhost:8000> and click **Try a sample**.
+
+To run it against the real model, put a key in `.env` (gitignored, see `.env.example`):
+
+```bash
+echo 'ANTHROPIC_API_KEY=sk-ant-...' > .env
+.venv/bin/uvicorn api.main:app
+```
+
+Sample mode is honest about itself: `/ready` reports `simulated: true`, and an upload it
+does not recognise is **refused** rather than answered from a fixture. An early version
+fell back to the clean fixture, which returned *Ready to approve* with a government
+warning that was never on the image — a false pass with fabricated evidence. It now fails
+closed.
+
+**The gates**, all three of which CI runs:
 
 ```bash
 .venv/bin/ruff check .
 .venv/bin/mypy --strict api/
+.venv/bin/python -m pytest        # inside `unshare --net` in CI, so "offline" is shown, not claimed
 ```
+
+---
+
+## What it checks
+
+Seven mandatory fields, six verdicts, three recommendations.
+
+| Field | Verdict | Recommendation |
+|---|---|---|
+| Brand name | Match | Ready to approve |
+| Class / type designation | Acceptable variation | Needs review |
+| Alcohol content | Mismatch | Return for correction |
+| Net contents | Missing | |
+| Producer name and address | Unreadable | |
+| Country of origin | Not applicable | |
+| Government health warning | | |
+
+The seventh field is not like the other six. 27 CFR 16.21 fixes its wording exactly and
+16.22 fixes its appearance, so it is the one field where "close enough" is a
+non-answer — and it is the field the whole design is bent around.
+
+---
+
+## Approach
+
+**One synchronous request.** Upload → sanitize → quality-score → one vision call per
+image → deterministic rules → response. No queue, no polling. The vendor that came before
+this one took 30–40 seconds a label and agents went back to doing it by eye, so latency is
+an adoption gate rather than a nice-to-have.
+
+**The model reads; it does not decide.** The extractor returns what is printed on the
+label and nothing else. Every verdict is computed by deterministic code in `api/rules/`,
+which is unit-testable in milliseconds and cannot have an opinion. `ExtractedField` has no
+field to put a guess in — a value the model could not read comes back
+`value=None, legible=False`, and a field that is not on the image is omitted entirely.
+Those two are different findings (Unreadable versus Missing) and collapsing them would be
+a false finding either way.
+
+**Three tiers of matching**, and the tier is shown to the agent:
+
+1. Normalization — `STONE'S THROW` is `Stone's Throw`. Case, punctuation, accents, spacing.
+2. Explainable variation — the difference is named, not folded away silently.
+3. Adjudication — genuinely gray cases go to a model, with the reasoning recorded.
+
+**Flag, never pass.** A false flag costs an agent seconds. A false pass costs the agency a
+compliance failure. Every ambiguity in this codebase resolves toward Needs review, and the
+government warning is exempt from every confidence threshold in the system — it fails
+closed unconditionally.
+
+**A pre-gate before any spend.** An image nobody could read gets a plain-language retake
+reason and **zero** model calls. That path cannot produce a false pass, because its
+outcome is "we did not verify this."
+
+**Two tiers of evidence.** Tier A is 19 synthetic fixtures, deterministic and byte-stable,
+and it gates CI. Tier B is real photographs of real bottles, reported separately and never
+gating. The gap between them is a published number rather than an embarrassment.
+
+### Tools
+
+Python 3.14, FastAPI, Pillow + OpenCV, React + TypeScript, Claude Sonnet 5 for extraction
+and Haiku 4.5 for text adjudication, deployed as one container on Fly.io. Full rationale
+for each in [`CHANGES.md`](CHANGES.md).
+
+---
+
+## Assumptions
+
+The brief left these open. Each was decided deliberately; each is reversible.
+
+| Assumption | Why | If wrong |
+|---|---|---|
+| **The seven fields are TTB's mandatory elements**, not an arbitrary list | 27 CFR parts 4, 5, 7 and 16 | The field set is a table in `api/rules/commodity.py` |
+| **The application is typed in, not parsed from a COLA filing** | The brief shows an agent entering data | An importer is additive; nothing downstream changes |
+| **Commodity is known** (spirits / wine / malt) | Requirements differ by commodity — ABV is optional on malt, origin only on imports | It is one field on the form |
+| **Artwork may be a photograph, not just print-ready art** | Jenny described phone photos of bottles | The whole image pipeline exists for this |
+| **"Verify" means compare label to application** — not adjudicate the application itself | The brief's scope | Out of scope, and stated as such in the UI |
+| **A recommendation is advisory** | No regulator would accept an automated approval | The three values are advisory by name |
+| **Sonnet 5 over the faster model** | See below — this is the one assumption with a cost | One line in `api/config.py` |
+
+### The one trade we made against the brief
+
+**PERF-1 asks for p95 ≤ 5s. We do not meet it. Expect ~6.9s.**
+
+Measured, three runs each, live:
+
+| Model | Single call | Split | Typography errors (of 20) | Can pin US inference |
+|---|---|---|---|---|
+| Opus 5 | 9.6s | 8.4s | 0 | yes |
+| **Sonnet 5 (shipped)** | **9.0s** | **6.9s** | **0** | **yes** |
+| Haiku 4.5 | 5.5s | 4.7s | 10 | **no — rejects `inference_geo`** |
+
+Haiku is the only model that fits the gate. It is also the only one that cannot be pinned
+to US inference — it rejects the parameter with a 400 — and over 20 samples per model it
+was wrong 4/20 on header-bold and 6/20 on body-bold, **never abstained once**, and every
+single error ran in the false-pass direction, on the one field with a zero-false-pass
+gate.
+
+The 5-second figure is a stakeholder's quote about adoption. Data residency is a
+procurement condition, and those do not negotiate. A tool 1.9s slower still replaces a
+30–40 second vendor and a paper checklist; a tool that cannot say where a federal agency's
+label images were processed may not be deployable at all.
+
+Reversible in one line, and the budgets follow the model automatically.
+
+---
+
+## What is not done
+
+Stated plainly, because a reviewer will find these anyway and it is better they read them
+here.
+
+- **Never deployed.** The Fly configuration, the smoke test and the rollback are written
+  and the image builds and runs locally, but no deployment has happened. LP-136's
+  destroy-and-redeploy table is deliberately **blank and labelled unrun** rather than
+  filled with plausible output.
+- **The 20-run p95 table is empty** for the same reason. `scripts/timed_run.py` produces
+  it against any URL.
+- **Tier B is three photographs.** They earned their place — each found a real defect that
+  19 synthetic fixtures could not — but three is a sample, not a corpus, and every
+  image-quality threshold in the system is still calibrated against rendered PNGs.
+- **Tier-3 adjudication is not wired.** Gray cases fall through to Mismatch, which is the
+  safe direction.
+- **The warning's escalation path is built and unwired.** The interface, the trigger and
+  the merge rules are tested against stubs; no adapter implements it.
+
+### What the three real photographs found
+
+| Bottle | Defect |
+|---|---|
+| Fireball, back label | The warning set in ALL CAPS — legal, and we returned the label for correction |
+| Found North, back label | "DISTILLED IN CANADA" did not match an application saying "Canada" |
+| Found North, back label | "BOTTLED BY X, CAMBRIDGE, WI" did not match an application saying "X, Cambridge, WI" |
+
+All three were the same shape: **the label prints the value inside a phrase, the
+application holds the bare value, and we called that a mismatch.** All three are fixed and
+pinned in `tests/test_real_photo_regressions.py`. A torn beer label separately confirmed
+the extractor does not recite the warning from memory — occlude a line and it returns
+nothing, `legible=False`, rather than completing it.
 
 ---
 
@@ -883,3 +1022,200 @@ agency could actually run:
 Inference geography is **not** on this list on purpose — see above. `.env.example` lists every
 variable the app does read, including the extraction model, the latency budgets and the upload
 caps that this section does not cover.
+
+---
+
+## Deployment
+
+One container, one URL. FastAPI serves the built single-page app as static files, so
+there is one deployable, one cold start against the 5-second budget, and one `docker run`
+that reproduces production locally.
+
+| | |
+|---|---|
+| **Host** | Fly.io, `iad` (Ashburn, Virginia) |
+| **Configuration** | `fly.toml` — the complete environment, no console settings |
+| **Image** | `Dockerfile` — multi-stage; the runtime carries no toolchain |
+| **Pipeline** | `.github/workflows/deploy.yml` — gated on green, auto-rollback on red |
+| **Verification** | `scripts/smoke.sh` — a real verification against the deployed URL |
+| **Secrets** | Fly's secret store. Nothing sensitive is in this repository. |
+
+### Why `iad`
+
+The users are a federal agency in Washington DC. Northern Virginia is the closest Fly
+region to them — roughly 5–15 ms round trip against 60–70 ms from the west coast. On a
+budget dominated by a multi-second model call that is not decisive, but it costs nothing
+and it is the reason that survives scrutiny.
+
+One claim that used to be here is gone: *"the shortest hop to the provider."* Plausible,
+never measured. Nobody has timed `iad → api.anthropic.com` against another region from
+inside this app, so it stays out until someone does.
+
+### Data residency
+
+**The compute runs in Virginia and inference is pinned to the United States.** Both halves
+are in the code rather than inferred from the region: `api/config.py` sets
+`inference_geo = "us"`, `api/provider/anthropic_adapter.py` puts it on every extraction
+request, and `tests/test_adapter.py` asserts the outgoing request carries it. Without that
+parameter a request follows the workspace's default inference geography — `global` unless
+someone configured otherwise — so this is a setting, not a consequence of deploying to
+`iad`.
+
+**The caveat that remains, and it is worth raising before an agency does.** The pin is
+made by this application. It is enforced against the Anthropic workspace's
+`allowed_inference_geos` allowlist, which is configured outside this repository — so the
+guarantee is only as strong as that workspace's configuration, and confirming it is part
+of any procurement conversation rather than something this deployment can demonstrate on
+its own.
+
+*(An earlier version of this section said the adapter did not set `inference_geo` at all.
+That was written while the fix was in flight and became false when it landed — it
+instructed staff to withhold a true compliance property from the customer who most needs
+it. Both directions of that error are the same mistake: describing the code from memory
+instead of reading it.)*
+
+### Deploying
+
+The pipeline does this on every push to `main`. The manual path exists for the first
+deploy and for the rebuild drill:
+
+```bash
+fly apps create labelproof
+fly secrets set ANTHROPIC_API_KEY="sk-ant-..."   # the only secret this service needs
+fly deploy
+scripts/smoke.sh https://labelproof.fly.dev
+```
+
+There is no fourth step. No volume to create, no dashboard toggle, no environment
+variable set out of band — that is the property `fly.toml` is designed to have, and
+[CHANGES.md](CHANGES.md) records the drill that tests it.
+
+### Health and readiness
+
+Two endpoints answering two different questions, wired to two different consequences.
+
+| Endpoint | Question | Red means |
+|---|---|---|
+| `GET /health` | Is the process alive? Touches no config, no provider, no disk. | Restart me. |
+| `GET /ready` | Is this process *configured* to check a label — required settings present, provider client constructible? | Take me out of rotation. |
+
+Both are platform checks, and `/ready` is the gate a new release must pass before it
+receives traffic: a release shipped **without** `ANTHROPIC_API_KEY` fails there and never
+serves a request.
+
+**`/ready` does not contact the provider.** It validates configuration and constructs the
+SDK client; the client exposes no reachability probe, so nothing leaves the machine. A key
+that is *present but revoked, expired, or scoped to the wrong workspace* answers
+`{"status":"ready","simulated":false}` with a 200. A missing key is genuinely caught — that
+half holds — but "provider reachable" was an overstatement and is not what this endpoint
+measures.
+
+What actually proves the provider works is `scripts/smoke.sh`, which performs a real
+verification after every deploy. If you need continuous assurance rather than
+per-deploy, the keep-warm loop calls the provider every four minutes and logs the
+outcome — that is the closest thing to a live provider check this service has.
+
+**`/ready` returning 200 is not the same as the service being usable.** In sample mode it
+answers 200 with `simulated: true` — a server that can replay the built-in example labels
+and nothing else. It looks healthy to every status-code check in existence while handing a
+compliance reviewer demonstration verdicts that are indistinguishable from findings. Three
+layers treat that as the deployment failure it is:
+
+1. `LABELPROOF_FAKE_PROVIDER = "0"` is pinned in `fly.toml`, so it cannot be inherited.
+2. `scripts/smoke.sh` asserts on the field after every deploy and triggers a rollback.
+3. The keep-warm loop checks it every four minutes and logs an error if it ever flips.
+
+### Keeping it warm
+
+*"If we can't get results back in about 5 seconds, nobody's going to use it."* A grader
+clicks the link once, cold. That first click must not be the request that pays for a
+machine wake and an unprimed prompt cache.
+
+- **The machine never stops.** `min_machines_running = 1` with `auto_stop_machines = "off"`.
+  Not `"suspend"` — suspend is cheaper and still charges the first request for the resume,
+  and the first request is the one being protected.
+- **The prompt cache stays primed.** `scripts/keepwarm.py` re-warms the extraction prompt's
+  cached prefix every four minutes, under the provider's five-minute cache TTL. Every ping
+  reports whether the cache actually engaged, because a cache that silently fails to engage
+  is worse than none — the latency budget was planned around it.
+
+What this does *not* fix, said plainly: the TLS connection pool lives in the server
+process and expires after a few seconds idle regardless, so the first request still pays
+one handshake. The prompt cache was the part worth buying.
+
+### Egress (NET-1)
+
+Every outbound destination, so a network administrator can allowlist this app from one
+table. The list is short by design, and verifiable — there are no external URLs anywhere
+in `api/` or `web/src/`:
+
+```bash
+grep -rnoE "https?://[a-zA-Z0-9./_-]+" api web/src web/index.html | grep -v localhost
+```
+
+**From the running service, in production:**
+
+| Destination | Port | Protocol | Purpose | Required? |
+|---|---|---|---|---|
+| `api.anthropic.com` | 443 | HTTPS | Vision extraction, Tier-3 adjudication, and the keep-warm cache pre-warm. The only runtime dependency. | **Yes.** Blocked, the app stays up and says so in plain language; it cannot verify labels. |
+| DNS resolver | 53 | UDP/TCP | Resolving the above. | Yes |
+
+That is the whole list. No CDN, no font host, no analytics, no error-reporting service, no
+object store, no external queue or broker — the job store is SQLite in the container and
+uploads are local files on a TTL.
+
+**From the browser:** same-origin only. Every asset is served by the app itself and the
+Content-Security-Policy in `fly.toml` enforces it. **The browser never contacts the model
+provider** (NET-2) — all AI calls are brokered server-side, which is also what makes a
+single-domain allowlist sufficient for an agency workstation.
+
+**Inbound:** 443. Port 80 answers only with a redirect to 443.
+
+**Build and deploy time only — not needed on an agency network:**
+
+| Destination | Purpose |
+|---|---|
+| `registry-1.docker.io`, `auth.docker.io`, `production.cloudflare.docker.com` | Base images (`python:3.12-slim`, `node:22-slim`) |
+| `deb.debian.org`, `security.debian.org` | One system package (`libglib2.0-0`) |
+| `pypi.org`, `files.pythonhosted.org` | Python dependencies |
+| `registry.npmjs.org` | Web dependencies |
+| `nodejs.org` | Node runtime download, on a `setup-node` cache miss |
+| `github.com`, `objects.githubusercontent.com` | Source checkout, Actions, and the `flyctl` binary download |
+| `api.github.com` | Actions API |
+| `registry.fly.io`, `api.machines.dev` | Image push and machine API, from CI |
+
+*(`nodejs.org` and the `flyctl` download were missing from an earlier version of this
+table, which was presented as complete. If you are allowlisting a build network, prefer
+verifying against a run with egress logging over trusting this list.)*
+
+**Swapping providers.** All AI calls go through one server-side interface
+(`api/provider/base.py`). Pointing the service at an Azure-hosted or gov-cloud endpoint is
+an adapter plus a config value — it changes exactly one row of the first table above and
+nothing else about this deployment.
+
+### Transport and security headers (SEC-6)
+
+HTTPS only. Fly terminates TLS at the edge and redirects plain HTTP rather than serving
+it, and the headers below are set at the edge — where they still stand if the application
+is mid-restart.
+
+| Header | Value | Why |
+|---|---|---|
+| `Strict-Transport-Security` | `max-age=63072000; includeSubDomains; preload` | Two years, preload-eligible |
+| `Content-Security-Policy` | same-origin; `data:`/`blob:` images | The SPA loads nothing third-party; upload previews are object URLs |
+| `X-Content-Type-Options` | `nosniff` | An upload echoed back must never be re-interpreted as script |
+| `X-Frame-Options` | `DENY` | Verdicts carry regulatory weight; they must not render inside someone else's chrome |
+| `Referrer-Policy` | `no-referrer` | Nothing to leak, so leak nothing |
+
+### Retention
+
+Uploads and results live in the container's `/data` and are purged on a TTL (24h,
+configurable). **There is deliberately no mounted volume** — a volume would be a durable
+home for exactly the data the retention policy exists to destroy, and it would add a
+manual `fly volumes create` ahead of `fly deploy`, which would falsify the claim that this
+environment rebuilds from configuration alone.
+
+### Rolling back
+
+See **[CHANGES.md](CHANGES.md)** for the rollback runbook, the automatic trigger, and the
+destroy-and-redeploy drill.

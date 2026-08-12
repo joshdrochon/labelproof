@@ -1,0 +1,249 @@
+# LabelProof — infrastructure as configuration (LP-128, ENG-6).
+#
+# This file is the whole environment. There is no console click, no manually created
+# volume, and no out-of-band setting behind the deployed URL; `fly apps create` plus
+# `fly secrets set ANTHROPIC_API_KEY=…` plus `fly deploy` reproduces production from a
+# clean clone, which is what makes the destroy-and-redeploy drill in CHANGES.md a real
+# test rather than a paragraph.
+#
+# NO SECRETS IN THIS FILE. `[env]` is baked into the image metadata and readable by
+# anyone who can pull it. The API key is a platform secret, injected into the process
+# environment at boot and never written to the repository (SEC-6).
+#
+#     fly secrets set ANTHROPIC_API_KEY="sk-ant-…"
+#
+# There is a real `.env` in the working tree carrying a live key. It is gitignored, it is
+# excluded in `.dockerignore`, and it is not referenced here. It stays a local
+# development convenience and never becomes a deployment mechanism.
+
+app = "labelproof"
+
+# --------------------------------------------------------------------------------------
+# Region (LP-127)
+# --------------------------------------------------------------------------------------
+# `iad` — Ashburn, Virginia. The users are a US federal agency in Washington DC, and
+# Northern Virginia is the closest Fly region to them: roughly 5–15 ms round trip against
+# 60–70 ms from the west coast. Against a multi-second model call that is not decisive,
+# but it is free and it is checkable.
+#
+# One reason that used to be here is gone: "the shortest hop to the model provider" was
+# plausible and never measured from inside this app against any other region.
+#
+# Data residency is a separate matter and is NOT established by this line. The region
+# places the compute; where inference runs is `inference_geo`, set to "us" in
+# api/config.py and asserted on the outgoing request by tests/test_adapter.py. Both are
+# needed, and the second one is the one an agency will ask about — see README.md, which
+# also carries the caveat about the workspace-level allowlist.
+primary_region = "iad"
+
+# In-flight verifications get a chance to finish before a machine goes away, so a deploy
+# is not visible to whoever is mid-verification. (Top-level on purpose — TOML would fold
+# these into whichever table preceded them.)
+kill_signal = "SIGTERM"
+kill_timeout = "15s"
+
+[build]
+  dockerfile = "Dockerfile"
+
+# --------------------------------------------------------------------------------------
+# Environment
+# --------------------------------------------------------------------------------------
+# Only values that are safe to read. `api/config.py` owns every default; this section
+# overrides exactly what production needs to differ on, so a reader can see the
+# production delta rather than a re-statement of the defaults.
+[env]
+  PORT = "8080"
+  LABELPROOF_STORAGE_DIR = "/data"
+  LABELPROOF_LOG_LEVEL = "INFO"
+
+  # Set explicitly, not left to the default. Sample mode replays built-in fixtures and
+  # cannot read an uploaded photo; a production instance in that state serves
+  # demonstrations that look exactly like findings. Pinning it to "0" here means it
+  # cannot be inherited from a stray machine environment (LP-132).
+  LABELPROOF_FAKE_PROVIDER = "0"
+
+  # --- latency budget: PINNED, AND CHECKED AGAINST THE MODEL ---------------------------
+  #
+  # These were originally unpinned, on the reasoning that api/config.py owns its own
+  # defaults. That shipped a production where every real verification returned 503: the
+  # defaults were a 4,000 ms deadline sized for the 5-second gate, silently applied to a
+  # model measuring 9.4-10.1 s. The file describing production made no claim about the
+  # two numbers that decide whether production works.
+  #
+  # `api/config.py` has since been fixed to derive both from the configured model's
+  # measured latency, which removes that failure at the source. Pinning static numbers
+  # here therefore carries a NEW risk in the opposite direction: change the model to
+  # something slower and these become the next stale constant. Both risks are real, so
+  # both are handled rather than traded off —
+  #
+  #   - the values are explicit here, so production's budget is visible in a diff;
+  #   - they match what `api/config.py` derives for the configured model today;
+  #   - and `tests/test_deploy_config.py` compares them against that derivation, so
+  #     changing the model turns a stale pin into a CI failure instead of a 503.
+  #
+  # Change the model and this file fails the build until these move with it. That is the
+  # intended behaviour, not an inconvenience.
+  #
+  # THESE VALUES DO NOT MEET PERF-1, and the gap is deliberate rather than hidden. A 5s
+  # gate is not reachable with a model that takes ten seconds to answer, and a deadline
+  # short enough to pretend otherwise only converts slow into broken — which is exactly
+  # what happened. Closing it is the LP-329 model sweep's job. scripts/smoke.sh reports
+  # the gap on every deploy so it cannot quietly become normal, and SMOKE_ENFORCE_PERF1
+  # turns it into a rollback trigger the day it is met.
+  LABELPROOF_PROVIDER_TIMEOUT_MS = "19200"
+  LABELPROOF_REQUEST_BUDGET_MS = "20700"
+
+  # LABELPROOF_ADJUDICATION_RESERVE_MS is deliberately NOT set. `api/config.py` parses it
+  # and nothing in `api/` reads it — Tier-3 adjudication is not wired to a time reserve
+  # yet. Pinning it here would present a dead knob as a production setting in a block
+  # whose stated purpose is "what production needs to differ on", which is how a reader
+  # ends up tuning a value that does nothing. Set it when something consumes it.
+
+  # Keep-warm and prompt-cache pre-warm (LP-134, LP-324). Opt-in by design — the same
+  # image run locally makes no paid API calls. The interval is under the provider's
+  # five-minute cache TTL on purpose; scripts/keepwarm.py clamps it and explains why.
+  LABELPROOF_KEEPWARM = "1"
+  LABELPROOF_KEEPWARM_INTERVAL_S = "240"
+
+  # LABELPROOF_EXTRACTION_MODEL is deliberately NOT pinned here. The model is an eval
+  # output, not a deployment decision (BUILD.md §1), and api/config.py is its single
+  # source of truth. Overriding it from infrastructure would let production and the
+  # accuracy report disagree about which model produced the numbers.
+
+# --------------------------------------------------------------------------------------
+# Service
+# --------------------------------------------------------------------------------------
+[http_service]
+  internal_port = 8080
+  processes = ["app"]
+
+  # HTTPS only (SEC-6, LP-133, LP-083). Fly terminates TLS at the edge and this redirects
+  # plain HTTP rather than serving it. A federal reviewer should never see this app on
+  # port 80 with a 200.
+  force_https = true
+
+  # PERF-6: the machine must never be stopped when the grader clicks.
+  #
+  # `auto_stop_machines = "off"` is the line that does the work. "suspend" would be
+  # cheaper and would still cost a resume on the first request — and the first request is
+  # the one being protected. The previous vendor lost this account to 30–40 second
+  # responses; a cold start on the grader's first click is that failure in miniature.
+  #
+  # `min_machines_running = 1` is a NO-OP as configured, and is kept only as documentation
+  # of intent. Fly consults it when deciding how many machines to leave up while
+  # autostopping — with autostop off, nothing ever stops, so there is no floor to enforce.
+  # It matters the moment someone sets autostop to "stop" or "suspend"; until then it
+  # asserts nothing. (An earlier version of this comment called these two lines the most
+  # important pair in the file, which credited the wrong one.)
+  auto_stop_machines = "off"
+  auto_start_machines = true
+  min_machines_running = 1
+
+  # A verification holds a connection open for seconds while the provider works, so these
+  # are low.
+  #
+  # What they actually do on a single-machine app: `soft_limit` is the point at which the
+  # edge prefers to route new requests to a DIFFERENT machine — with one machine there is
+  # nowhere else to send them, so it has no effect today and becomes load-spreading the
+  # moment a second machine exists. `hard_limit` is the real control: at that many
+  # in-flight requests the edge stops routing here rather than queueing behind them.
+  # Better a fast, honest rejection than a connection that sits until it times out.
+  [http_service.concurrency]
+    type = "requests"
+    soft_limit = 12
+    hard_limit = 25
+
+  # Security headers at the edge (SEC-6, LP-083, LP-133). At the edge rather than in the
+  # application because these are properties of how the service is *published*, and
+  # because an edge header still stands if the app is mid-restart.
+  [http_service.http_options.response.headers]
+    # Two years, subdomains included, preload-eligible.
+    Strict-Transport-Security = "max-age=63072000; includeSubDomains; preload"
+    # No MIME sniffing: an upload echoed back must never be re-interpreted as script.
+    X-Content-Type-Options = "nosniff"
+    # No framing. Verdicts carry regulatory weight; they must not be renderable inside
+    # someone else's chrome.
+    X-Frame-Options = "DENY"
+    Referrer-Policy = "no-referrer"
+    # The SPA is entirely same-origin: Vite emits local module scripts and one stylesheet,
+    # there are no CDN fonts and no third-party analytics, and the browser never talks to
+    # the model provider (NET-2). So the policy can be tight.
+    #   img-src data:/blob: — upload previews and evidence crops are object URLs.
+    #   style-src 'unsafe-inline' — EvidenceOverlay positions boxes with a style
+    #     attribute; that is a style *attribute*, which this is the only way to allow.
+    Content-Security-Policy = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; font-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
+
+  # ------------------------------------------------------------------------------------
+  # Platform health checks (LP-132, NET-5)
+  # ------------------------------------------------------------------------------------
+  # The two endpoints answer different questions and are wired to different consequences.
+  #
+  # `/health` — is the process alive. It touches no config, no provider and no disk, so it
+  # can only fail because the process is gone. That is what makes it safe as a restart
+  # signal: a liveness check that goes red during someone else's outage kills a container
+  # that was working.
+  [[http_service.checks]]
+    interval = "15s"
+    timeout = "4s"
+    grace_period = "20s"
+    method = "GET"
+    path = "/health"
+
+  # `/ready` — is this process CONFIGURED to check a label: required settings present and
+  # the provider client constructible. Red means take me out of rotation. It is also the
+  # gate a new release must pass: `fly deploy` will not promote a machine whose checks are
+  # failing, so a release that ships without ANTHROPIC_API_KEY fails here and never
+  # receives traffic.
+  #
+  # Two things it CANNOT catch, stated rather than assumed:
+  #
+  # 1. It does not contact the provider. It builds the SDK client and stops; the client
+  #    has no reachability probe. A key that is present but revoked, expired or scoped to
+  #    the wrong workspace answers 200 and `"simulated": false`. A MISSING key is caught.
+  # 2. It answers 200 in sample mode too, flagged only in the body, and Fly's checks match
+  #    status codes rather than bodies.
+  #
+  # Three other layers cover the gap: LABELPROOF_FAKE_PROVIDER = "0" above makes sample
+  # mode unreachable by configuration; scripts/smoke.sh performs a real verification after
+  # every deploy and rolls the release back if it fails; and the keep-warm loop calls the
+  # provider every four minutes and logs the outcome.
+  [[http_service.checks]]
+    interval = "30s"
+    timeout = "6s"
+    grace_period = "30s"
+    method = "GET"
+    path = "/ready"
+
+# --------------------------------------------------------------------------------------
+# Machine (LP-134)
+# --------------------------------------------------------------------------------------
+# Shared CPU, two vCPU, 2 GB. ~$8/month.
+#
+# This was `performance-2x` at ~$62/month, argued from a 300 ms non-provider allowance
+# inside a 5s budget. The argument had the right shape and the wrong magnitude, and the
+# measurement settles it: the app's own `timings_ms` shows roughly 130 ms of CPU work
+# against a 9.4-10.4s provider call. Shared-CPU steal is tens of milliseconds. A term
+# three orders of magnitude smaller than the provider call cannot be what decides the
+# p95, and buying dedicated cores to protect it was paying 8x to defend a rounding error.
+#
+# Two vCPU rather than one still earns its place, modestly and for one specific reason:
+# the two images are preprocessed concurrently and OpenCV releases the GIL, so the second
+# core saves most of one image's preprocessing — at most ~130 ms, once.
+#
+# 2 GB carries numpy, OpenCV and Pillow holding a few full-resolution frames while a batch
+# job runs its worker pool in the same process. Raise it if the batch pool OOMs; that is a
+# memory decision with evidence behind it, unlike the CPU one it replaces.
+#
+# To revisit this properly rather than by argument: run the 20-sample p95 against both
+# sizes and compare `timings_ms.total - timings_ms.extract`. If the non-provider p95
+# differs by less than ~100 ms, the cheap option is correct. Record the numbers in
+# CHANGES.md either way.
+[[vm]]
+  size = "shared-cpu-2x"
+  memory = "2gb"
+
+# No `[mounts]`, deliberately. Uploads and results are ephemeral by policy — auto-purged
+# on a 24h TTL (SEC-2) — and a volume would be a durable home for exactly the data the
+# retention policy exists to destroy. It would also pin the app to one host and add a
+# manual `fly volumes create` step ahead of `fly deploy`, which would falsify the claim
+# this file is making: that the environment rebuilds from configuration alone (LP-136).

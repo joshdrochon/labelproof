@@ -1,0 +1,357 @@
+# Deploy to production — gated on green, rolled back on red (LP-130, LP-131, ENG-1).
+#
+# Two jobs and one rule: nothing reaches the public URL that has not passed the release
+# gate, and nothing stays on the public URL that fails its post-deploy smoke test.
+#
+#   gate    lint, types, the full test suite, the golden-set eval, and a real production
+#           build of the SPA. Deterministic and offline — the fake provider replays
+#           recorded fixtures, so this job never calls the model and never spends (ENG-3).
+#
+#   deploy  records the currently-live image, ships the new one, then proves the new one
+#           actually verifies a label over HTTPS. If it does not, the recorded image goes
+#           straight back and the run fails loudly.
+#
+# On the redundancy with ci.yml: this gate deliberately re-runs checks that CI already
+# runs on the pull request. A deploy that depends on another workflow's *name* to know it
+# is safe is a deploy that silently stops being gated the day someone renames it. This
+# way "green" is a fact this workflow established about this commit, on this runner,
+# minutes ago.
+
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      skip_gate:
+        description: "Skip the release gate (emergency rollback only)"
+        type: boolean
+        default: false
+
+# One deploy at a time, and never cancel one in flight — a cancelled `fly deploy` can
+# leave a release half-applied, which is a worse state than a slow queue.
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  FLY_APP: labelproof
+  PUBLIC_URL: https://labelproof.fly.dev
+
+jobs:
+  # ====================================================================================
+  gate:
+    name: Release gate
+    runs-on: ubuntu-latest
+    if: ${{ !inputs.skip_gate }}
+    timeout-minutes: 20
+
+    env:
+      # Every test runs against recorded fixtures. No key is present in this job, which
+      # is the strongest possible statement that CI cannot depend on the network.
+      LABELPROOF_FAKE_PROVIDER: "1"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # 3.12 because that is what the runtime image runs. A gate that passes on a
+      # different interpreter than production ships on is testing the wrong thing.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Lint
+        run: ruff check .
+
+      - name: Typecheck
+        run: mypy --strict api/
+
+      - name: Tests
+        run: pytest -q
+
+      # Accuracy is a number, tracked run over run (OPS-3). The harness exits non-zero on
+      # a false pass against a warning violation, which is release-blocking by design —
+      # it is the one failure the PRD calls the worst this product can produce.
+      - name: Golden-set eval
+        run: python -m eval.run
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install web dependencies
+        run: npm --prefix web ci --no-audit --no-fund
+
+      - name: Web lint, types and tests
+        run: |
+          npm --prefix web run lint
+          npm --prefix web run typecheck
+          npm --prefix web run test
+
+      # Builds here as well as in the Docker stage: a build failure should surface as a
+      # failed gate in thirty seconds, not as a failed image push four minutes in.
+      - name: Web build
+        run: npm --prefix web run build
+
+  # ====================================================================================
+  deploy:
+    name: Deploy and verify
+    runs-on: ubuntu-latest
+    needs: [gate]
+    # `always()` so an emergency `skip_gate` dispatch can still deploy, while a *failed*
+    # gate still blocks. Skipped is permitted; failed is not.
+    if: ${{ always() && (needs.gate.result == 'success' || needs.gate.result == 'skipped') }}
+    timeout-minutes: 25
+
+    environment:
+      name: production
+      url: https://labelproof.fly.dev
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+
+      # The cheap half of the destroy-and-redeploy drill (LP-136). It proves the platform
+      # accepts this configuration, before a deploy is attempted with it — a malformed
+      # fly.toml should fail in twenty seconds here rather than four minutes into a
+      # remote build. It does NOT prove the configuration is complete; only the drill in
+      # CHANGES.md does that.
+      # `--strict` is the flag that identifies unrecognised sections and keys. Without it
+      # a misspelled `auto_stop_machnes` or a typo'd `[env]` key validates clean — and a
+      # setting the platform silently ignores is exactly the failure this whole wave keeps
+      # producing: a deployment that looks configured and is not.
+      - name: Validate the deployment configuration
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: flyctl config validate --app "$FLY_APP" --config fly.toml --strict
+
+      # ------------------------------------------------------------------------------
+      # Record what is live right now. This is the rollback target, and it has to be
+      # captured before anything changes — after a failed deploy, "the previous release"
+      # is no longer something the platform will reliably tell us.
+      # ------------------------------------------------------------------------------
+      # Fails closed. The previous version reported "no previous image — this looks like
+      # the first deploy" for BOTH of the reasons it can be empty: an app with no
+      # releases, and a `flyctl` error or a changed JSON shape. The second is a schema
+      # change silently disarming the one guardrail that must not fail open, behind a
+      # warning on an otherwise green run. So the two cases are now distinguished
+      # explicitly, and only the genuine first deploy is allowed through.
+      - name: Record the currently-deployed image and config
+        id: current
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: |
+          set -uo pipefail
+
+          # Does the app have any releases at all? This, not a parse failure, is what
+          # "first deploy" means.
+          if ! releases="$(flyctl releases --app "$FLY_APP" --json 2>&1)"; then
+            if printf '%s' "$releases" | grep -qiE "could not find app|not found"; then
+              echo "::notice::$FLY_APP does not exist yet — first deploy. No rollback target, by definition."
+              echo "first_deploy=true" >> "$GITHUB_OUTPUT"
+              echo "image=" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            echo "::error::flyctl releases failed, so the rollback target is unknown. Refusing to deploy without one — a deploy with no way back is the failure this step exists to prevent."
+            printf '%s\n' "$releases"
+            exit 1
+          fi
+
+          # "Not an array" is not "no releases". The previous version collapsed the two
+          # with `if type == "array" then length else 0 end`, so a shape change to
+          # `{"releases": [...]}` would classify a live app as a first deploy, print a
+          # notice on an otherwise green run, and disarm the rollback — the same fail-open
+          # this step was rewritten to close, moved down one line.
+          if ! printf '%s' "$releases" | jq -e 'type == "array"' >/dev/null; then
+            echo "::error::'flyctl releases --json' did not return an array. The output shape has changed and 'has this app ever deployed' can no longer be answered. Refusing to deploy without a known rollback target. Raw output follows."
+            printf '%s\n' "$releases"
+            exit 1
+          fi
+
+          count="$(printf '%s' "$releases" | jq 'length')"
+          if [[ "$count" == "0" ]]; then
+            echo "::notice::$FLY_APP has no releases yet — first deploy. No rollback target, by definition."
+            echo "first_deploy=true" >> "$GITHUB_OUTPUT"
+            echo "image=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "first_deploy=false" >> "$GITHUB_OUTPUT"
+
+          # From here on, an unparseable answer is an error, not a first deploy.
+          if ! payload="$(flyctl image show --app "$FLY_APP" --json 2>&1)"; then
+            echo "::error::flyctl image show failed on an app that has $count release(s). Cannot determine the rollback target."
+            printf '%s\n' "$payload"
+            exit 1
+          fi
+
+          image="$(printf '%s' "$payload" | jq -r '
+            if type == "array" then .[0] else . end
+            | if (.Digest // "") != "" and (.Repository // "") != ""
+              then "\(.Registry // "registry.fly.io")/\(.Repository)@\(.Digest)"
+              else "" end
+          ')"
+
+          if [[ -z "$image" || "$image" == "null" ]]; then
+            echo "::error::Could not read a digest out of 'flyctl image show --json' on an app with $count release(s). The JSON shape has probably changed; fix the parser before deploying. Raw output follows."
+            printf '%s\n' "$payload"
+            exit 1
+          fi
+
+          echo "Rollback target: $image"
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+
+          # Capture the CONFIG that is live too, not just the image.
+          #
+          # Rolling back with `--config fly.toml` re-applies the NEW configuration to the
+          # OLD image. For an entire class of failure — a health-check path typo, a
+          # provider timeout below the budget (which is a startup error), a CSP that
+          # blanks the SPA — the configuration IS the fault, and that rollback ships the
+          # bug again and then fails its own smoke test. CHANGES.md promised a rollback
+          # that restores service; for those cases it structurally could not.
+          # `--toml` is NOT optional. `flyctl config show` emits JSON by default, and
+          # `flyctl deploy --config` picks its parser from the file extension — so JSON in
+          # a .toml file fails to parse at exactly the moment it is needed, and the step
+          # (no `set -e`) carries on to re-smoke the still-broken URL and report "ROLLBACK
+          # DID NOT RESTORE SERVICE". A correct alarm attached to no capability.
+          if flyctl config show --app "$FLY_APP" --toml > previous-fly.toml 2>/dev/null \
+             && [[ -s previous-fly.toml ]] \
+             && python3 -c "import sys,tomllib; tomllib.load(open('previous-fly.toml','rb'))"; then
+            echo "config=previous-fly.toml" >> "$GITHUB_OUTPUT"
+            echo "Captured the live configuration for rollback."
+          else
+            echo "config=" >> "$GITHUB_OUTPUT"
+            echo "::warning::Could not capture the live configuration as valid TOML. A rollback will re-apply the new fly.toml, which cannot recover a configuration-caused failure. Check 'flyctl config show --toml' manually if the rollback does not restore service."
+          fi
+
+      - name: Preserve the rollback config across steps
+        if: ${{ steps.current.outputs.config != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: rollback-config
+          path: previous-fly.toml
+          retention-days: 7
+
+      # ------------------------------------------------------------------------------
+      # Ship it. Fly will not promote a machine whose `/health` and `/ready` checks are
+      # failing, so a release missing ANTHROPIC_API_KEY dies here without serving a
+      # single request. The smoke test below covers what a status code cannot.
+      # ------------------------------------------------------------------------------
+      - name: Deploy
+        id: deploy
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: |
+          flyctl deploy \
+            --app "$FLY_APP" \
+            --config fly.toml \
+            --remote-only \
+            --strategy rolling \
+            --wait-timeout 600
+
+      - name: Smoke test the release
+        id: smoke
+        run: |
+          chmod +x scripts/smoke.sh
+          # A machine that just passed its health checks can still be a few seconds from
+          # having served anything. Give it that.
+          sleep 10
+          scripts/smoke.sh "$PUBLIC_URL"
+
+      # ------------------------------------------------------------------------------
+      # Auto-rollback (LP-131, ENG-1).
+      #
+      # Fires when the deploy failed OR the smoke test failed. Deploying the recorded
+      # image by digest is exact: it re-runs the release that was known good, rather than
+      # rebuilding from a commit and hoping the result is identical.
+      # ------------------------------------------------------------------------------
+      # The condition, not `failure()`, and both directions matter.
+      #
+      # `failure()` is false under cancellation, and an exceeded `timeout-minutes`
+      # cancels rather than fails — so a remote build that hung left a half-applied
+      # release with no rollback at all. `failure()` is also true when ANY earlier step
+      # failed, so a broken `actions/checkout` triggered a pointless redeploy of an app
+      # that was never touched.
+      #
+      # Keying on the deploy step's own outcome fixes both: it fires whenever the deploy
+      # ran and did not cleanly succeed (including 'cancelled'), and never when the
+      # deploy was skipped because something upstream failed.
+      - name: Roll back
+        if: >-
+          ${{ always()
+              && steps.deploy.conclusion != 'skipped'
+              && (steps.deploy.outcome != 'success' || steps.smoke.outcome != 'success') }}
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          PREVIOUS_IMAGE: ${{ steps.current.outputs.image }}
+          PREVIOUS_CONFIG: ${{ steps.current.outputs.config }}
+          FIRST_DEPLOY: ${{ steps.current.outputs.first_deploy }}
+          DEPLOY_OUTCOME: ${{ steps.deploy.outcome }}
+          SMOKE_OUTCOME: ${{ steps.smoke.outcome }}
+        run: |
+          set -uo pipefail
+          echo "Deploy outcome: ${DEPLOY_OUTCOME}; smoke outcome: ${SMOKE_OUTCOME}"
+
+          if [[ -z "$PREVIOUS_IMAGE" ]]; then
+            if [[ "$FIRST_DEPLOY" == "true" ]]; then
+              echo "::error::The first deploy of $FLY_APP failed. There is nothing to roll back to — the app has never had a working release. The public URL may be serving a broken build. Fix forward: flyctl status --app $FLY_APP && flyctl logs --app $FLY_APP"
+            else
+              echo "::error::Deploy failed and no rollback target was recorded. Investigate immediately: flyctl status --app $FLY_APP"
+            fi
+            exit 1
+          fi
+
+          # Roll back the CONFIGURATION as well as the image where we captured it. A
+          # failure caused by fly.toml is not recovered by re-applying fly.toml.
+          config_args=(--config fly.toml)
+          if [[ -n "$PREVIOUS_CONFIG" && -s "$PREVIOUS_CONFIG" ]]; then
+            config_args=(--config "$PREVIOUS_CONFIG")
+            echo "::warning::Rolling back to $PREVIOUS_IMAGE with the previously-live configuration."
+          else
+            echo "::warning::Rolling back to $PREVIOUS_IMAGE with the CURRENT fly.toml — the live configuration could not be captured. If the failure was configuration-caused, this rollback will reproduce it."
+          fi
+
+          flyctl deploy \
+            --app "$FLY_APP" \
+            "${config_args[@]}" \
+            --image "$PREVIOUS_IMAGE" \
+            --strategy immediate \
+            --wait-timeout 600
+
+          sleep 10
+          if scripts/smoke.sh "$PUBLIC_URL"; then
+            echo "::notice::Rollback verified — the previous release is serving again."
+          else
+            echo "::error::ROLLBACK DID NOT RESTORE SERVICE. The public URL is not healthy. Manual intervention required — see the rollback runbook in CHANGES.md."
+            exit 1
+          fi
+          # The release failed. Say so, even though the recovery worked.
+          exit 1
+
+      - name: Summary
+        if: ${{ always() }}
+        run: |
+          {
+            echo "## Deploy — ${{ job.status }}"
+            echo
+            echo "| | |"
+            echo "|---|---|"
+            echo "| App | \`$FLY_APP\` |"
+            echo "| URL | $PUBLIC_URL |"
+            echo "| Commit | \`${GITHUB_SHA:0:12}\` |"
+            echo "| Previous image | \`${{ steps.current.outputs.image || 'none (first deploy)' }}\` |"
+            echo "| Gate | ${{ needs.gate.result }} |"
+            echo "| Smoke | ${{ steps.smoke.outcome }} |"
+          } >> "$GITHUB_STEP_SUMMARY"
