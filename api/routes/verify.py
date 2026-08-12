@@ -227,7 +227,9 @@ async def verify_endpoint(
     # The pipeline measured extract and compare from inside itself; this adds the two
     # stages only the route can see and stops the one clock that owns `total`.
     timer.merge_into(result.timings_ms)
-    result.cost.usd = timing.usd_for(result.cost, config.extraction_model)
+    # Pricing is NOT done here any more. `api.verify.verify` fills `usd` in where it
+    # builds the Cost, so every caller gets it — this line existing meant the batch
+    # worker, which calls that function directly, reported tokens with $0.00.
 
     timing.emit(result.timings_ms, count=len(result.fields))
     # The provider name rides along so a sample-mode run can never be mistaken for a

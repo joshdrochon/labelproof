@@ -281,9 +281,17 @@ def job_cost(items: list[BatchItem]) -> Cost:
     for item in items:
         if item.result is None:
             continue
-        total.input_tokens += item.result.cost.input_tokens
-        total.output_tokens += item.result.cost.output_tokens
-        total.usd += item.result.cost.usd
+        cost = item.result.cost
+        total.input_tokens += cost.input_tokens
+        total.output_tokens += cost.output_tokens
+        # Both cache counters, because both are BILLED and neither is inside
+        # `input_tokens`: a cached read costs 0.1x an input token and writing an entry
+        # costs 1.25x. They were dropped here, so a job that read 95,722 cached tokens
+        # reported zero of them — which does not make the total conservative, it makes
+        # those tokens free.
+        total.cache_read_tokens += cost.cache_read_tokens
+        total.cache_creation_tokens += cost.cache_creation_tokens
+        total.usd += cost.usd
     total.usd = round(total.usd, 6)
     return total
 

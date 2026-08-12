@@ -1251,6 +1251,27 @@ def _result(
     )
 
 
+def _priced_item(
+    *,
+    row: int,
+    usd: float,
+    input_tokens: int = 0,
+    output_tokens: int = 0,
+    cache_read: int = 0,
+    cache_write: int = 0,
+) -> BatchItem:
+    """A finished item carrying an explicit Cost, for the aggregation tests below."""
+    result = _result(Recommendation.READY_TO_APPROVE)
+    result.cost = Cost(
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        cache_read_tokens=cache_read,
+        cache_creation_tokens=cache_write,
+        usd=usd,
+    )
+    return _item(f"item{row}", row, ItemState.DONE, result)
+
+
 def _item(
     item_id: str,
     row_number: int,
@@ -1963,3 +1984,57 @@ def test_three_hundred_applications_isolate_failures_and_stay_readable_throughou
     # Not the ten-minute gate itself — the fake provider is instant — but a floor that
     # catches the regression that matters: workers serialising instead of running.
     assert elapsed < 120, f"300 fixture-backed items took {elapsed:.1f}s"
+
+
+# --------------------------------------------------------------------------------------
+# Cost accounting, found by a real 22-application batch on the deployed URL
+# --------------------------------------------------------------------------------------
+
+
+def test_a_batch_reports_dollars_and_not_just_tokens() -> None:
+    """A live 22-application batch reported 40,507 input tokens and **$0.00**.
+
+    Pricing was applied in `api/routes/verify.py` after `api.verify.verify` returned, so
+    only requests arriving through that route were ever priced. The batch worker calls
+    the function directly. Every item came back with real token counts and `usd = 0.0`,
+    which does not read as "unknown" — it reads as free, on the one number OPS-4 exists
+    to report and the one a cost analysis is built from.
+
+    Asserted on the aggregate rather than on the pricing helper, because the helper was
+    always correct. What was wrong was which callers reached it.
+    """
+    items = [
+        _priced_item(row=1, usd=0.031, input_tokens=1849, cache_read=4351),
+        _priced_item(row=2, usd=0.029, input_tokens=1849, cache_read=4351),
+    ]
+    total = job_cost(items)
+
+    assert total.usd == pytest.approx(0.060)
+    assert total.input_tokens == 3698
+
+
+def test_the_job_total_counts_cached_tokens_too() -> None:
+    """Both cache counters are billed, and both were being dropped.
+
+    A cached read costs a tenth of an input token and writing an entry costs 1.25x one,
+    and neither is inside `input_tokens`. The live batch read 4,351 cached tokens on
+    every one of 22 items and the job total said `cache_read_tokens: 0`. Dropping them
+    does not make the total conservative; it prices those tokens at nothing.
+    """
+    total = job_cost(
+        [
+            _priced_item(row=1, usd=0.01, input_tokens=100, cache_read=4351, cache_write=200),
+            _priced_item(row=2, usd=0.01, input_tokens=100, cache_read=4351, cache_write=0),
+        ]
+    )
+
+    assert total.cache_read_tokens == 8702
+    assert total.cache_creation_tokens == 200
+
+
+def test_an_unfinished_item_contributes_nothing() -> None:
+    """Queued and failed items have no result, and must not be counted as free work."""
+    finished = _priced_item(row=1, usd=0.03, input_tokens=1849, cache_read=4351)
+    pending = _item("pending", 2, ItemState.QUEUED, None)
+
+    assert job_cost([finished, pending]) == job_cost([finished])

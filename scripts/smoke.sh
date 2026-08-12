@@ -480,6 +480,57 @@ else
 fi
 
 # ======================================================================================
+step "6. A queued batch stays reachable (BATCH-2, LP-166)"
+# ======================================================================================
+#
+# Not a batch feature test — a TOPOLOGY test, and it is here because `fly deploy` creates
+# two machines by default while batch state is SQLite on each machine's own disk. A job
+# queued on one does not exist on the other, the edge round-robins, and polling alternates
+# 200 / 400 `batch_not_found`. Observed in production: 400 200 400 200 400 200.
+#
+# Deliberately behavioural. Reading a machine count back from configuration would not have
+# caught it, because no configuration was wrong — the deploy command was.
+
+# Reuses the sample image step 4 already fetched. A manifest row naming no image is
+# refused by design (`no_valid_rows`), which the first version of this check ran into —
+# the app was right and the test was wrong.
+batch_image=""
+for candidate in "$WORK_DIR"/*.png; do
+  [[ -f "$candidate" ]] && batch_image="$candidate" && break
+done
+
+if [[ -z "$batch_image" ]]; then
+  warn "no sample image on hand — batch reachability check skipped"
+else
+  batch_name="$(basename "$batch_image")"
+  batch_manifest="$WORK_DIR/smoke-manifest.csv"
+  printf 'commodity,brand_name,class_type,alcohol_content,net_contents,producer_name,producer_address,country_of_origin,is_import,front_image,back_image\n' > "$batch_manifest"
+  printf 'spirits,Smoke Test,Whiskey,45,750 mL,Smoke,Nowhere,,false,%s,\n' "$batch_name" >> "$batch_manifest"
+
+  batch_body="$WORK_DIR/batch.json"
+  batch_code="$(curl -sS -o "$batch_body" -w '%{http_code}' --max-time 30 -F "manifest=@$batch_manifest" -F "files=@${batch_image};filename=${batch_name}" "$BASE_URL/batch" || echo 000)"
+
+  if [ "$batch_code" != "200" ]; then
+    fail "POST /batch returned $batch_code — $(head -c 200 "$batch_body")"
+  else
+    job_id="$(json "$batch_body" "d['job_id']")"
+    pass "batch queued — $job_id"
+
+    misses=0
+    for _ in 1 2 3 4 5 6; do
+      code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 15 "$BASE_URL/batch/$job_id" || echo 000)"
+      [ "$code" = "200" ] || misses=$((misses + 1))
+    done
+
+    if [ "$misses" -eq 0 ]; then
+      pass "6 consecutive status polls all found the job"
+    else
+      fail "$misses of 6 status polls could not find the job. The app is almost certainly running more than one machine — batch state is per-machine. Redeploy with: fly deploy --ha=false, then fly scale count 1."
+    fi
+  fi
+fi
+
+# ======================================================================================
 printf '\n'
 if [[ "$FAILURES" -eq 0 ]]; then
   printf '\033[32msmoke: release is good.\033[0m\n'

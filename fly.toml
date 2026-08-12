@@ -258,6 +258,29 @@ kill_timeout = "15s"
   size = "shared-cpu-2x"
   memory = "2gb"
 
+# --------------------------------------------------------------------------------------
+# ONE MACHINE. Deploy with `--ha=false`.
+# --------------------------------------------------------------------------------------
+#
+# `fly deploy` creates TWO machines by default for high availability, and that silently
+# breaks batch mode. Batch state is SQLite on the machine's own filesystem — there is no
+# volume and deliberately no shared store (see the `[mounts]` note below) — so a job
+# queued on machine A does not exist on machine B. The edge round-robins, and a batch
+# status poll alternates 200 / 400 `batch_not_found` forever.
+#
+# Observed on the deployed app: ten consecutive polls of a real job returned
+# 400 200 400 200 400 200. The batch itself completed fine on the machine that owned it;
+# the UI polling it would have flickered "no batch with that reference" every other tick.
+#
+# Nothing in this file can pin the count — Fly takes it from the deploy command — so the
+# deploy step and `scripts/smoke.sh` carry it instead: the smoke test queues a real batch
+# and polls it repeatedly, which fails on a two-machine app and cannot be satisfied by
+# reading configuration back.
+#
+# Single-machine is the right shape for a prototype whose data is ephemeral by policy. A
+# second machine needs a shared job store first, and that is a design change, not a scale
+# setting.
+
 # No `[mounts]`, deliberately. Uploads and results are ephemeral by policy — auto-purged
 # on a 24h TTL (SEC-2) — and a volume would be a durable home for exactly the data the
 # retention policy exists to destroy. It would also pin the app to one host and add a

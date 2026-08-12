@@ -39,7 +39,7 @@ import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-from api import canon
+from api import canon, timing
 from api import logging as applog
 from api.config import Config
 from api.models import (
@@ -410,6 +410,16 @@ def _apply_merge(results: list[FieldResult], label: merge_images.MergedLabel) ->
             ]
 
 
+def _priced(cost: Cost, model: str) -> Cost:
+    """Fill in `usd` from the tokens and the model that actually served the request.
+
+    `response.usage.model` rather than the configured model: it is the one that ran, and
+    on a request the provider downgraded or a fixture served they are not the same thing.
+    """
+    cost.usd = timing.usd_for(cost, model)
+    return cost
+
+
 def verify(
     application: Application,
     images: list[ImageInput],
@@ -501,10 +511,20 @@ def verify(
         fields=agg.triage_order(results),
         images=[],
         timings_ms=timings,
-        cost=Cost(
-            input_tokens=response.usage.input_tokens,
-            output_tokens=response.usage.output_tokens,
-            cache_read_tokens=response.usage.cache_read_tokens,
-            cache_creation_tokens=response.usage.cache_creation_tokens,
+        # Priced HERE, where the Cost is built, rather than by the caller.
+        #
+        # It used to be priced in `api/routes/verify.py` after this function returned, so
+        # every caller that was not that route got tokens with `usd = 0.0`. The batch
+        # worker calls this function directly, so a 22-application batch reported 40,507
+        # input tokens and $0.00 — a cost line that reads as free rather than as unknown,
+        # on the one number OPS-4 exists to report.
+        cost=_priced(
+            Cost(
+                input_tokens=response.usage.input_tokens,
+                output_tokens=response.usage.output_tokens,
+                cache_read_tokens=response.usage.cache_read_tokens,
+                cache_creation_tokens=response.usage.cache_creation_tokens,
+            ),
+            response.usage.model,
         ),
     )

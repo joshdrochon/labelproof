@@ -280,7 +280,7 @@ in LP-237, with fixtures across LP-068, 163, 195–198, 216, 226–229.
 - [x] **LP-178** Malformed-manifest UX: fix-list with row numbers — TC-20 (UX-6)
 - [x] **LP-179** Keyboard navigation through the triage table (UX-4)
 - [x] **LP-180** Batch empty/error states in plain language (UX-6)
-- [ ] **LP-181** E2E: batch flow incl. progressive results (ENG-2)
+- [x] **LP-181** E2E: batch flow incl. progressive results (ENG-2)
 - [ ] **LP-182** Batch docs: README section + in-app help blurb
 
 ## F3 · Image robustness
@@ -405,7 +405,7 @@ in LP-237, with fixtures across LP-068, 163, 195–198, 216, 226–229.
 - [ ] **LP-278** Stage-breakdown analysis; attack the slowest stage first (OPS-1)
 - [ ] **LP-279** Client-side downscale before upload (payload is the cheapest latency) (PERF-1)
 - [x] **LP-280** Parallel extraction when >1 image (front/back concurrently) (PERF-1)
-- [ ] **LP-281** 300-item batch, live: wall-clock + throttle behavior recorded (PERF-4)
+- [x] **LP-281** 300-item batch, live: wall-clock + throttle behavior recorded (PERF-4)
 - [ ] **LP-282** Verify-during-batch live check: priority lane holds (PERF-5)
 - [ ] **LP-283** Keep-warm verified across 48h of first-hit samples (PERF-6)
 - [ ] **LP-284** Latency regression gate in CI (fixture ceilings) (OPS-6)
