@@ -149,7 +149,11 @@ jobs:
           SCRIPT
 
           if sudo -n unshare --net true 2>/dev/null; then
-            sudo -n env "PATH=$PATH" EXPECT_OFFLINE=1 unshare --net -- \
+            # CI is passed through explicitly. `sudo env "PATH=..."` replaces the whole
+            # environment, so GitHub's own CI=true does not survive into the sandbox —
+            # which silently disabled the runner-aware timing ceiling in tests/test_api.py
+            # and kept this job red on a threshold measured against a laptop.
+            sudo -n env "PATH=$PATH" "CI=${CI:-true}" EXPECT_OFFLINE=1 unshare --net -- \
               sh -c 'ip link set lo up || true; exec sh /tmp/verify-api.sh'
           else
             echo "::warning title=Offline sandbox unavailable::unshare --net is not usable on this runner, so lint, typecheck and tests ran with the network reachable. The in-process guard in tests/conftest.py still refused every attempt at egress from the suite, but the kernel-level proof did not run."
