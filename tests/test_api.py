@@ -405,6 +405,43 @@ def test_ready_is_503_when_the_service_is_not_configured() -> None:
     assert "ANTHROPIC_API_KEY" not in error["message"]
 
 
+def test_ready_stays_green_when_the_only_finding_is_an_advisory() -> None:
+    """An advisory must never take the service out of rotation.
+
+    This is not a style preference about status payloads. On Fly a critical `/ready`
+    stops the proxy routing anything, so whatever fails this endpoint switches the whole
+    deployment off. The first live deploy put the documented PERF-1 gap in `warnings`,
+    and the public URL answered 503 to every request — including `/health` — while the
+    process was up and behaving exactly as designed. The operator-facing message was
+    "this service is not finished being set up", which was false and sent whoever read
+    it looking for a missing environment variable that was present the whole time.
+
+    Asserted through the route rather than on `Config`, because the defect was in what
+    `/ready` chose to fail on, not in how the note was worded.
+    """
+    client = make_client(advisories=["Slower than the PERF-1 target."])
+    response = client.get("/ready")
+
+    assert response.status_code == 200
+    assert response.json()["advisories"] == ["Slower than the PERF-1 target."]
+
+
+def test_the_shipped_configuration_is_routable() -> None:
+    """The real production config — live provider, real model — must pass `/ready`.
+
+    The one above proves an advisory is survivable in isolation. This proves the config
+    we actually deploy generates no `warnings` at all, which is the thing that was
+    untrue. `use_fake_provider=False` with a key present is exactly what runs on Fly.
+    """
+    config = Config(use_fake_provider=False, anthropic_api_key="sk-ant-test")
+
+    assert config.warnings == []
+    assert config.exceeds_latency_target, (
+        "Sonnet 5 is slower than the 5s target, so this test is only meaningful while "
+        "the gap exists — it is the advisory's whole reason for being."
+    )
+
+
 # --- the sample (LP-088) --------------------------------------------------------------
 
 def test_sample_serves_the_old_tom_application() -> None:

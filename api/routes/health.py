@@ -7,6 +7,14 @@ is down gets the container killed for someone else's outage.
 
 `/ready` answers "can this process actually verify a label right now" — config valid and
 the provider reachable. A red `/ready` means take me out of rotation, not restart me.
+
+Which makes what counts as "not ready" a load-bearing decision. On Fly a red `/ready`
+stops the proxy routing ANY request, so the endpoint is not a status board — it is a
+switch that turns the deployment off. It fails on `config.warnings` (setup is incomplete;
+an operator must act) and never on `config.advisories` (the service works, and something
+about it is worth saying). The first deploy of this app conflated the two: the documented
+PERF-1 gap landed in `warnings`, `/ready` went critical, and the public URL answered 503
+to everything while the process was healthy and doing precisely what it was designed to.
 """
 
 from __future__ import annotations
@@ -73,6 +81,10 @@ def ready(request: Request) -> JSONResponse:
         # from the outside — `scripts/timed_run.py` — has to read the target rather than
         # the budget, or a deadline relaxed to fit a slow model becomes a lower bar.
         "latency_target_ms": config.latency_target_ms,
+        # Things worth stating that are NOT setup failures — today, the known PERF-1 gap.
+        # They belong in the payload precisely so they stay visible without costing the
+        # service its place in rotation.
+        "advisories": list(config.advisories),
     }
     if simulated:
         body["notice"] = (

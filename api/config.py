@@ -136,7 +136,18 @@ class Config:
     storage_dir: str = "./.data"
     log_level: str = "INFO"
 
+    #: Setup is INCOMPLETE. The service cannot check a label until an operator acts.
+    #: `/ready` fails on these, which takes the machine out of rotation.
     warnings: list[str] = field(default_factory=list)
+
+    #: The service works, but something about it is worth stating. These must NEVER fail
+    #: `/ready`. The distinction is not cosmetic: a red `/ready` makes Fly's proxy refuse
+    #: every request, so folding a known product gap in with "no API key" takes the whole
+    #: deployment down over a trade-off we chose on purpose and documented in the README.
+    #: That is exactly what happened on the first deploy — the PERF-1 note below rendered
+    #: the app unreachable, and the message an operator saw was "not finished being set
+    #: up", which was false and pointed at the wrong fix.
+    advisories: list[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         """Fill unset budgets from the configured model.
@@ -178,6 +189,7 @@ class Config:
         key = os.environ.get("ANTHROPIC_API_KEY", "")
 
         warnings: list[str] = []
+        advisories: list[str] = []
         if not key and not use_fake:
             warnings.append(
                 "ANTHROPIC_API_KEY is not set. Verification will fail until it is, or "
@@ -212,6 +224,7 @@ class Config:
             storage_dir=os.environ.get("LABELPROOF_STORAGE_DIR", "./.data"),
             log_level=os.environ.get("LABELPROOF_LOG_LEVEL", "INFO"),
             warnings=warnings,
+            advisories=advisories,
         )
 
         if config.provider_timeout_ms >= config.request_budget_ms:
@@ -239,10 +252,13 @@ class Config:
                 )
 
         # Missing the adoption gate is a real problem, but it is a PRODUCT problem, not a
-        # reason to refuse to boot. It is surfaced loudly and exactly once, where an
-        # operator and the /ready payload will both see it.
+        # reason to refuse to boot — and not a reason to refuse traffic either. It is an
+        # ADVISORY: reported in the /ready payload and in the logs, never a readiness
+        # failure. Putting it in `warnings` shipped a deployment that answered 503 to
+        # every request, including the health check, because the service was working
+        # exactly as designed and said so in the wrong list.
         if not use_fake and config.expected_total_ms > config.latency_target_ms:
-            warnings.append(
+            advisories.append(
                 f"{config.extraction_model} takes about "
                 f"{measured_latency_ms(config.extraction_model)}ms per call, so a "
                 f"verification is expected to take about {config.expected_total_ms}ms — "

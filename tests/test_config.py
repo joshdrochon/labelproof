@@ -96,10 +96,20 @@ def test_an_unknown_model_gets_a_generous_timeout_not_a_guessed_one(
     assert config.provider_timeout_ms >= max(MEASURED_EXTRACTION_MS.values())
 
 
-def test_missing_the_latency_target_warns_but_still_boots(
+def test_missing_the_latency_target_is_stated_but_still_serves(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Slower than PERF-1 is a product problem, not a reason to refuse to serve."""
+    """Slower than PERF-1 is a product problem, not a reason to refuse to serve.
+
+    This test used to assert the note landed in `warnings`, which is the list `/ready`
+    fails on — and on Fly a failing `/ready` stops the proxy routing anything. So the
+    assertion said "still boots" while pinning the behaviour that made the first live
+    deploy answer 503 to every request. Booting was never the part at risk.
+
+    What has to hold is both halves at once: the gap is stated in a place a reader will
+    find, AND it costs the service nothing. Hence the negative assertion — it is the
+    half that actually broke.
+    """
     monkeypatch.delenv("LABELPROOF_FAKE_PROVIDER", raising=False)
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
     monkeypatch.setenv("LABELPROOF_EXTRACTION_MODEL", "claude-opus-5")
@@ -108,7 +118,11 @@ def test_missing_the_latency_target_warns_but_still_boots(
 
     config = Config.from_env()
     assert config.exceeds_latency_target
-    assert any("above the 5000ms target" in w for w in config.warnings)
+    assert any("above the 5000ms target" in note for note in config.advisories)
+    assert config.warnings == [], (
+        "The PERF-1 gap must never reach `warnings`. That list means setup is "
+        "incomplete, and /ready takes the machine out of rotation over it."
+    )
 
 
 def test_target_resolution_cannot_drop_below_the_high_res_tier(
