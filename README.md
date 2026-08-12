@@ -526,8 +526,15 @@ by `scripts/spike_latency.py` and pinned in `api.config.MEASURED_EXTRACTION_MS`:
 | `claude-haiku-4-5` | ~5,500 ms | ~4,700 ms | $1 / $5 | **No — 400s the parameter** |
 
 Our own non-provider work — ingest, quality scoring, rules, serialization — is about
-**130 ms**. The model call is essentially the whole number, which is why
-`api.config._OVERHEAD_MS` reserves 1,500 ms and no more.
+**570 ms**, measured on the deployed app over three two-image verifications:
+ingest ~260, quality ~300, preprocess ~560, compare ~1, against an extract of ~7,800.
+That is 7% of the request. The model call is still essentially the whole number, which is
+why `api.config._OVERHEAD_MS` reserves 1,500 ms and no more.
+
+An earlier version of this line said 130 ms, which was a single-image figure; production
+sends two. The conclusion is unchanged — a faster machine could take perhaps 285 ms off a
+9.6 s p95 for 8x the cost — but the number was wrong by 4x and is corrected here rather
+than left to be discovered.
 
 The honest reading:
 

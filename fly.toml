@@ -236,24 +236,36 @@ kill_timeout = "15s"
 # Shared CPU, two vCPU, 2 GB. ~$8/month.
 #
 # This was `performance-2x` at ~$62/month, argued from a 300 ms non-provider allowance
-# inside a 5s budget. The argument had the right shape and the wrong magnitude, and the
-# measurement settles it: the app's own `timings_ms` shows roughly 130 ms of CPU work
-# against a 9.4-10.4s provider call. Shared-CPU steal is tens of milliseconds. A term
-# three orders of magnitude smaller than the provider call cannot be what decides the
-# p95, and buying dedicated cores to protect it was paying 8x to defend a rounding error.
+# inside a 5s budget. The conclusion still holds; the number behind it did not.
 #
-# Two vCPU rather than one still earns its place, modestly and for one specific reason:
-# the two images are preprocessed concurrently and OpenCV releases the GIL, so the second
-# core saves most of one image's preprocessing — at most ~130 ms, once.
+# MEASURED ON THE DEPLOYED APP, three consecutive two-image verifications:
+#
+#     total 8359  extract 7785  | ingest 264  quality 305  preprocess 569  compare 1
+#     total 8286  extract 7709  | ingest 261  quality 312  preprocess 573  compare 1
+#     total 8560  extract 8007  | ingest 257  quality 292  preprocess 549  compare 1
+#
+# Non-provider work is ~570 ms, about 7% of the request. This comment previously said
+# "roughly 130 ms" and called it three orders of magnitude below the provider call. It is
+# neither — it is 4x larger than stated and one order of magnitude down, not three. The
+# 130 ms figure appears to have come from a single image rather than the two production
+# actually sends.
+#
+# The decision does not move. Dedicated cores might halve 570 ms; ~285 ms off 8,400 ms
+# takes the p95 from 9.6s to about 9.3s, still 4.3s past the gate, for 8x the price. What
+# changes is that this is now a modest term rather than a rounding error, and it is worth
+# re-measuring if extraction ever gets fast enough for 570 ms to matter.
+#
+# Two vCPU rather than one earns its place for one specific reason: the two images are
+# preprocessed concurrently and OpenCV releases the GIL, so the second core saves most of
+# one image's preprocessing — on the numbers above, roughly 550 ms once.
 #
 # 2 GB carries numpy, OpenCV and Pillow holding a few full-resolution frames while a batch
 # job runs its worker pool in the same process. Raise it if the batch pool OOMs; that is a
-# memory decision with evidence behind it, unlike the CPU one it replaces.
+# memory decision with evidence behind it, unlike the CPU one it replaces. A 22-item batch
+# ran clean at this size; 300 has not been tried.
 #
-# To revisit this properly rather than by argument: run the 20-sample p95 against both
-# sizes and compare `timings_ms.total - timings_ms.extract`. If the non-provider p95
-# differs by less than ~100 ms, the cheap option is correct. Record the numbers in
-# CHANGES.md either way.
+# To revisit properly: run the 20-sample p95 against both sizes and compare
+# `timings_ms.total - timings_ms.extract`. Record the numbers in CHANGES.md either way.
 [[vm]]
   size = "shared-cpu-2x"
   memory = "2gb"

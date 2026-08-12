@@ -49,8 +49,13 @@ _TIMEOUT_HEADROOM: Final[float] = 2.0
 #: is a reason to wait longer, not to guess low and fail closed on every call.
 _UNKNOWN_MODEL_MS: Final[int] = 20_000
 
-#: Room reserved for our own work — ingest, quality scoring, rules, serialization. The
-#: measured non-provider overhead is ~130ms; this is that with room to spare.
+#: Room reserved for our own work — ingest, quality scoring, rules, serialization.
+#:
+#: Measured on the deployed app, two images: ingest ~260ms, quality ~300ms, preprocess
+#: ~570ms, compare ~1ms — about 570ms in total, or 7% of an 8.4s request. This note used
+#: to say ~130ms, which was a one-image figure while production sends two. 1500ms still
+#: clears it with room, so the constant does not move; the reasoning behind it now
+#: matches what the service actually does.
 _OVERHEAD_MS: Final[int] = 1500
 
 
