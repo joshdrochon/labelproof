@@ -293,10 +293,11 @@ def test_spirits_and_malt_tolerances_do_not_vary_with_strength(
     assert canon.abv_tolerance_pp(commodity, value) == expected
 
 
-def test_an_unknown_commodity_is_an_error_rather_than_a_default() -> None:
-    """A silent default here would apply the wrong regulation to an unknown product."""
-    with pytest.raises(ValueError, match="unknown commodity"):
-        canon.abv_tolerance_pp("cider", 5.0)
+# `abv_tolerance_pp` refusing an unknown commodity is asserted in
+# tests/test_canon.py::test_abv_tolerance_rejects_unknown_commodity. It lived here too,
+# byte for byte, and this is the wrong file for it: the tolerance table is canon's, and a
+# second copy in the ABV property tests is one more place to update and one more place to
+# forget.
 
 
 # --------------------------------------------------------------------------------------
