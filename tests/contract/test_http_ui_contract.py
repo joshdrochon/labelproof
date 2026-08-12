@@ -419,3 +419,86 @@ def test_a_real_error_response_matches_the_declared_shape() -> None:
     body = client.get("/health/nope").json()
     assert set(body) == {"error"}
     assert set(body["error"]) == set(_interface_fields("ApiError"))
+
+
+# --------------------------------------------------------------------------------------
+# UI routes and API routes must not collide
+# --------------------------------------------------------------------------------------
+#
+# The SPA puts its mode in the URL so a screen survives a refresh and can be linked to.
+# That only works while the path it chooses is one the server hands back the app shell for.
+#
+# `web/src/App.tsx` first used `/batch` for the batch screen. `/batch` is the endpoint that
+# QUEUES a job — it accepts POST and answers a browser's GET with 405 — so the screen
+# worked when navigated to in-app and broke the moment anyone reloaded or shared the link.
+# Nothing failed loudly: the tab still worked, and the bug lived entirely in the two things
+# a URL exists for.
+#
+# So both halves are pinned here, in the file that already owns the seam between the
+# server and the browser.
+
+
+def _spa_client() -> TestClient:
+    return TestClient(create_app(config=Config(use_fake_provider=True)))
+
+
+def _declared_ui_paths() -> list[str]:
+    """The client-side routes `App.tsx` pushes into history, read from the source.
+
+    Read rather than restated: a copy of the list here would be one more pair of files
+    agreeing by hand, which is the exact failure this module exists to catch.
+    """
+    source = (Path(__file__).resolve().parents[2] / "web" / "src" / "App.tsx").read_text()
+    match = re.search(r"const PATHS: Record<Mode, string> = \{([^}]*)\}", source)
+    assert match, "App.tsx no longer declares a PATHS table — update this test with it."
+    return re.findall(r"'([^']+)'", match.group(1))
+
+
+def test_app_tsx_declares_the_routes_this_test_thinks_it_does() -> None:
+    paths = _declared_ui_paths()
+    assert "/" in paths, f"expected the root route among {paths}"
+    assert len(paths) >= 2, f"expected at least two modes, got {paths}"
+
+
+@pytest.mark.parametrize("path", _declared_ui_paths())
+def test_every_ui_route_serves_the_app_shell_on_a_plain_get(path: str) -> None:
+    """Reload and deep-link both work, for every route the SPA can put in the address bar."""
+    response = _spa_client().get(path)
+
+    assert response.status_code == 200, (
+        f"GET {path} answered {response.status_code}. The SPA pushes this path into "
+        f"history, so a reload or a shared link lands here — it has to return the app "
+        f"shell, not an API response."
+    )
+    assert "<!doctype html>" in response.text[:200].lower(), (
+        f"GET {path} returned something that is not the app shell: {response.text[:120]!r}"
+    )
+
+
+def test_no_ui_route_collides_with_an_api_route() -> None:
+    """The stronger statement: a UI path must not be an API path at all.
+
+    Serving the shell on a GET is necessary but not sufficient — a path that is also an
+    API route would keep working for GET while POST went somewhere entirely different,
+    which is a trap rather than a bug.
+    """
+    # From the OpenAPI schema, not from `app.routes`. This app registers its endpoints
+    # through nested `_IncludedRouter` wrappers that expose neither `.path` nor `.routes`,
+    # so a scan of `app.routes` — flat OR recursive — finds no `/batch` and passes
+    # vacuously. Both earlier versions of this test did exactly that while the collision
+    # was live, which is worse than having no test: it reported the seam as checked.
+    #
+    # The schema is also the better source on the merits. It is the served contract, and a
+    # path that is not in it is not one a client can call.
+    api_paths = set(create_app(config=Config(use_fake_provider=True)).openapi()["paths"])
+    assert "/batch" in api_paths, (
+        f"no /batch in the schema, so this test is not seeing API routes: "
+        f"{sorted(api_paths)}"
+    )
+
+    collisions = [path for path in _declared_ui_paths() if path != "/" and path in api_paths]
+
+    assert not collisions, (
+        f"UI route(s) {collisions} are also API routes. Rename the UI route — the API "
+        f"path is the contract, and the screen is the thing that can move."
+    )

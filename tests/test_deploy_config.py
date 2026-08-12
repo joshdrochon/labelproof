@@ -339,17 +339,15 @@ def test_hsts_is_set_at_the_edge(fly: dict[str, Any]) -> None:
 
 def test_the_other_security_headers_are_present(fly: dict[str, Any]) -> None:
     headers = fly["http_service"]["http_options"]["response"]["headers"]
-    for name in (
-        "X-Content-Type-Options",
-        "X-Frame-Options",
-        "Referrer-Policy",
-        "Content-Security-Policy",
-    ):
+    for name in ("X-Content-Type-Options", "X-Frame-Options", "Referrer-Policy"):
         assert name in headers, f"{name} is not set at the edge"
 
 
-def _csp_directives(fly: dict[str, Any]) -> dict[str, set[str]]:
-    raw = fly["http_service"]["http_options"]["response"]["headers"]["Content-Security-Policy"]
+def _csp_directives(_fly: dict[str, Any] | None = None) -> dict[str, set[str]]:
+    """Parsed from `api/security.py` — the policy that actually reaches a browser."""
+    from api.security import CONTENT_SECURITY_POLICY
+
+    raw = CONTENT_SECURITY_POLICY
     directives: dict[str, set[str]] = {}
     for part in raw.split(";"):
         tokens = part.split()
@@ -366,27 +364,83 @@ def _web_sources() -> str:
     return "\n".join(f.read_text() for f in files if f.is_file())
 
 
-def test_the_csp_permits_the_inline_styles_the_spa_actually_uses(fly: dict[str, Any]) -> None:
-    """Derived from the SPA's source, not from the policy string.
+def test_the_edge_defines_no_csp_so_the_applications_own_policy_survives(
+    fly: dict[str, Any],
+) -> None:
+    """The bug this test exists for shipped, and nothing caught it.
 
-    A CSP that blocks the app is worse than no CSP: the reviewer gets a blank page and no
-    error, and `curl` cannot see it. So the allowance is justified by what the code does —
-    if the inline `style=` attributes ever disappear, this fails and the allowance should
-    be removed rather than carried forever.
+    `fly.toml` used to set a Content-Security-Policy. Fly's edge does not ADD a response
+    header — it REPLACES the application's. So `api/security.CONTENT_SECURITY_POLICY`, and
+    every test in `tests/test_security.py` guarding it, described a header no browser ever
+    received. Production served the edge's weaker version: `default-src 'self'` rather than
+    `'none'`, no `media-src`, no `manifest-src`, no `worker-src`, no
+    `upgrade-insecure-requests` — and `style-src 'unsafe-inline'`, which the application
+    had DROPPED after testing in a browser that react-dom's style props go through CSSOM
+    and do not need it.
+
+    Two files in this repository disagreed about the same policy, the weaker one won by
+    virtue of running later, and every assertion pointed at the one that lost.
     """
-    directives = _csp_directives(fly)
-    uses_inline_style = re.search(r"style=\{\{|style=\"", _web_sources()) is not None
+    headers = fly["http_service"]["http_options"]["response"]["headers"]
+    assert "Content-Security-Policy" not in headers, (
+        "fly.toml sets a CSP again. The edge REPLACES the application's header rather "
+        "than adding to it, so this silently overrides api/security.py and every test "
+        "that guards it. Change the policy there, not here."
+    )
 
-    if uses_inline_style:
-        assert "'unsafe-inline'" in directives["style-src"], (
-            "the SPA sets style attributes (EvidenceOverlay positions boxes that way), "
-            "which only style-src 'unsafe-inline' permits — the page will render unstyled"
-        )
-    else:
-        assert "'unsafe-inline'" not in directives["style-src"], (
-            "nothing in web/src sets an inline style any more; drop the 'unsafe-inline' "
-            "allowance rather than keeping a weaker policy than the app needs"
-        )
+
+def test_the_application_still_defines_the_csp() -> None:
+    """The other half. Removing it from fly.toml is only safe while the app sends one."""
+    from api.security import CONTENT_SECURITY_POLICY
+
+    assert CONTENT_SECURITY_POLICY.strip(), "no CSP anywhere now"
+    for directive in ("default-src", "script-src", "style-src", "frame-ancestors"):
+        assert directive in CONTENT_SECURITY_POLICY, f"{directive} is missing"
+
+
+def test_the_served_response_carries_the_applications_csp_verbatim() -> None:
+    """Asserted on a real response, because a constant is not a header.
+
+    This is the assertion whose absence let the drift live: everything checked the value
+    in `api/security.py` and nothing checked what came back over HTTP.
+    """
+    from fastapi.testclient import TestClient
+
+    from api.config import Config
+    from api.main import create_app
+    from api.security import CONTENT_SECURITY_POLICY
+
+    client = TestClient(create_app(config=Config(use_fake_provider=True)))
+    served = client.get("/").headers.get("content-security-policy")
+
+    assert served == CONTENT_SECURITY_POLICY, (
+        f"the served policy is not the application's.\n  served: {served}\n  "
+        f"expected: {CONTENT_SECURITY_POLICY}"
+    )
+
+
+def test_the_spa_needs_no_inline_style_allowance(fly: dict[str, Any]) -> None:
+    """The claim that replaced a wrong one.
+
+    An earlier version of this test asserted the opposite — that the SPA's `style={{…}}`
+    props REQUIRE `style-src 'unsafe-inline'` or "the page will render unstyled". That was
+    checked in a browser and is false: react-dom applies a style prop through
+    `node.style.setProperty`, a CSSOM mutation CSP does not govern. CSP governs style
+    attributes parsed from markup and `<style>` elements, and the SPA emits neither.
+
+    So the allowance is not needed, and this asserts it stays gone. If someone adds a real
+    `<style>` element or a CSS-in-JS runtime, `tests/test_security.py` catches the new
+    mechanism and this is where the policy would have to change.
+    """
+    directives = _csp_directives()
+    assert "'unsafe-inline'" not in directives["style-src"], (
+        "'unsafe-inline' is back in style-src. The browser evidence says the SPA does "
+        "not need it — see test_the_policy_carries_no_unsafe_directive_at_all."
+    )
+    assert re.search(r"style=\{\{", _web_sources()), (
+        "no component sets a style prop any more, so the reasoning above is no longer "
+        "being exercised; re-check it before trusting it."
+    )
 
 
 def test_the_csp_is_no_looser_than_the_spa_requires(fly: dict[str, Any]) -> None:
@@ -397,7 +451,7 @@ def test_the_csp_is_no_looser_than_the_spa_requires(fly: dict[str, Any]) -> None
     stay same-origin. If someone adds a CDN, this fails and the CSP has to be widened
     deliberately instead of by accident.
     """
-    directives = _csp_directives(fly)
+    directives = _csp_directives()
     index = (ROOT / "web" / "index.html").read_text()
     sources = _web_sources()
 

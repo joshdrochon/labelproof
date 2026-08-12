@@ -17,10 +17,18 @@
 import type {
   ApiError,
   Application,
+  BatchAccepted,
+  BatchItem,
+  BatchStatus,
   BoundingBox,
+  Cost,
   ErrorKind,
   FieldResult,
   ImageReport,
+  ItemState,
+  JobCounts,
+  JobState,
+  RowError,
   VerificationResult,
 } from './types';
 import { ERROR_FALLBACK } from './copy';
@@ -440,4 +448,216 @@ export async function loadSample(signal?: AbortSignal): Promise<SampleOutcome> {
     'sample_unavailable',
     'The sample application could not be loaded. You can still upload a label and enter the details yourself.',
   );
+}
+
+// ---------------------------------------------------------------------------------
+// Batch (BATCH-1..10)
+// ---------------------------------------------------------------------------------
+
+/**
+ * Where the manifest template lives. A plain link rather than a fetch: the browser's own
+ * download is more reliable than anything we would build, and an agent who wants to see
+ * the columns before committing to a batch should be able to just open it (UX-1).
+ */
+export const MANIFEST_TEMPLATE_URL = '/batch/manifest-template.csv';
+
+/** The CSV export for a finished job (BATCH-7). Also a plain link, for the same reason. */
+export function batchExportUrl(jobId: string): string {
+  return `/batch/${encodeURIComponent(jobId)}/export.csv`;
+}
+
+/**
+ * Images are NOT shrunk on the way into a batch, and that is deliberate.
+ *
+ * `verify()` re-encodes each file because it is one or two images and the round trip is
+ * the thing an agent is waiting on. A batch is up to 300 applications and their labels,
+ * frequently arriving as one zip the agent assembled elsewhere. Re-encoding every entry
+ * would mean decoding a few hundred images on the main thread before the first byte is
+ * uploaded — a progress bar that sits at zero for a minute while the tab freezes, to save
+ * bandwidth on a request nobody is watching in real time.
+ *
+ * The server bounds what it will accept on the wire either way (`api.main._WireLimit`),
+ * so the protection this would add is already there.
+ */
+export async function createBatch(
+  manifest: File,
+  images: File[],
+  signal?: AbortSignal,
+): Promise<BatchAccepted> {
+  const form = new FormData();
+  form.append('manifest', manifest, manifest.name);
+  for (const file of images) form.append('files', file, file.name);
+
+  let response: Response;
+  try {
+    response = await fetch('/batch', { method: 'POST', body: form, signal });
+  } catch (err) {
+    if ((err as Error)?.name === 'AbortError') throw err;
+    throw networkFailure();
+  }
+  if (!response.ok) throw await readError(response);
+
+  const obj = asRecord(await response.json());
+  if (!obj) throw failure('internal', 'unreadable_response', ERROR_FALLBACK['internal']!);
+  return {
+    job_id: String(obj['job_id'] ?? ''),
+    accepted: typeof obj['accepted'] === 'number' ? obj['accepted'] : 0,
+    row_errors: normalizeRowErrors(obj['row_errors']),
+    unmatched_files: normalizeStrings(obj['unmatched_files']),
+    message: typeof obj['message'] === 'string' ? obj['message'] : '',
+  };
+}
+
+function normalizeStrings(raw: unknown): string[] {
+  return Array.isArray(raw) ? raw.filter((v): v is string => typeof v === 'string') : [];
+}
+
+function normalizeRowErrors(raw: unknown): RowError[] {
+  if (!Array.isArray(raw)) return [];
+  return (raw as unknown[]).flatMap((entry) => {
+    const rec = asRecord(entry);
+    if (!rec) return [];
+    return [
+      {
+        row: typeof rec['row'] === 'number' ? rec['row'] : 0,
+        column: typeof rec['column'] === 'string' ? rec['column'] : null,
+        message: String(rec['message'] ?? ''),
+      },
+    ];
+  });
+}
+
+function normalizeCounts(raw: unknown): JobCounts {
+  const rec = asRecord(raw) ?? {};
+  const n = (key: string): number => (typeof rec[key] === 'number' ? (rec[key] as number) : 0);
+  return {
+    total: n('total'),
+    queued: n('queued'),
+    processing: n('processing'),
+    done: n('done'),
+    failed: n('failed'),
+  };
+}
+
+function normalizeCost(raw: unknown): Cost {
+  const rec = asRecord(raw) ?? {};
+  const n = (key: string): number => (typeof rec[key] === 'number' ? (rec[key] as number) : 0);
+  return {
+    input_tokens: n('input_tokens'),
+    output_tokens: n('output_tokens'),
+    cache_read_tokens: n('cache_read_tokens'),
+    cache_creation_tokens: n('cache_creation_tokens'),
+    usd: n('usd'),
+  };
+}
+
+const ITEM_STATES: readonly ItemState[] = ['queued', 'processing', 'done', 'failed'];
+
+function normalizeItem(raw: unknown): BatchItem | null {
+  const rec = asRecord(raw);
+  if (!rec || typeof rec['item_id'] !== 'string') return null;
+
+  const state = ITEM_STATES.includes(rec['state'] as ItemState)
+    ? (rec['state'] as ItemState)
+    : 'queued';
+  const failure_ = asRecord(rec['failure']);
+
+  return {
+    item_id: rec['item_id'],
+    job_id: typeof rec['job_id'] === 'string' ? rec['job_id'] : '',
+    row: typeof rec['row'] === 'number' ? rec['row'] : 0,
+    state,
+    attempts: typeof rec['attempts'] === 'number' ? rec['attempts'] : 0,
+    application: (asRecord(rec['application']) ?? {}) as unknown as Application,
+    images: normalizeStrings(rec['images']),
+    // A result is only rendered when the server actually sent one. An item that has not
+    // finished has no verdicts, and inventing an empty set would put seven blank rows on
+    // screen that read as "nothing wrong here".
+    result: asRecord(rec['result']) ? normalizeResult(rec['result']) : null,
+    failure: failure_
+      ? {
+          code: String(failure_['code'] ?? ''),
+          message: String(failure_['message'] ?? ''),
+          next_step: String(failure_['next_step'] ?? 'retry'),
+          attempts: typeof failure_['attempts'] === 'number' ? failure_['attempts'] : 0,
+        }
+      : null,
+    created_at: typeof rec['created_at'] === 'number' ? rec['created_at'] : 0,
+    started_at: typeof rec['started_at'] === 'number' ? rec['started_at'] : null,
+    finished_at: typeof rec['finished_at'] === 'number' ? rec['finished_at'] : null,
+  };
+}
+
+function normalizeStatus(raw: unknown): BatchStatus {
+  const obj = asRecord(raw);
+  if (!obj) throw failure('internal', 'unreadable_response', ERROR_FALLBACK['internal']!);
+
+  const summary = asRecord(obj['summary']) ?? {};
+  const counts = normalizeCounts(obj['counts']);
+
+  return {
+    job_id: String(obj['job_id'] ?? ''),
+    state: (['queued', 'processing', 'done'] as JobState[]).includes(obj['state'] as JobState)
+      ? (obj['state'] as JobState)
+      : 'processing',
+    counts,
+    eta_seconds: typeof obj['eta_seconds'] === 'number' ? obj['eta_seconds'] : null,
+    summary: {
+      by_recommendation: (asRecord(summary['by_recommendation']) ?? {}) as Record<string, number>,
+      by_verdict: (asRecord(summary['by_verdict']) ?? {}) as Record<string, number>,
+      worst_first: normalizeStrings(summary['worst_first']),
+      headline: typeof summary['headline'] === 'string' ? summary['headline'] : '',
+    },
+    items: Array.isArray(obj['items'])
+      ? (obj['items'] as unknown[]).flatMap((i) => normalizeItem(i) ?? [])
+      : [],
+    cost: normalizeCost(obj['cost']),
+    row_errors: normalizeRowErrors(obj['row_errors']),
+    unmatched_files: normalizeStrings(obj['unmatched_files']),
+    expires_at: typeof obj['expires_at'] === 'number' ? obj['expires_at'] : 0,
+    message: typeof obj['message'] === 'string' ? obj['message'] : '',
+  };
+}
+
+/**
+ * Poll one job. `include_pending` asks for the queued and in-flight rows too, so the
+ * table can show every application from the first tick instead of growing from nothing —
+ * an agent watching 300 rows needs to see the 300, not wonder where they went.
+ */
+export async function batchStatus(
+  jobId: string,
+  options: { includePending?: boolean; limit?: number } = {},
+  signal?: AbortSignal,
+): Promise<BatchStatus> {
+  const params = new URLSearchParams();
+  if (options.includePending) params.set('include_pending', 'true');
+  if (options.limit != null) params.set('limit', String(options.limit));
+  const query = params.toString();
+  const url = `/batch/${encodeURIComponent(jobId)}${query ? `?${query}` : ''}`;
+
+  let response: Response;
+  try {
+    response = await fetch(url, { signal });
+  } catch (err) {
+    if ((err as Error)?.name === 'AbortError') throw err;
+    throw networkFailure();
+  }
+  if (!response.ok) throw await readError(response);
+  return normalizeStatus(await response.json());
+}
+
+/** Requeue the failed items and nothing else (BATCH-8). Returns the refreshed status. */
+export async function retryBatch(jobId: string, signal?: AbortSignal): Promise<BatchStatus> {
+  let response: Response;
+  try {
+    response = await fetch(`/batch/${encodeURIComponent(jobId)}/retry`, {
+      method: 'POST',
+      signal,
+    });
+  } catch (err) {
+    if ((err as Error)?.name === 'AbortError') throw err;
+    throw networkFailure();
+  }
+  if (!response.ok) throw await readError(response);
+  return normalizeStatus(await response.json());
 }

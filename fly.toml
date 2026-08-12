@@ -165,13 +165,29 @@ kill_timeout = "15s"
     # someone else's chrome.
     X-Frame-Options = "DENY"
     Referrer-Policy = "no-referrer"
-    # The SPA is entirely same-origin: Vite emits local module scripts and one stylesheet,
-    # there are no CDN fonts and no third-party analytics, and the browser never talks to
-    # the model provider (NET-2). So the policy can be tight.
-    #   img-src data:/blob: — upload previews and evidence crops are object URLs.
-    #   style-src 'unsafe-inline' — EvidenceOverlay positions boxes with a style
-    #     attribute; that is a style *attribute*, which this is the only way to allow.
-    Content-Security-Policy = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; font-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
+
+    # NO Content-Security-Policy HERE. DELIBERATE, AND MEASURED.
+    #
+    # This file used to set one. Fly's edge does not ADD a response header — it REPLACES
+    # the application's. So the CSP the app computes in `api/security.py`, the one the
+    # whole `tests/test_security.py` suite guards, never reached a single browser. What
+    # production actually served was this line: `default-src 'self'` instead of `'none'`,
+    # no `media-src`, no `manifest-src`, no `worker-src`, no `upgrade-insecure-requests`,
+    # and `style-src 'unsafe-inline'`.
+    #
+    # That last one is the sharp end. The comment that used to sit here justified
+    # 'unsafe-inline' as necessary for the evidence overlay's style props. That was tested
+    # in a browser and found to be FALSE: react-dom applies a `style` prop through
+    # `node.style.setProperty`, a CSSOM mutation CSP does not govern. The application
+    # dropped 'unsafe-inline' on that evidence. This file kept it, and this file won.
+    #
+    # Nothing detected it because every test asserted the constant in `api/security.py`
+    # and no test asserted what the deployment sends. `tests/test_deploy_config.py` now
+    # does, and `scripts/smoke.sh` checks the served header against the app's own value.
+    #
+    # The headers above stay here on purpose: they are properties of how the service is
+    # published and they hold while the app restarts. A CSP is different — it governs a
+    # document, and if the app is not serving documents there is nothing to govern.
 
   # ------------------------------------------------------------------------------------
   # Platform health checks (LP-132, NET-5)

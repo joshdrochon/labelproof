@@ -203,6 +203,27 @@ if [[ "$BASE_URL" == https://* ]]; then
       warn "${header} missing (edge headers may not have propagated yet)"
     fi
   done
+
+  # "present" is not "correct", and the difference already cost us once.
+  #
+  # fly.toml set its own Content-Security-Policy. Fly's edge REPLACES the application's
+  # header rather than adding to it, so the policy in api/security.py — and every test
+  # guarding it — described something no browser received. The deployment served a weaker
+  # one, including style-src 'unsafe-inline', which the application had deliberately
+  # dropped after testing that it was unnecessary. This check compares the header that
+  # came back to the application's own constant, byte for byte.
+  served_csp="$(grep -i '^content-security-policy:' "$headers" | tr -d '\r' | sed 's/^[^:]*: *//')"
+  expected_csp="$(cd "$SCRIPT_DIR" && python3 -c 'import sys; sys.path.insert(0, "."); from api.security import CONTENT_SECURITY_POLICY as p; print(p)' 2>/dev/null || true)"
+
+  if [ -z "$expected_csp" ]; then
+    warn "could not read the app's CSP from source — comparison skipped (running outside the repo?)"
+  elif [ "$served_csp" = "$expected_csp" ]; then
+    pass "served CSP is the application's own policy"
+  else
+    fail "the served CSP is NOT the application's. Something between the app and the browser is rewriting it — check fly.toml's [http_service.http_options.response.headers].
+    served:   $served_csp
+    expected: $expected_csp"
+  fi
 else
   warn "target is not https — transport checks skipped (local run?)"
 fi

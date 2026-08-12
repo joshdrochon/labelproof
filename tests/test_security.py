@@ -180,7 +180,30 @@ def test_the_policy_carries_no_unsafe_directive_at_all() -> None:
     assert "style-src 'self';" in CONTENT_SECURITY_POLICY + ";"
 
 
-def test_only_the_evidence_overlay_uses_inline_styles() -> None:
+#: Components allowed to set styles from JavaScript, and why each is unavoidable.
+#:
+#: This is an allowlist rather than a ban because the mechanism matters and the count does
+#: not. react-dom applies a `style` prop through `node.style.setProperty` — a CSSOM
+#: mutation, which CSP does not govern — so N users of that one mechanism are exactly as
+#: safe as one. What would break the browser evidence is a DIFFERENT mechanism: a real
+#: `<style>` element, `dangerouslySetInnerHTML`, or a CSS-in-JS runtime that injects one.
+#:
+#: Adding a file here is a deliberate act. Read the paragraph on
+#: `test_the_policy_carries_no_unsafe_directive_at_all` first, satisfy yourself that the
+#: new user is a React `style` prop and nothing else, and say so in the commit.
+INLINE_STYLE_USERS: frozenset[str] = frozenset(
+    {
+        # Positions each evidence box over the region it cites. The coordinates come from
+        # the model per request; there is no stylesheet that could hold them.
+        "web/src/components/EvidenceOverlay.tsx",
+        # The batch progress bar's width is a percentage that changes every poll. Same
+        # mechanism, same reasoning — react-dom, `style` prop, CSSOM.
+        "web/src/routes/BatchCheck.tsx",
+    }
+)
+
+
+def test_only_known_components_set_styles_from_javascript() -> None:
     """The premise of the browser check above, held in place.
 
     The finding turned on *which* mechanism sets those styles. If a component starts
@@ -197,9 +220,13 @@ def test_only_the_evidence_overlay_uses_inline_styles() -> None:
         for path in sources
         if "style={{" in path.read_text()
     }
-    assert inline_style_props == {"web/src/components/EvidenceOverlay.tsx"}, (
-        "a new inline-style user appeared; re-check the CSP in a browser before trusting "
-        "test_the_policy_carries_no_unsafe_directive_at_all"
+    assert inline_style_props == INLINE_STYLE_USERS, (
+        f"the set of components setting styles from JavaScript changed: "
+        f"{inline_style_props ^ INLINE_STYLE_USERS}. Confirm the new one is a React "
+        f"`style` prop (CSSOM, ungoverned by CSP) and not a `<style>` element or a "
+        f"CSS-in-JS runtime, then add it to INLINE_STYLE_USERS. If it is either of those, "
+        f"the browser evidence behind "
+        f"test_the_policy_carries_no_unsafe_directive_at_all no longer applies."
     )
 
     for path in sources:

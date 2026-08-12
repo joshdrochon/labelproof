@@ -160,3 +160,88 @@ export interface ApiError {
 
 /** What the agent did with a row. Session only — nothing is filed anywhere (SCOPE-3). */
 export type AgentDecision = 'confirmed' | 'overridden';
+
+// ---------------------------------------------------------------------------------
+// Batch (BATCH-1..10) — mirrored from `api/batch/models.py`
+// ---------------------------------------------------------------------------------
+
+export type ItemState = 'queued' | 'processing' | 'done' | 'failed';
+
+/**
+ * There is deliberately no `failed` job state on the server. A job whose items all
+ * failed is a *finished* job with N failed items, and the screen says so rather than
+ * collapsing it to one word that hides which ones (BATCH-6).
+ */
+export type JobState = 'queued' | 'processing' | 'done';
+
+/** A manifest row the server could not use. Carries the row number so it is fixable. */
+export interface RowError {
+  row: number;
+  column: string | null;
+  message: string;
+}
+
+export interface ItemFailure {
+  code: string;
+  message: string;
+  next_step: string;
+  attempts: number;
+}
+
+export interface BatchItem {
+  item_id: string;
+  job_id: string;
+  row: number;
+  state: ItemState;
+  attempts: number;
+  application: Application;
+  images: string[];
+  result: VerificationResult | null;
+  failure: ItemFailure | null;
+  created_at: number;
+  started_at: number | null;
+  finished_at: number | null;
+}
+
+export interface JobCounts {
+  total: number;
+  queued: number;
+  processing: number;
+  done: number;
+  failed: number;
+}
+
+export interface BatchSummary {
+  by_recommendation: Record<string, number>;
+  by_verdict: Record<string, number>;
+  /** Item IDs in the order an agent should work them. Computed server-side (UX-10). */
+  worst_first: string[];
+  headline: string;
+}
+
+export interface BatchStatus {
+  job_id: string;
+  state: JobState;
+  counts: JobCounts;
+  eta_seconds: number | null;
+  summary: BatchSummary;
+  items: BatchItem[];
+  cost: Cost;
+  row_errors: RowError[];
+  unmatched_files: string[];
+  expires_at: number;
+  message: string;
+}
+
+/**
+ * `POST /batch`. Row errors ride along WITH the job id rather than replacing it: three
+ * bad rows out of 300 is not a rejected upload, and making an agent fix a typo before any
+ * work starts is the batch equivalent of doing them one at a time (TC-20).
+ */
+export interface BatchAccepted {
+  job_id: string;
+  accepted: number;
+  row_errors: RowError[];
+  unmatched_files: string[];
+  message: string;
+}

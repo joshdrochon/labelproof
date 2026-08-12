@@ -266,18 +266,18 @@ in LP-237, with fixtures across LP-068, 163, 195–198, 216, 226–229.
 
 ## F2 · Batch UI
 
-- [ ] **LP-167** Batch page, first-class in nav — **Janet has been asking for years; don't bury it** (BATCH-10)
-- [ ] **LP-168** Manifest template download + format help (UX-1)
-- [ ] **LP-169** Upload flow: manifest + images with inline per-row validation errors (BATCH-3)
-- [ ] **LP-170** Progress view: counts, bar, ETA, elapsed (BATCH-4)
-- [ ] **LP-171** Progressive results table: rows land as items finish (BATCH-5)
-- [ ] **LP-172** Triage order: Reject candidates → Needs review → clean (UX-10)
-- [ ] **LP-173** Filters: verdict, field, failure kind (UX-10)
-- [ ] **LP-174** Item drill-in reuses the Verify Now results view — one results language everywhere
-- [ ] **LP-175** Retry-failed button (BATCH-8)
-- [ ] **LP-176** Export button → summary CSV (BATCH-7)
-- [ ] **LP-177** Batch summary header: totals, duration, cost
-- [ ] **LP-178** Malformed-manifest UX: fix-list with row numbers — TC-20 (UX-6)
+- [x] **LP-167** Batch page, first-class in nav — **Janet has been asking for years; don't bury it** (BATCH-10)
+- [x] **LP-168** Manifest template download + format help (UX-1)
+- [x] **LP-169** Upload flow: manifest + images with inline per-row validation errors (BATCH-3)
+- [x] **LP-170** Progress view: counts, bar, ETA, elapsed (BATCH-4)
+- [x] **LP-171** Progressive results table: rows land as items finish (BATCH-5)
+- [x] **LP-172** Triage order: Reject candidates → Needs review → clean (UX-10)
+- [x] **LP-173** Filters: verdict, field, failure kind (UX-10)
+- [x] **LP-174** Item drill-in reuses the Verify Now results view — one results language everywhere
+- [x] **LP-175** Retry-failed button (BATCH-8)
+- [x] **LP-176** Export button → summary CSV (BATCH-7)
+- [x] **LP-177** Batch summary header: totals, duration, cost
+- [x] **LP-178** Malformed-manifest UX: fix-list with row numbers — TC-20 (UX-6)
 - [ ] **LP-179** Keyboard navigation through the triage table (UX-4)
 - [ ] **LP-180** Batch empty/error states in plain language (UX-6)
 - [ ] **LP-181** E2E: batch flow incl. progressive results (ENG-2)
@@ -374,7 +374,7 @@ in LP-237, with fixtures across LP-068, 163, 195–198, 216, 226–229.
 - [ ] **LP-253** Content-sniffing tests: renamed executable, scripted SVG, absurd dimensions (SEC-5)
 - [ ] **LP-254** PDF renderer constrained: page cap, no external fetches, timeout (SEC-5)
 - [ ] **LP-255** Rate-limit tests: burst → 429 with a plain-language body (SEC-9)
-- [ ] **LP-256** Security headers scan in CI (SEC-6)
+- [x] **LP-256** Security headers scan in CI (SEC-6)
 - [ ] **LP-257** Dependency audit in CI, pinned versions, baseline documented (SEC-10)
 - [ ] **LP-258** Secrets scan: pre-commit + CI (SEC-6)
 - [x] **LP-259** Provider data-handling documented: retention/training posture (SEC-7)
