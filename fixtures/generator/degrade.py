@@ -6,7 +6,7 @@ reproducible byte for byte, which regression tests require and a photograph cann
 
 **The honest limitation:** these simulate optics, not physics. Real specular highlights on
 curved glass and real lens blur differ from a Gaussian and an overlay. That gap is why
-Tier B exists (BUILD.md §5), and it belongs in the limitations list rather than being
+Tier B exists, and it belongs in the limitations list rather than being
 papered over.
 """
 
@@ -47,11 +47,13 @@ def perspective(image: np.ndarray, degrees: float) -> np.ndarray:
     """
     h, w = image.shape[:2]
     shift = np.tan(np.radians(min(abs(degrees), 60.0))) * h * 0.25
-    source = np.float32([[0, 0], [w, 0], [w, h], [0, h]])
+    source = np.array([[0, 0], [w, 0], [w, h], [0, h]], dtype=np.float32)
     if degrees >= 0:
-        dest = np.float32([[shift, 0], [w, 0], [w, h], [shift * 0.4, h]])
+        dest = np.array([[shift, 0], [w, 0], [w, h], [shift * 0.4, h]], dtype=np.float32)
     else:
-        dest = np.float32([[0, 0], [w - shift, 0], [w - shift * 0.4, h], [0, h]])
+        dest = np.array(
+            [[0, 0], [w - shift, 0], [w - shift * 0.4, h], [0, h]], dtype=np.float32
+        )
     matrix = cv2.getPerspectiveTransform(source, dest)
     return cv2.warpPerspective(
         image, matrix, (w, h), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE
@@ -173,7 +175,8 @@ def sensor_noise(image: np.ndarray, *, sigma: float = 8.0, seed: int = 11) -> np
 
 def dim(image: np.ndarray, factor: float = 0.35) -> np.ndarray:
     """Underexposed but recoverable (TC-13). Scales luminance without crushing to black."""
-    return np.clip(image.astype(np.float32) * factor, 0, 255).astype(np.uint8)
+    dimmed: np.ndarray = np.clip(image.astype(np.float32) * factor, 0, 255).astype(np.uint8)
+    return dimmed
 
 
 def side_lit(
@@ -220,7 +223,8 @@ def glare(
 
     white = np.full_like(image, 255, dtype=np.float32)
     blended = image.astype(np.float32) * (1 - falloff) + white * falloff
-    return np.clip(blended, 0, 255).astype(np.uint8)
+    flared: np.ndarray = np.clip(blended, 0, 255).astype(np.uint8)
+    return flared
 
 
 def glare_over_warning(image: np.ndarray, *, seed: int = 7) -> np.ndarray:

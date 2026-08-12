@@ -136,7 +136,18 @@ def _git(*args: str, cwd: Path = ROOT) -> str:
 
 
 def parents_of(rev: str) -> list[str]:
-    """The commits this merge joined. Two for an ordinary merge, more for an octopus."""
+    """The commits this merge joined. Two for an ordinary merge, more for an octopus.
+
+    During an UNRESOLVED merge there is no merge commit yet — `HEAD` is still the commit
+    you were on, and asking it for parents silently answers about the PREVIOUS merge.
+    That is the worst kind of wrong: a full, plausible table about the wrong commits. So
+    an in-progress merge is read from `MERGE_HEAD`, which is exactly what it is for, and
+    that is also the case you most want this tool in.
+    """
+    merge_head = Path(_git("rev-parse", "--git-dir")) / "MERGE_HEAD"
+    if rev == "HEAD" and merge_head.exists():
+        incoming = merge_head.read_text().split()
+        return [_git("rev-parse", "HEAD"), *incoming]
     line = _git("rev-list", "--parents", "-n", "1", rev)
     return line.split()[1:]
 
@@ -263,8 +274,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--json", action="store_true", help="machine-readable output")
     args = parser.parse_args(argv)
 
-    rev = _git("rev-parse", args.rev)
-    parents = parents_of(rev)
+    parents = parents_of(args.rev)
     if len(parents) < 2:
         raise SystemExit(
             f"{args.rev} is not a merge commit — it has {len(parents)} parent(s). "

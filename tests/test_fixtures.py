@@ -1,12 +1,23 @@
-"""The fixture generator. Determinism is the requirement (LP-123)."""
+"""The fixture generator. Determinism is the requirement (LP-123).
+
+Byte-identity is guaranteed between two runs *on one machine*. It is deliberately not
+claimed across machines: `render.py` picks the first available regular/bold family, so
+macOS (Arial) and Linux (DejaVu) rasterise different pixels from the same spec, and
+`golden/set.json` records which family produced its hashes so that difference reads as
+what it is. The eval report is unaffected — it is scored from the specs through the
+spec-backed provider, never from the pixels.
+"""
 
 import hashlib
+import io
 import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from api import canon
+from fixtures.generator import build as build_module
 from fixtures.generator.catalog import CATALOG, NOT_GENERATED, by_name
 from fixtures.generator.render import render
 from fixtures.generator.spec import LabelSpec
@@ -16,10 +27,24 @@ GOLDEN = ROOT / "golden" / "set.json"
 
 
 def _png_bytes(spec: LabelSpec) -> bytes:
-    import io
     buf = io.BytesIO()
     render(spec).save(buf, "PNG", optimize=True)
     return buf.getvalue()
+
+
+def _without_hashes(body: dict[str, Any]) -> dict[str, Any]:
+    """The parts of the manifest that must match on every machine.
+
+    Image hashes and the font name are machine-dependent by design; everything else —
+    names, applications, expectations, notes — is a property of the catalog alone.
+    """
+    return {
+        "tier": body["tier"],
+        "not_generated": body["not_generated"],
+        "fixtures": [
+            {k: v for k, v in entry.items() if k != "sha256"} for entry in body["fixtures"]
+        ],
+    }
 
 
 # --- determinism ----------------------------------------------------------------------
@@ -28,6 +53,82 @@ def test_rendering_is_byte_identical_across_runs() -> None:
     """LP-123: two CI runs must produce identical eval output."""
     spec = by_name("tc01_old_tom_clean")
     assert hashlib.sha256(_png_bytes(spec)).digest() == hashlib.sha256(_png_bytes(spec)).digest()
+
+
+@pytest.mark.parametrize("spec", CATALOG, ids=lambda s: s.name)
+def test_every_fixture_renders_byte_identically_twice(spec: LabelSpec) -> None:
+    """One stable fixture proves nothing about the other fourteen."""
+    faces = ["front", "back"] if spec.face != "single" else ["single"]
+    for face in faces:
+        variant = spec.with_(face=face)
+        assert _png_bytes(variant) == _png_bytes(variant), f"{spec.name} [{face}]"
+
+
+def test_two_full_regenerations_are_byte_identical(tmp_path: Path) -> None:
+    """The whole pipeline, not just the renderer: images and manifest alike."""
+    first, second = tmp_path / "first", tmp_path / "second"
+    body_a = build_module.build(labels_dir=first, golden_path=first / "set.json")
+    body_b = build_module.build(labels_dir=second, golden_path=second / "set.json")
+
+    assert build_module.serialise(body_a) == build_module.serialise(body_b)
+    assert (first / "set.json").read_bytes() == (second / "set.json").read_bytes()
+
+    names = sorted(p.name for p in first.glob("*.png"))
+    assert names == sorted(p.name for p in second.glob("*.png"))
+    assert names, "the build produced no images at all"
+    for name in names:
+        assert (first / name).read_bytes() == (second / name).read_bytes(), name
+
+
+def test_a_regeneration_does_not_drift_from_the_committed_manifest(tmp_path: Path) -> None:
+    """A stale manifest would silently decouple the golden set from the catalog."""
+    fresh = build_module.build(labels_dir=tmp_path, golden_path=tmp_path / "set.json")
+    committed = json.loads(GOLDEN.read_text())
+    assert _without_hashes(fresh) == _without_hashes(committed)
+
+
+def test_the_committed_hashes_match_the_committed_images() -> None:
+    """Repo integrity, and it is machine-independent.
+
+    `golden/set.json` recorded a sha256 per image that nothing ever compared against the
+    files on disk, so a corrupted or truncated fixture was invisible — the eval would
+    happily score against it. This checks the manifest describes the bytes actually
+    committed, which is true on every machine regardless of which font rendered them.
+    """
+    data = json.loads(GOLDEN.read_text())
+    labels = ROOT / "fixtures" / "labels"
+    checked = 0
+    for entry in data["fixtures"]:
+        for name, expected in entry["sha256"].items():
+            path = labels / name
+            assert path.is_file(), f"{name} is in the manifest but not on disk"
+            actual = hashlib.sha256(path.read_bytes()).hexdigest()[: len(expected)]
+            assert actual == expected, (
+                f"{name} does not match its recorded hash — the fixture changed without "
+                f"the manifest, or the file is corrupt"
+            )
+            checked += 1
+    assert checked, "the manifest recorded no hashes to check"
+
+
+def test_every_committed_image_is_named_by_the_manifest() -> None:
+    """An orphan PNG is a fixture nothing scores and nobody deletes."""
+    data = json.loads(GOLDEN.read_text())
+    declared = {name for entry in data["fixtures"] for name in entry["sha256"]}
+    on_disk = {p.name for p in (ROOT / "fixtures" / "labels").glob("*.png")}
+    assert on_disk == declared, f"orphans: {sorted(on_disk - declared)}"
+
+
+def test_the_manifest_records_the_font_that_produced_its_hashes() -> None:
+    """So a cross-machine hash mismatch reads as a font change, not as flakiness."""
+    body = json.loads(GOLDEN.read_text())
+    assert body["rendered_with"]["font_family"]
+
+
+def test_the_manifest_serialisation_is_stable(tmp_path: Path) -> None:
+    body = build_module.build(labels_dir=tmp_path, golden_path=tmp_path / "set.json")
+    assert build_module.serialise(body) == build_module.serialise(body)
+    assert build_module.serialise(body).endswith("\n")
 
 
 def test_different_specs_render_differently() -> None:
@@ -97,6 +198,7 @@ def test_non_standard_fill_spec_uses_an_unauthorized_size() -> None:
     from api.models import Commodity
     from api.rules import fills
     parsed = fills.parse(by_name("tc10_non_standard_fill").net_contents)
+    assert parsed.ml is not None, "733 mL must parse to a volume at all"
     assert not fills.is_authorized(parsed.ml, Commodity.SPIRITS)
 
 

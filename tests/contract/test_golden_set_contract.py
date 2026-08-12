@@ -72,7 +72,9 @@ def test_the_golden_set_declares_its_tier(golden: dict[str, Any]) -> None:
 
 
 def test_every_top_level_key_is_one_the_harness_reads(golden: dict[str, Any]) -> None:
-    assert set(golden) == {"tier", "description", "fixtures", "not_generated"}
+    assert set(golden) == {
+        "tier", "description", "fixtures", "not_generated", "rendered_with",
+    }
 
 
 def test_every_entry_carries_the_full_set_of_keys(entries: list[dict[str, Any]]) -> None:

@@ -1,6 +1,9 @@
 {
   "tier": "A",
-  "description": "Synthetic fixtures, deterministic and CI-gating. Tier B (real bottle photographs) is reported separately and never gates.",
+  "description": "Synthetic fixtures, deterministic and CI-gating. Tier B (real bottle photographs) lives in golden/tier_b/ and is reported separately, never gating.",
+  "rendered_with": {
+    "font_family": "Arial.ttf"
+  },
   "not_generated": {
     "TC-11": "angled photo \u2014 applied by degrade.py to a rendered label",
     "TC-12": "glare over the warning \u2014 degrade.py",
@@ -174,7 +177,7 @@
         ]
       },
       "pending": "",
-      "notes": "TC-06. Warning present and verbatim but shrunk and low-contrast \u2014 the 'creative' evasion Jenny described. The wording is right, so this is not a correction to send back; the PRD's TC-06 row asks for Needs review with the region shown, and Unreadable is the only verdict that drives that without claiming the label is wrong (LP-211, LP-212). KNOWN TAXONOMY GAP: the PRD defines Unreadable as 'image quality prevents verification', and here the warning is read perfectly \u2014 `extracted` carries the full statement. The aggregate now matches the PRD and the field verdict does not. The six-value taxonomy has no verdict for 'read fine, complies as far as we can tell, needs a human anyway'; adding a seventh is a product decision (MATCH-1). Recorded rather than resolved."
+      "notes": "TC-06. Warning present and verbatim but shrunk and low-contrast \u2014 the 'creative' evasion Jenny described. The wording is right, so this is not a correction to send back; the PRD's TC-06 row asks for Needs review with the region shown, and Unreadable is the only verdict that drives that without claiming the label is wrong (LP-211, LP-212). KNOWN TAXONOMY GAP: the PRD defines Unreadable as 'image quality prevents verification', and here the warning is read perfectly \u2014 `extracted` carries the full statement. The aggregate now matches the PRD and the field verdict does not. The six-value taxonomy has no verdict for 'read fine, complies as far as we can tell, needs a human anyway'; adding a seventh is a product decision (MATCH-1). Recorded rather than resolved. LP-211 may move this expectation from `mismatch` to `unreadable`; it cannot make it disappear, because this fixture is named in MUST_DECLARE_WARNING_VIOLATION and emptying its `expect` fails the run."
     },
     {
       "name": "tc03b_non_bold_warning_header",
