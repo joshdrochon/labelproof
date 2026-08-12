@@ -161,6 +161,24 @@ export interface ApiError {
 /** What the agent did with a row. Session only — nothing is filed anywhere (SCOPE-3). */
 export type AgentDecision = 'confirmed' | 'overridden';
 
+/**
+ * A value the agent read off the bottle themselves, because the picture could not be
+ * read (UX-6, HITL-2).
+ *
+ * Deliberately NOT merged into `FieldResult.extracted`. `extracted` means "this is what
+ * the label image says, as read by the model", and an agent's typing is a different kind
+ * of fact with a different basis. Writing it into the same slot would make the report
+ * claim the image was verified when it never was — the one thing this whole application
+ * is built not to do — and nothing downstream could tell the two apart afterwards.
+ *
+ * So it rides alongside, and the row keeps its Unreadable verdict.
+ */
+export interface AgentEntry {
+  value: string;
+  /** True when what the agent typed matches what the application says. Advisory only. */
+  agrees: boolean;
+}
+
 // ---------------------------------------------------------------------------------
 // Batch (BATCH-1..10) — mirrored from `api/batch/models.py`
 // ---------------------------------------------------------------------------------

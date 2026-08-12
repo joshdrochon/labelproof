@@ -1851,6 +1851,77 @@ kbd {
   }
 }
 
+/* --- an Unreadable row the agent can act on (UX-6, HITL-2) --------------------------- */
+
+.unread {
+  background: var(--surface-sunk);
+  border: 1px solid var(--rule);
+  border-left: 4px solid var(--rule-strong);
+  border-radius: 4px;
+  padding: 1rem;
+  margin: 1rem 0;
+}
+
+.unread__choices {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-top: 0.75rem;
+}
+
+.unread__form {
+  margin-top: 0.75rem;
+}
+
+.unread__label {
+  display: block;
+  font-weight: 600;
+  margin-bottom: 0.35rem;
+}
+
+.unread__input {
+  width: 100%;
+  max-width: 34rem;
+  min-height: 2.75rem;
+  font: inherit;
+  font-size: 1.0625rem;
+  padding: 0.4rem 0.6rem;
+  border: 1px solid var(--rule-strong);
+  border-radius: 3px;
+  background: var(--surface);
+  color: var(--ink);
+}
+
+.unread__entered {
+  margin-top: 0.9rem;
+  padding-top: 0.75rem;
+  border-top: 1px solid var(--rule);
+}
+
+.unread__entered-value {
+  margin: 0 0 0.3rem;
+}
+
+.unread__entered-note {
+  margin: 0 0 0.3rem;
+  font-weight: 600;
+}
+
+/* Agreement and disagreement are marked by a word first. The border is the second
+   channel; there is no colour-only state here. */
+.unread__entered[data-agrees='false'] .unread__entered-note {
+  color: var(--serious);
+}
+
+.unread__entered[data-agrees='true'] .unread__entered-note {
+  color: var(--clear);
+}
+
+.unread__entered-caveat {
+  margin: 0;
+  color: var(--ink-soft);
+}
+
 @media print {
   /* Dave prints in black and white. Every verdict still reads, because every verdict
      is a word and an outline before it is ever a colour. */
@@ -1887,6 +1958,8 @@ kbd {
   .banner__row-link,
   .setup__sample,
   .dropzone-panel,
+  .unread__choices,
+  .unread__form,
   .filters,
   .batch__actions,
   .batch__progress,
@@ -1918,6 +1991,17 @@ kbd {
 
   .batch__notice[open] > summary ~ * {
     display: revert;
+  }
+
+  /* A value the agent typed prints WITH its caveat, or the paper record would claim the
+     label was verified. The controls that produced it are screen-only. */
+  .unread {
+    border: 1px solid #000;
+    background: none;
+  }
+
+  .unread__entered-caveat {
+    font-weight: 700;
   }
 
   /* The dialog is a screen affordance. On paper it would print over the table. */

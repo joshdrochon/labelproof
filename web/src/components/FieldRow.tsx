@@ -16,10 +16,11 @@
  * finding, and it is what the mock got wrong.
  */
 
-import type { AgentDecision, Commodity, FieldResult } from '../types';
+import type { AgentDecision, AgentEntry, Commodity, FieldResult } from '../types';
 import { VERDICTS, fieldLabel, referenceCitations } from '../copy';
 import VerdictChip from './VerdictCard';
 import DiffView, { DiffText, useValueDiff } from './DiffView';
+import ReadItYourself from './ReadItYourself';
 
 /**
  * Past this, a value stops fitting a table cell and gets a short opening in the row with
@@ -31,6 +32,10 @@ const CELL_PREVIEW = 48;
 
 interface FieldRowProps {
   result: FieldResult;
+  /** What the agent read off the bottle, when the picture could not answer this row. */
+  entry?: AgentEntry | null;
+  onEnter?: (entry: AgentEntry | null) => void;
+  onRetake?: () => void;
   commodity: Commodity;
   variant: 'attention' | 'settled';
   /** Ties the row to the outline on the photo. Only attention rows carry one. */
@@ -59,6 +64,9 @@ function legibilityNote(result: FieldResult): string | null {
 
 export default function FieldRow({
   result,
+  entry = null,
+  onEnter,
+  onRetake,
   commodity,
   variant,
   number,
@@ -189,6 +197,15 @@ export default function FieldRow({
                     </li>
                   ))}
                 </ul>
+              ) : null}
+
+              {result.verdict === 'unreadable' && onEnter && onRetake ? (
+                <ReadItYourself
+                  result={result}
+                  entry={entry}
+                  onEnter={onEnter}
+                  onRetake={onRetake}
+                />
               ) : null}
 
               <h4 className="detail__heading">What to do</h4>

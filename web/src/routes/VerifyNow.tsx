@@ -15,6 +15,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type {
   AgentDecision,
+  AgentEntry,
   ApiError,
   Application,
   FieldName,
@@ -63,6 +64,9 @@ export default function VerifyNow() {
   const [activeField, setActiveField] = useState<FieldName | null>(null);
   const [decisions, setDecisions] = useState<Partial<Record<FieldName, AgentDecision>>>({});
   const [determination, setDetermination] = useState<'approved' | 'returned' | null>(null);
+  // What the agent read off the bottle for rows the picture could not answer. Session
+  // only, and never merged into the result — see the note on `AgentEntry`.
+  const [entries, setEntries] = useState<Partial<Record<FieldName, AgentEntry>>>({});
   const [imageIndex, setImageIndex] = useState(0);
 
   const abortRef = useRef<AbortController | null>(null);
@@ -141,6 +145,7 @@ export default function VerifyNow() {
     abortRef.current = controller;
     startedRef.current = Date.now();
     setFailure(null);
+    setEntries({});
     setPhase('working');
     try {
       const result = await verify({ application, files }, controller.signal);
@@ -199,6 +204,26 @@ export default function VerifyNow() {
     }
   }, [settle]);
 
+  /**
+   * Go back for a better picture, keeping everything the agent typed.
+   *
+   * Distinct from `startOver`, which clears the application too. An Unreadable row is
+   * almost always a photograph problem, and making someone re-enter seven fields to
+   * re-shoot one image is how a tool earns the reputation the previous vendor has.
+   */
+  const retake = useCallback(() => {
+    abortRef.current?.abort();
+    for (const url of localUrlsRef.current) URL.revokeObjectURL(url);
+    localUrlsRef.current = [];
+    setPhase('setup');
+    setChecked(null);
+    setFiles([]);
+    setFailure(null);
+    setDecisions({});
+    setDetermination(null);
+    setEntries({});
+  }, []);
+
   const startOver = useCallback(() => {
     abortRef.current?.abort();
     for (const url of localUrlsRef.current) URL.revokeObjectURL(url);
@@ -211,6 +236,7 @@ export default function VerifyNow() {
     setFailure(null);
     setDecisions({});
     setDetermination(null);
+    setEntries({});
   }, []);
 
   if (phase === 'checked' && checked) {
@@ -225,6 +251,9 @@ export default function VerifyNow() {
         setDecisions={setDecisions}
         determination={determination}
         setDetermination={setDetermination}
+        entries={entries}
+        setEntries={setEntries}
+        onRetake={retake}
         imageIndex={imageIndex}
         setImageIndex={setImageIndex}
         onStartOver={startOver}
@@ -401,6 +430,10 @@ interface ChecklistScreenProps {
   setDecisions: (value: Partial<Record<FieldName, AgentDecision>>) => void;
   determination: 'approved' | 'returned' | null;
   setDetermination: (value: 'approved' | 'returned' | null) => void;
+  entries: Partial<Record<FieldName, AgentEntry>>;
+  setEntries: (value: Partial<Record<FieldName, AgentEntry>>) => void;
+  /** Back to the pictures, with the application details kept. */
+  onRetake: () => void;
   imageIndex: number;
   setImageIndex: (index: number) => void;
   onStartOver: () => void;
@@ -416,6 +449,9 @@ function ChecklistScreen({
   setDecisions,
   determination,
   setDetermination,
+  entries,
+  setEntries,
+  onRetake,
   imageIndex,
   setImageIndex,
   onStartOver,
@@ -629,6 +665,11 @@ function ChecklistScreen({
                     onDecide={(value) =>
                       setDecisions({ ...decisions, [row.field]: value ?? undefined })
                     }
+                    entry={entries[row.field] ?? null}
+                    onEnter={(value) =>
+                      setEntries({ ...entries, [row.field]: value ?? undefined })
+                    }
+                    onRetake={onRetake}
                     isFocused={activeField === row.field}
                   />
                 ))}
@@ -658,6 +699,11 @@ function ChecklistScreen({
                     onDecide={(value) =>
                       setDecisions({ ...decisions, [row.field]: value ?? undefined })
                     }
+                    entry={entries[row.field] ?? null}
+                    onEnter={(value) =>
+                      setEntries({ ...entries, [row.field]: value ?? undefined })
+                    }
+                    onRetake={onRetake}
                     isFocused={activeField === row.field}
                   />
                 ))}

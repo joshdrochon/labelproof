@@ -278,8 +278,8 @@ in LP-237, with fixtures across LP-068, 163, 195–198, 216, 226–229.
 - [x] **LP-176** Export button → summary CSV (BATCH-7)
 - [x] **LP-177** Batch summary header: totals, duration, cost
 - [x] **LP-178** Malformed-manifest UX: fix-list with row numbers — TC-20 (UX-6)
-- [ ] **LP-179** Keyboard navigation through the triage table (UX-4)
-- [ ] **LP-180** Batch empty/error states in plain language (UX-6)
+- [x] **LP-179** Keyboard navigation through the triage table (UX-4)
+- [x] **LP-180** Batch empty/error states in plain language (UX-6)
 - [ ] **LP-181** E2E: batch flow incl. progressive results (ENG-2)
 - [ ] **LP-182** Batch docs: README section + in-app help blurb
 
@@ -342,7 +342,7 @@ in LP-237, with fixtures across LP-068, 163, 195–198, 216, 226–229.
 - [ ] **LP-228** Fixtures: DBA / producer variants (MATCH-4)
 - [ ] **LP-229** Cost-discipline guard: STONE'S THROW still resolves at Tier 2 — adjudicator not invoked (TC-02)
 - [ ] **LP-230** Judgment eval subset: accuracy on judged cases tracked (OPS-2)
-- [ ] **LP-231** Judged verdicts overridable; overrides in the report (HITL-2)
+- [x] **LP-231** Judged verdicts overridable; overrides in the report (HITL-2)
 - [ ] **LP-232** Adjudicator fakes for CI (ENG-3)
 - [ ] **LP-325** Confidence-triggered escalation: re-extract cropped evidence region at full resolution when a field returns low confidence (IMG-5, MATCH-6)
 
