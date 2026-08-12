@@ -925,7 +925,7 @@ kbd {
   border-radius: 50%;
   background: var(--serious);
   color: #fff;
-  font-size: 0.9rem;
+  font-size: 0.9375rem;
   flex: none;
 }
 

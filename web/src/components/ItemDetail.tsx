@@ -99,10 +99,33 @@ export default function ItemDetail({
               elapsedMs={result.timings_ms.total}
             />
 
-            <ul className="rows">
-              {attentionFields(result.fields).map((field, index) => (
-                <li key={field.field}>
+            {/* A TABLE, not a list.
+                
+                `FieldRow` renders `<tr>` elements — it is written for the checklist in
+                VerifyNow — and the first version of this component wrapped them in
+                `<ul>/<li>`. React said so out loud ("`<li>` cannot contain a nested
+                `<tr>`") and the accessibility audit is what surfaced it: invalid nesting
+                strips the table semantics a screen reader navigates by, so the row/column
+                relationship an agent relies on simply is not announced. The same
+                components must also produce the same STRUCTURE, or reusing them buys the
+                look and not the behaviour. */}
+            <table className="checklist">
+              <caption className="visually-hidden">
+                Field by field comparison of the label against the application.
+              </caption>
+              <thead>
+                <tr>
+                  <th scope="col">Field</th>
+                  <th scope="col">The application says</th>
+                  <th scope="col">The label shows</th>
+                  <th scope="col">Verdict</th>
+                </tr>
+              </thead>
+
+              <tbody className="checklist__group" data-group="attention">
+                {attentionFields(result.fields).map((field, index) => (
                   <FieldRow
+                    key={field.field}
                     result={field}
                     commodity={commodity}
                     variant="attention"
@@ -118,11 +141,13 @@ export default function ItemDetail({
                     }
                     isFocused={false}
                   />
-                </li>
-              ))}
-              {settledFields(result.fields).map((field) => (
-                <li key={field.field}>
+                ))}
+              </tbody>
+
+              <tbody className="checklist__group" data-group="settled">
+                {settledFields(result.fields).map((field) => (
                   <FieldRow
+                    key={field.field}
                     result={field}
                     commodity={commodity}
                     variant="settled"
@@ -138,9 +163,9 @@ export default function ItemDetail({
                     }
                     isFocused={false}
                   />
-                </li>
-              ))}
-            </ul>
+                ))}
+              </tbody>
+            </table>
           </>
         ) : (
           <div className="drawer__failure">

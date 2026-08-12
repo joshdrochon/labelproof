@@ -384,19 +384,19 @@ in LP-237, with fixtures across LP-068, 163, 195–198, 216, 226–229.
 
 ## F8 · Accessibility & UX polish
 
-- [ ] **LP-263** Automated a11y audit (axe) on both modes; criticals fixed (UX-4)
+- [x] **LP-263** Automated a11y audit (axe) on both modes; criticals fixed (UX-4)
 - [ ] **LP-264** Keyboard-only full walkthrough, recorded (UX-4)
 - [ ] **LP-265** Screen-reader pass: labels, roles, live regions (UX-4)
-- [ ] **LP-266** Contrast verification, all states incl. verdict chips (UX-3)
-- [ ] **LP-267** Focus order + visible-focus audit (UX-4)
-- [ ] **LP-268** 200% zoom usable (UX-4)
+- [x] **LP-266** Contrast verification, all states incl. verdict chips (UX-3)
+- [x] **LP-267** Focus order + visible-focus audit (UX-4)
+- [x] **LP-268** 200% zoom usable (UX-4)
 - [x] **LP-269** Reduced-motion support (UX-4)
 - [x] **LP-270** Print stylesheet for the report — **Dave prints; the printout must read** (HITL-5)
 - [ ] **LP-271** Copy final pass: reading level, zero jargon (UX-6)
 - [ ] **LP-272** Hallway test protocol: tasks + success criteria written first (UX-1)
 - [ ] **LP-273** **Run the 73-year-old test:** ≥3 cold users reach a verdict, zero instructions; notes committed (UX-1)
 - [ ] **LP-274** Fix rounds from hallway findings (UX-1)
-- [ ] **LP-275** Grayscale audit: verdicts distinguishable without color (UX-3)
+- [x] **LP-275** Grayscale audit: verdicts distinguishable without color (UX-3)
 - [x] **LP-276** Title/favicon/meta; landing carries no stale results
 
 ## F9 · Performance verification

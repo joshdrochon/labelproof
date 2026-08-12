@@ -15,6 +15,7 @@ from __future__ import annotations
 import io
 import json
 import logging
+import re
 import sys
 import threading
 import tracemalloc
@@ -1004,3 +1005,81 @@ def test_an_ordinary_photograph_is_not_caught_by_the_bomb_guard() -> None:
     # 9000x6000 is 54 MP — an ordinary high-end camera, and the frame that caught the
     # first version of this limit at 50 MP.
     assert ingest.ingest_one(_flat_png(9_000, 6_000), Config(use_fake_provider=True), 0)
+
+
+# --------------------------------------------------------------------------------------
+# Contrast (UX-3, LP-266) — asserted against the stylesheet, not measured once by hand
+# --------------------------------------------------------------------------------------
+#
+# axe cannot compute contrast under jsdom: it needs real layout to know what a pixel
+# actually sits on. So the palette is checked here instead, in the suite that already
+# reads source files as data, and it runs on every commit rather than the day someone
+# remembered to open a checker.
+
+_STYLES = ROOT / "web" / "src" / "styles.css"
+
+#: WCAG 2.1 AA. 4.5:1 for body text, 3:1 for large. Section 508 binds this application.
+_AA_NORMAL = 4.5
+
+
+def _relative_luminance(hex_colour: str) -> float:
+    channels = [int(hex_colour[i : i + 2], 16) / 255 for i in (1, 3, 5)]
+    linear = [c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4 for c in channels]
+    return 0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2]
+
+
+def _contrast(foreground: str, background: str) -> float:
+    a, b = _relative_luminance(foreground), _relative_luminance(background)
+    return (max(a, b) + 0.05) / (min(a, b) + 0.05)
+
+
+def _palette() -> dict[str, str]:
+    root_block = _STYLES.read_text().split(":root {", 1)[1].split("}", 1)[0]
+    return dict(re.findall(r"--([\w-]+):\s*(#[0-9a-fA-F]{6})", root_block))
+
+
+def test_the_contrast_helper_agrees_with_the_known_extremes() -> None:
+    """Guards the guard. A broken ratio function would pass everything silently."""
+    assert _contrast("#000000", "#ffffff") == pytest.approx(21.0, abs=0.01)
+    assert _contrast("#ffffff", "#ffffff") == pytest.approx(1.0, abs=0.01)
+
+
+@pytest.mark.parametrize(
+    "foreground",
+    ["ink", "ink-soft", "ink-faint", "navy", "clear", "attention", "serious"],
+)
+@pytest.mark.parametrize("background", ["paper", "surface", "surface-sunk"])
+def test_every_text_colour_clears_wcag_aa_on_every_surface(
+    foreground: str, background: str
+) -> None:
+    """Every ink the interface uses, on every ground it is drawn on.
+
+    The parametrised cross-product rather than a spot check: `ink-faint` on
+    `surface-sunk` is the quiet combination — the one used for the rows this stylesheet
+    deliberately de-emphasises — and it is exactly the pairing a spot check would skip.
+    It measures 5.41 against a floor of 4.5, which is the whole point of quieting a row
+    with weight and spacing rather than by fading the type.
+    """
+    palette = _palette()
+    ratio = _contrast(palette[foreground], palette[background])
+
+    assert ratio >= _AA_NORMAL, (
+        f"--{foreground} on --{background} is {ratio:.2f}:1, below WCAG AA's {_AA_NORMAL}. "
+        f"Section 508 binds this tool; darken the ink rather than accepting it."
+    )
+
+
+def test_body_type_never_drops_below_sixteen_pixels() -> None:
+    """UX-3's floor. Quiet is made with weight and spacing, never by shrinking type.
+
+    The users include agents over fifty reading 4-point warning text off a bottle all
+    day. `0.9375rem` is 15px and would be a regression; the stylesheet's own header says
+    16px is the floor "including on the rows this stylesheet is deliberately quieting".
+    """
+    too_small = re.findall(r"font-size:\s*(0\.\d+)rem", _STYLES.read_text())
+    offenders = [value for value in too_small if float(value) < 0.9375]
+
+    assert offenders == [], (
+        f"font sizes below 15px found: {sorted(set(offenders))}rem. The floor is 1rem for "
+        f"body text; only chips and labels may go to 0.9375rem."
+    )
