@@ -19,7 +19,7 @@ not 0%, and emphatically not the 100% that `0/0` invites. A section that quietly
 100% is exactly the number that would end up pasted into a submission.
 
 The manifest is committed with an empty label list and a capture guide, so dropping images
-into `golden/tier_b/images/` and adding rows is the only remaining step.
+into `golden/tier_b/photos/` and adding rows is the only remaining step.
 """
 
 from __future__ import annotations
@@ -207,7 +207,7 @@ def _read_label(raw: Any, index: int, images_dir: Path, seen: set[str]) -> tuple
 def load(manifest_path: Path | None = None) -> TierBSet:
     """Read and validate the Tier B manifest. Never raises; problems are data."""
     path = manifest_path or MANIFEST
-    images_dir = path.parent / "images"
+    images_dir = path.parent / "photos"
     result = TierBSet(manifest_path=path, images_dir=images_dir)
 
     if not path.is_file():

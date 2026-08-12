@@ -7,9 +7,16 @@ them, which is the argument for Tier B existing at all.
 
 from __future__ import annotations
 
+from pathlib import Path
+from typing import Any
+
+import pytest
+
 from api import canon
 from api.models import Verdict
 from api.rules import warning
+
+PHOTOS = Path(__file__).resolve().parents[1] / "golden" / "tier_b" / "photos"
 
 
 def test_a_statement_set_entirely_in_capitals_is_not_a_defect() -> None:
@@ -128,3 +135,77 @@ def test_a_brand_name_does_not_get_the_surrounding_text_allowance() -> None:
     )
 
     assert result.verdict is Verdict.MISMATCH
+
+
+# --------------------------------------------------------------------------------------
+# Image quality, found by three more photographs
+# --------------------------------------------------------------------------------------
+
+
+def _photo(name: str) -> Any:
+    """Decoded BGR image. `Any` rather than `np.ndarray` so cv2 stays a lazy import."""
+    import cv2
+
+    path = PHOTOS / name
+    assert path.exists(), f"Tier B photo {name} is missing"
+    image = cv2.imread(str(path))
+    assert image is not None, f"{name} did not decode"
+    return image
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "courtyard_rose_back.png",
+        "bacardi151_glare_cropped_back.webp",
+        "fireball_back.webp",
+        "found_north_back.jpg",
+        "ipa_torn_back.webp",
+    ],
+)
+def test_a_photograph_that_is_not_tilted_is_not_reported_as_tilted(name: str) -> None:
+    """Every one of these is shot square-on, and the estimator said otherwise.
+
+    Measured before the fix: the Courtyard wine back label reported **-45.00 degrees**,
+    the cropped Bacardi label **-45.00**, and a perfectly good Fireball photo **34.0**.
+    The first two are the filter's own boundary — `np.degrees(theta) - 90` clamped into
+    `[-45, 45]`, with the boundary inclusive — so a median taken over four or five
+    survivors landed exactly on the edge of the range and was reported as a measurement.
+
+    Two consequences, and the second is the worse one. The agent was told a square
+    photograph was crooked. And `correct()` acts on this number at 1.5 degrees, so a
+    fabricated 34-degree reading put a good label into a rotation it never needed.
+
+    No synthetic fixture could produce this. Rendered labels have clean, plentiful,
+    agreeing text lines; a photograph has bottle edges, shelf lines, glare boundaries and
+    a granite counter top. The estimator was only ever exercised on the easy case.
+    """
+    from api.pipeline.deskew import estimate_skew
+
+    assert abs(estimate_skew(_photo(name))) < 2.0
+
+
+def test_a_genuinely_rotated_label_still_reports_its_angle() -> None:
+    """The other half — the fix must not be "always answer zero".
+
+    This growler's warning sticker is applied turned, and the photograph is taken at a
+    slight angle on a kitchen counter. It is the one image in the corpus with real skew,
+    and it has to survive the new minimum-candidates and spread checks.
+    """
+    from api.pipeline.deskew import estimate_skew
+
+    assert abs(estimate_skew(_photo("growler_warning_rotated.webp"))) >= 2.0
+
+
+def test_the_estimator_reports_zero_rather_than_the_filter_boundary() -> None:
+    """The specific value that started this, held out directly.
+
+    A reading at exactly the boundary is saturation. Anything within two degrees of it is
+    the estimator running out of road rather than finding text at 45 degrees, which is not
+    a case this product has.
+    """
+    from api.pipeline.deskew import estimate_skew
+
+    for name in sorted(p.name for p in PHOTOS.glob("*")):
+        angle = estimate_skew(_photo(name))
+        assert abs(abs(angle) - 45.0) > 2.0, f"{name} reported {angle}, at the boundary"

@@ -1262,7 +1262,7 @@ def _tier_b_manifest(
     `absent` names files the manifest declares but that are deliberately not written —
     the case where a row points at a photograph nobody has.
     """
-    images = tmp_path / "images"
+    images = tmp_path / "photos"
     images.mkdir(exist_ok=True)
     source = REPO / "fixtures" / "labels" / "tc01_old_tom_clean.png"
     for label in labels:
@@ -1298,11 +1298,23 @@ def _old_tom_row(**overrides: object) -> dict[str, object]:
 
 
 def test_the_committed_tier_b_manifest_loads_clean() -> None:
-    """It ships empty, but it must be a valid empty rather than a broken one."""
+    """Whatever it declares, it must declare it validly.
+
+    This used to assert `loaded.is_empty` as well, which was true when written and became
+    false the moment anyone did the thing the capture guide asks for. Emptiness was never
+    the property worth protecting — a row pointing at a photograph nobody has, or naming a
+    verdict that does not exist, is what would actually hurt, and `problems` covers it.
+
+    The "0 of 0 is not 100%" behaviour that emptiness used to exercise is still tested,
+    below, against a manifest built for the purpose.
+    """
     loaded = tier_b.load()
     assert loaded.problems == [], loaded.problems
-    assert loaded.is_empty
     assert loaded.capture_guide, "the capture guide is the instruction for populating it"
+    for label in loaded.labels:
+        assert label.images, f"{label.name} declares no image"
+        for image in label.images:
+            assert image.path.is_file(), f"{label.name} points at a missing {image.file}"
 
 
 def test_tier_b_never_gates_by_construction() -> None:
@@ -1317,8 +1329,16 @@ def test_a_manifest_claiming_to_gate_is_rejected(tmp_path: Path) -> None:
 
 def test_an_empty_tier_b_reports_no_accuracy_at_all(
     capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
-    """0 of 0 is not 100%, and a section that rendered 100% would end up in a submission."""
+    """0 of 0 is not 100%, and a section that rendered 100% would end up in a submission.
+
+    Driven from a manifest built empty on purpose. It used to rely on the committed one
+    happening to be empty, so populating Tier B — the whole point of the capture guide —
+    deleted the coverage instead of exercising it.
+    """
+    monkeypatch.setattr(tier_b, "MANIFEST", _tier_b_manifest(tmp_path, []))
     main(["--json", "--tier", "all"])
     body = json.loads(capsys.readouterr().out)["tier_b"]
     assert body["empty"] is True
@@ -1327,7 +1347,7 @@ def test_an_empty_tier_b_reports_no_accuracy_at_all(
 
 
 def test_the_empty_state_says_so_in_plain_language() -> None:
-    text = render(evaluate(CATALOG), tier_b.load())
+    text = render(evaluate(CATALOG), tier_b.TierBSet(manifest_path=Path("x"), images_dir=Path("y")))
     assert "Tier B" in text
     assert "EMPTY" in text
     assert "says NOTHING about real bottle photographs" in text
@@ -1376,7 +1396,11 @@ def test_the_gap_section_does_not_overstate_what_tier_a_measures() -> None:
 
 
 def test_the_empty_tier_b_block_does_not_overstate_tier_a_either() -> None:
-    text = render(evaluate(CATALOG), tier_b.load())
+    """Also built empty on purpose — this caveat only renders in the empty state."""
+    text = render(
+        evaluate(CATALOG),
+        tier_b.TierBSet(manifest_path=Path("x"), images_dir=Path("y")),
+    )
     assert "our own renderer" not in text
     assert "RULES ENGINE" in text
 

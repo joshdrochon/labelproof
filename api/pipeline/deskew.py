@@ -46,6 +46,26 @@ from api.rules import thresholds as T
 #: different answers.
 _HOUGH_VOTE_FRACTION = 0.14
 
+#: Candidate lines required before `estimate_skew` will claim an angle at all.
+#:
+#: Three real photographs put this here. A straight-on shot of a wine back label returned
+#: exactly -45.00 degrees, and so did a cropped Bacardi label, and a good Fireball photo
+#: returned 34.0. In each case the estimator had found a handful of lines, none of them
+#: text, and taken their median as if it were a measurement. One or two survivors is not a
+#: dominant orientation; it is what is left after the filter, and reporting it as an angle
+#: told the agent a square photograph was crooked.
+_MIN_SKEW_CANDIDATES = 8
+
+#: Maximum spread (half the 10th-to-90th-percentile range) the candidates may show before
+#: the estimate is discarded as noise. Text lines on one label agree closely; a scatter of
+#: bottle edges, shelf lines and glare boundaries does not.
+_MAX_SKEW_SPREAD_DEG = 12.0
+
+#: Readings this close to the filter boundary are saturation, not measurement. A label
+#: whose text genuinely runs at 45 degrees is not a case this product has; a median that
+#: lands on the boundary is the estimator running out of road.
+_SKEW_BOUNDARY_DEG = 44.0
+
 #: A detected quadrilateral must cover at least this share of the frame to be believed as
 #: the label. Below it we are almost certainly looking at a decorative box or a shadow,
 #: and rectifying to that would destroy the geometry rather than fix it.
@@ -163,9 +183,20 @@ def estimate_skew(image: np.ndarray) -> float:
     for line in lines[:60]:
         theta = float(line[0][1])
         degrees = np.degrees(theta) - 90.0
-        if -45.0 <= degrees <= 45.0:
+        # Strictly inside the boundary. At exactly +/-45 the reading is the filter's edge
+        # rather than the image's content — see _SKEW_BOUNDARY_DEG.
+        if -_SKEW_BOUNDARY_DEG < degrees < _SKEW_BOUNDARY_DEG:
             angles.append(degrees)
-    return round(float(np.median(angles)), 2) if angles else 0.0
+
+    # Enough lines, and lines that agree. Either one alone is not enough: a handful of
+    # agreeing bottle edges is still not text, and fifty scattered ones are still noise.
+    if len(angles) < _MIN_SKEW_CANDIDATES:
+        return 0.0
+    low, high = np.percentile(angles, [10, 90])
+    if (float(high) - float(low)) / 2.0 > _MAX_SKEW_SPREAD_DEG:
+        return 0.0
+
+    return round(float(np.median(angles)), 2)
 
 
 def _border_colour(image: np.ndarray) -> tuple[int, ...]:

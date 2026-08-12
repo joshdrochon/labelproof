@@ -1,11 +1,11 @@
 {
   "tier": "B",
   "gates_ci": false,
-  "description": "Tier B — real bottle photographs. Reported every run, never gates CI. Small n, nondeterministic, live model. The gap between this number and Tier A's is the honest answer to 'does this work', and it is a published metric rather than an embarrassment.",
+  "description": "Tier B \u2014 real bottle photographs. Reported every run, never gates CI. Small n, nondeterministic, live model. The gap between this number and Tier A's is the honest answer to 'does this work', and it is a published metric rather than an embarrassment. Six photographs are in golden/tier_b/photos; three are declared here. The other three (fireball, found_north, ipa_torn) are pinned as unit regressions in tests/test_real_photo_regressions.py and are not yet declared as scored rows.",
   "capture_guide": [
     "6-8 photographs total, shot with a phone, originals unedited.",
     "Mixed commodity: at least one spirits, one wine, one malt.",
-    "Front AND back of at least two products — the government warning usually lives on the back, which is TC-16.",
+    "Front AND back of at least two products \u2014 the government warning usually lives on the back, which is TC-16.",
     "2-3 straight-on and well lit. These are the baseline; if these fail, nothing else matters.",
     "One at roughly 30 degrees off-axis (TC-11).",
     "One dim but recoverable (TC-13).",
@@ -14,5 +14,120 @@
     "Ground truth is bootstrapped, not transcribed: run the label through the app, then confirm or correct each field by eye and record the corrected value here. Set ground_truth to hand_verified once a human has signed off on the row.",
     "Known limitation, stated rather than papered over: warning-statement VIOLATIONS cannot appear here. A commercially approved label does not carry them by definition, so those cases stay simulated in Tier A."
   ],
-  "labels": []
+  "labels": [
+    {
+      "name": "courtyard_rose_back",
+      "commodity": "wine",
+      "images": [
+        {
+          "file": "courtyard_rose_back.png",
+          "role": "back"
+        }
+      ],
+      "application": {
+        "commodity": "wine",
+        "brand_name": "Courtyard Winery",
+        "class_type": "Dry Rose",
+        "alcohol_content": null,
+        "net_contents": "750 mL",
+        "producer_name": "The Courtyard Wineries",
+        "producer_address": "North East, PA 16428",
+        "country_of_origin": null,
+        "is_import": false
+      },
+      "expect": {
+        "brand_name": "match",
+        "class_type": "match",
+        "net_contents": "match",
+        "producer": "acceptable_variation",
+        "government_warning": "match",
+        "alcohol_content": "not_applicable",
+        "country_of_origin": "not_applicable"
+      },
+      "expect_findings": {},
+      "capture": {
+        "lighting": "even indoor",
+        "angle": "straight on",
+        "distance": "close"
+      },
+      "ground_truth": "bootstrapped",
+      "notes": "The first WINE in the corpus; every other photograph is spirits or malt, so the commodity rules had never been exercised against a real label. Warning is present, complete and legible to the eye, with a bold 'GOVERNMENT WARNING:' heading and regular body. Producer prints as 'PRODUCED AND BOTTLED BY THE COURTYARD WINERIES / NORTH EAST, PA 16428' \u2014 the lead-in phrase case that three earlier photographs already found. alcohol_content is the uncertain row and is why this is bootstrapped rather than hand_verified: no ABV appears on the label and the label does not carry a 'table wine' designation either, so whether TTB requires one here is a question for an agent and not for me. Measured at 337x443, well under the 1568px high-resolution tier, which is itself worth keeping in the set: it is what a downloaded product photo looks like."
+    },
+    {
+      "name": "bacardi151_glare_cropped_back",
+      "commodity": "spirits",
+      "images": [
+        {
+          "file": "bacardi151_glare_cropped_back.webp",
+          "role": "back"
+        }
+      ],
+      "application": {
+        "commodity": "spirits",
+        "brand_name": "Bacardi 151",
+        "class_type": "Rum",
+        "alcohol_content": 75.5,
+        "net_contents": "750 mL",
+        "producer_name": "Bacardi Corporation",
+        "producer_address": "San Juan, Puerto Rico",
+        "country_of_origin": null,
+        "is_import": false
+      },
+      "expect": {
+        "brand_name": "match",
+        "government_warning": "unreadable",
+        "class_type": "unreadable",
+        "alcohol_content": "unreadable",
+        "net_contents": "unreadable",
+        "producer": "unreadable",
+        "country_of_origin": "not_applicable"
+      },
+      "expect_findings": {},
+      "capture": {
+        "lighting": "flash on curved glass",
+        "angle": "off-axis",
+        "distance": "very close"
+      },
+      "ground_truth": "bootstrapped",
+      "notes": "TC-12 and TC-14 in one frame: real specular glare blowing out the red WARNING band, and the government warning running off the right edge of the picture. This is the case the product must not get wrong, and today it does. Measured: class_type, alcohol_content and net_contents all come back MISSING. They are not missing \u2014 they are outside the frame. Missing is a finding against the LABEL and grounds to return an application; Unreadable is a statement about the PHOTOGRAPH. Reporting the second as the first is a false accusation, and it is the exact asymmetry the whole design is built around. The expectations here record what should happen, so the gap is reported every run rather than discovered later."
+    },
+    {
+      "name": "growler_warning_rotated",
+      "commodity": "malt",
+      "images": [
+        {
+          "file": "growler_warning_rotated.webp",
+          "role": "back"
+        }
+      ],
+      "application": {
+        "commodity": "malt",
+        "brand_name": "Growler Fill",
+        "class_type": "Ale",
+        "alcohol_content": null,
+        "net_contents": "64 fl oz",
+        "producer_name": "Unknown Brewing",
+        "producer_address": "Somewhere, USA",
+        "country_of_origin": null,
+        "is_import": false
+      },
+      "expect": {
+        "government_warning": "match",
+        "brand_name": "missing",
+        "class_type": "missing",
+        "producer": "missing",
+        "net_contents": "unreadable",
+        "alcohol_content": "not_applicable",
+        "country_of_origin": "not_applicable"
+      },
+      "expect_findings": {},
+      "capture": {
+        "lighting": "dim kitchen, dark glass",
+        "angle": "straight on, label turned 90 degrees",
+        "distance": "medium"
+      },
+      "ground_truth": "bootstrapped",
+      "notes": "An amber growler whose only printed label is the warning sticker, applied turned ninety degrees so the text runs vertically. Two things it exercises that nothing else does. The warning reads MATCH at 0.95 despite the rotation, which is worth pinning before someone 'optimises' the preprocessing. And the four fields that genuinely are not on this container come back Missing, which is correct and is the counterpart to the Bacardi row: Missing when the element is absent, Unreadable when the picture is at fault. net_contents is embossed into the glass rather than printed, so Unreadable is the honest answer for it."
+    }
+  ]
 }
