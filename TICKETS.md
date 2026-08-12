@@ -146,7 +146,7 @@ in LP-237, with fixtures across LP-068, 163, 195–198, 216, 226–229.
 - [x] **LP-329** Model-tier sweep: `eval/run.py --model` across Opus 5 and Sonnet 5 → accuracy, warning-field false passes, p95, cost/label. Cheapest tier clearing ≥95% with zero false passes ships; table feeds the F11 cost analysis (OPS-3, PERF-1)
 - [x] **LP-072** Integration test: full extraction pipeline on fixtures
 - [x] **LP-321** Pre-gate: hopeless-quality image short-circuits to per-field Unreadable + retake reason with **zero model calls** (IMG-4, IMG-5, PERF-1)
-- [ ] **LP-323** Prompt-cache wiring: static system prompt, commodity in user message, `cache_control` on last system block; test asserts `cache_read_input_tokens` > 0 on repeat (PERF-1, OPS-4)
+- [x] **LP-323** Prompt-cache wiring: static system prompt, commodity in user message, `cache_control` on last system block; test asserts `cache_read_input_tokens` > 0 on repeat (PERF-1, OPS-4)
 
 ## M3 · API service
 
@@ -168,7 +168,7 @@ in LP-237, with fixtures across LP-068, 163, 195–198, 216, 226–229.
 - [x] **LP-088** `GET /sample`: serves the Old Tom demo pair for the one-click demo (UX-1)
 - [x] **LP-089** API integration tests: happy, invalid, oversized, wrong-type, provider-down (fixtures)
 - [x] **LP-090** API-layer latency ceiling test in fixture mode (PERF-1)
-- [ ] **LP-091** Endpoint + egress documentation section drafted (NET-1)
+- [x] **LP-091** Endpoint + egress documentation section drafted (NET-1)
 - [x] **LP-092** Stateless request path verified: restart loses nothing a user cares about
 
 ## M4 · Web UI — Verify Now
@@ -229,10 +229,10 @@ in LP-237, with fixtures across LP-068, 163, 195–198, 216, 226–229.
 
 ## M7 · Docs & MVP gate
 
-- [ ] **LP-139** README v1: setup/run/test — verified by cold clone (DEL-3, ENG-7)
-- [ ] **LP-140** README: approach + tools used (DEL-4)
-- [ ] **LP-141** README: assumptions log seeded — every gap the brief left, filled and stated (SCOPE-5)
-- [ ] **LP-142** `CHANGES.md` current through MVP (ENG-5)
+- [x] **LP-139** README v1: setup/run/test — verified by cold clone (DEL-3, ENG-7)
+- [x] **LP-140** README: approach + tools used (DEL-4)
+- [x] **LP-141** README: assumptions log seeded — every gap the brief left, filled and stated (SCOPE-5)
+- [x] **LP-142** `CHANGES.md` current through MVP (ENG-5)
 - [ ] **LP-143** MVP checklist self-audit vs `PRD.md` §MVP; gaps become tickets before anything else does
 - [x] **LP-144** Timed p95 run on the deployed URL, table committed (PERF-1)
 - [ ] **LP-146** Tag `v0.1-mvp`
@@ -368,15 +368,15 @@ in LP-237, with fixtures across LP-068, 163, 195–198, 216, 226–229.
 ## F7 · Security & retention
 
 - [x] **LP-249** EXIF/GPS strip verification test (SEC-3)
-- [ ] **LP-250** TTL purge verification incl. batch artifacts (SEC-2)
+- [x] **LP-250** TTL purge verification incl. batch artifacts (SEC-2)
 - [ ] **LP-251** Log audit test: golden-set run produces zero label strings in logs (SEC-4)
 - [x] **LP-252** Upload re-encode verification: polyglot file neutralized (SEC-5)
 - [x] **LP-253** Content-sniffing tests: renamed executable, scripted SVG, absurd dimensions (SEC-5)
-- [ ] **LP-254** PDF renderer constrained: page cap, no external fetches, timeout (SEC-5)
-- [ ] **LP-255** Rate-limit tests: burst → 429 with a plain-language body (SEC-9)
+- [x] **LP-254** PDF renderer constrained: page cap, no external fetches, timeout (SEC-5)
+- [x] **LP-255** Rate-limit tests: burst → 429 with a plain-language body (SEC-9)
 - [x] **LP-256** Security headers scan in CI (SEC-6)
 - [ ] **LP-257** Dependency audit in CI, pinned versions, baseline documented (SEC-10)
-- [ ] **LP-258** Secrets scan: pre-commit + CI (SEC-6)
+- [x] **LP-258** Secrets scan: pre-commit + CI (SEC-6)
 - [x] **LP-259** Provider data-handling documented: retention/training posture (SEC-7)
 - [x] **LP-260** Retention policy user-facing: UI notice + README (SEC-2)
 - [ ] **LP-261** Synthetic-data disclaimer in the UI footer (SEC-1, SCOPE-4)
@@ -390,20 +390,20 @@ in LP-237, with fixtures across LP-068, 163, 195–198, 216, 226–229.
 - [ ] **LP-266** Contrast verification, all states incl. verdict chips (UX-3)
 - [ ] **LP-267** Focus order + visible-focus audit (UX-4)
 - [ ] **LP-268** 200% zoom usable (UX-4)
-- [ ] **LP-269** Reduced-motion support (UX-4)
-- [ ] **LP-270** Print stylesheet for the report — **Dave prints; the printout must read** (HITL-5)
+- [x] **LP-269** Reduced-motion support (UX-4)
+- [x] **LP-270** Print stylesheet for the report — **Dave prints; the printout must read** (HITL-5)
 - [ ] **LP-271** Copy final pass: reading level, zero jargon (UX-6)
 - [ ] **LP-272** Hallway test protocol: tasks + success criteria written first (UX-1)
 - [ ] **LP-273** **Run the 73-year-old test:** ≥3 cold users reach a verdict, zero instructions; notes committed (UX-1)
 - [ ] **LP-274** Fix rounds from hallway findings (UX-1)
 - [ ] **LP-275** Grayscale audit: verdicts distinguishable without color (UX-3)
-- [ ] **LP-276** Title/favicon/meta; landing carries no stale results
+- [x] **LP-276** Title/favicon/meta; landing carries no stale results
 
 ## F9 · Performance verification
 
 - [x] **LP-277** p95 timed run (20×) on the deployed URL; table committed — **the stopwatch wins** (PERF-1)
 - [ ] **LP-278** Stage-breakdown analysis; attack the slowest stage first (OPS-1)
-- [ ] **LP-279** Client-side downscale before upload (payload is the cheapest latency) (PERF-1)
+- [x] **LP-279** Client-side downscale before upload (payload is the cheapest latency) (PERF-1)
 - [x] **LP-280** Parallel extraction when >1 image (front/back concurrently) (PERF-1)
 - [x] **LP-281** 300-item batch, live: wall-clock + throttle behavior recorded (PERF-4)
 - [ ] **LP-282** Verify-during-batch live check: priority lane holds (PERF-5)
