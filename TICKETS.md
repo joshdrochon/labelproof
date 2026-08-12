@@ -234,7 +234,7 @@ in LP-237, with fixtures across LP-068, 163, 195–198, 216, 226–229.
 - [ ] **LP-141** README: assumptions log seeded — every gap the brief left, filled and stated (SCOPE-5)
 - [ ] **LP-142** `CHANGES.md` current through MVP (ENG-5)
 - [ ] **LP-143** MVP checklist self-audit vs `PRD.md` §MVP; gaps become tickets before anything else does
-- [ ] **LP-144** Timed p95 run on the deployed URL, table committed (PERF-1)
+- [x] **LP-144** Timed p95 run on the deployed URL, table committed (PERF-1)
 - [ ] **LP-146** Tag `v0.1-mvp`
 
 ---
@@ -401,16 +401,16 @@ in LP-237, with fixtures across LP-068, 163, 195–198, 216, 226–229.
 
 ## F9 · Performance verification
 
-- [ ] **LP-277** p95 timed run (20×) on the deployed URL; table committed — **the stopwatch wins** (PERF-1)
+- [x] **LP-277** p95 timed run (20×) on the deployed URL; table committed — **the stopwatch wins** (PERF-1)
 - [ ] **LP-278** Stage-breakdown analysis; attack the slowest stage first (OPS-1)
 - [ ] **LP-279** Client-side downscale before upload (payload is the cheapest latency) (PERF-1)
-- [ ] **LP-280** Parallel extraction when >1 image (front/back concurrently) (PERF-1)
+- [x] **LP-280** Parallel extraction when >1 image (front/back concurrently) (PERF-1)
 - [ ] **LP-281** 300-item batch, live: wall-clock + throttle behavior recorded (PERF-4)
 - [ ] **LP-282** Verify-during-batch live check: priority lane holds (PERF-5)
 - [ ] **LP-283** Keep-warm verified across 48h of first-hit samples (PERF-6)
 - [ ] **LP-284** Latency regression gate in CI (fixture ceilings) (OPS-6)
 - [ ] **LP-285** UI-time vs server-time honesty check on production (PERF-2)
-- [ ] **LP-286** README performance section: numbers, method, trade-offs (DEL-6)
+- [x] **LP-286** README performance section: numbers, method, trade-offs (DEL-6)
 
 ## F10 · Accuracy report
 

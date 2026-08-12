@@ -145,9 +145,27 @@ The brief left these open. Each was decided deliberately; each is reversible.
 
 ### The one trade we made against the brief
 
-**PERF-1 asks for p95 ≤ 5s. We do not meet it. Expect ~6.9s.**
+**PERF-1 asks for p95 ≤ 5s. We do not meet it. Measured p95 on the deployed URL is 9.6s.**
 
-Measured, three runs each, live:
+That number comes from 20 consecutive verifications against
+<https://labelproof.fly.dev>, warm, two images per request — the full table, every run,
+with request ids, is in [`docs/perf-deployed.md`](docs/perf-deployed.md).
+
+| | Deployed, 20 runs |
+|---|---|
+| p50 | 8.5s |
+| **p95** | **9.6s** |
+| max | 9.9s |
+| Successful | 20 / 20 |
+| Cost | $0.031 per verification |
+
+An earlier version of this section said **6.9s**, taken from the model spike below. That
+was a lab number for one image on one call, and production sends two. It has been
+replaced rather than explained away: the spike is how we *chose* the model, and the
+deployed p95 is how the product *performs*. Where the two disagree, the deployed number
+is the one that counts, and it is 4.6s over the gate rather than 1.9s.
+
+The spike, for the model decision only — three runs each, one label, live:
 
 | Model | Single call | Split | Typography errors (of 20) | Can pin US inference |
 |---|---|---|---|---|
@@ -175,12 +193,16 @@ Reversible in one line, and the budgets follow the model automatically.
 Stated plainly, because a reviewer will find these anyway and it is better they read them
 here.
 
-- **Never deployed.** The Fly configuration, the smoke test and the rollback are written
-  and the image builds and runs locally, but no deployment has happened. LP-136's
-  destroy-and-redeploy table is deliberately **blank and labelled unrun** rather than
-  filled with plausible output.
-- **The 20-run p95 table is empty** for the same reason. `scripts/timed_run.py` produces
-  it against any URL.
+- **The destroy-and-redeploy drill (LP-136) has not been run.** The app *is* deployed and
+  `scripts/smoke.sh` passes against it, but the drill that proves the environment rebuilds
+  from configuration alone — destroy the app, redeploy from a clean clone, smoke it — has
+  not been performed. Its table stays **blank and labelled unrun** rather than filled with
+  plausible output.
+- **The batch UI does not exist.** The batch engine does — manifest parsing, the worker
+  pool, per-item isolation, triage ordering, CSV export, all tested — and
+  `POST /batch` serves it. There is no page in the SPA that reaches it, so a reviewer
+  clicking through the app finds a single-label tool. This is the largest gap between what
+  the brief asks for and what a reviewer can see.
 - **Tier B is three photographs.** They earned their place — each found a real defect that
   19 synthetic fixtures could not — but three is a sample, not a corpus, and every
   image-quality threshold in the system is still calibrated against rendered PNGs.
@@ -509,10 +531,12 @@ Our own non-provider work — ingest, quality scoring, rules, serialization — 
 
 The honest reading:
 
-- The shipped configuration is **Sonnet 5**, split into two concurrent extraction calls:
-  **~6.9 s**, about 1.9 s over the gate. Single-call it is ~9.0 s. The p95 is worse than
-  the median by construction. **PERF-1 is not met**, and no number in this repository
-  should be read as claiming otherwise.
+- The shipped configuration is **Sonnet 5**, split into two concurrent extraction calls
+  (`api/provider/anthropic_adapter.py`, LP-280). In the lab that measured ~6.9 s. **In
+  production it measures a 9.6 s p95** — 20 runs, [`docs/perf-deployed.md`](docs/perf-deployed.md).
+  The split is real and it helps; two concurrent calls still cost the slower of the two,
+  and the slower of two is not the median of one. **PERF-1 is not met**, by 4.6 s, and no
+  number in this repository should be read as claiming otherwise.
 - Haiku 4.5 is the only model that fits the gate — ~4.7 s split — and it was **rejected
   deliberately**, for two reasons a federal deployment cannot spend. Haiku **rejects
   `inference_geo` with a 400**, so US data residency cannot be pinned on it at all
