@@ -109,7 +109,7 @@ def _validation_message(exc: ValidationError) -> str:
             problems.append(f"{label} is required")
         elif kind == "enum":
             problems.append(f"{label} must be one of spirits, wine or malt")
-        elif kind.startswith("float") or kind.startswith("int"):
+        elif kind.startswith(("float", "int")):
             problems.append(f"{label} must be a number, such as 45.0")
         elif kind.startswith("bool"):
             problems.append(f"{label} must be true or false")
@@ -272,4 +272,4 @@ async def _verify_within_budget(
         return None
     except ProviderError as exc:
         applog.warn("provider_unavailable", kind="provider", code="provider_unavailable")
-        raise errors.ProviderUnavailable() from exc
+        raise errors.ProviderUnavailable from exc

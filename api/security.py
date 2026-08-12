@@ -69,7 +69,7 @@ if TYPE_CHECKING:  # pragma: no cover - import cycle only matters to type checke
 #: bootstrap script, so it renders blank under this policy. That is the correct outcome —
 #: NET-1 exists so an agency network admin can allowlist this app from one table, and a
 #: developer convenience page is not worth a CDN entry on it.
-CONTENT_SECURITY_POLICY: str = "; ".join(
+CONTENT_SECURITY_POLICY: str = "; ".join(  # noqa: FLY002 - one directive per line, reviewably
     (
         "default-src 'none'",
         "script-src 'self'",

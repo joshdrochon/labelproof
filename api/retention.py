@@ -557,7 +557,7 @@ class RetentionSweeper:
                 await self._cycle()
             except asyncio.CancelledError:
                 raise
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - a sweep failure must not kill the loop
                 applog.error(
                     "retention_sweep_failed",
                     code="internal_error",

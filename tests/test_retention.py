@@ -453,7 +453,7 @@ def test_the_ttl_is_configurable_and_not_a_constant(tmp_path: Path) -> None:
 
 
 def test_the_default_ttl_is_twenty_four_hours() -> None:
-    assert RetentionPolicy(storage_dir=Path(".")).ttl_hours == 24
+    assert RetentionPolicy(storage_dir=Path()).ttl_hours == 24
     assert Config().retention_hours == 24
     assert SecurityPolicy.from_config(Config()).retention_ttl_hours == 24
 

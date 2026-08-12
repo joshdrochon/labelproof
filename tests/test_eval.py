@@ -8,7 +8,7 @@ import pytest
 
 from api.models import FieldName, Verdict
 from eval.run import ACCURACY_FLOOR, FieldOutcome, Report, evaluate, main, render
-from fixtures.generator.catalog import CATALOG, by_name
+from fixtures.generator.catalog import CATALOG
 
 
 def outcome(**kw: object) -> FieldOutcome:

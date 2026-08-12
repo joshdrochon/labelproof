@@ -59,8 +59,8 @@ from api.models import (
     VerificationResult,
     WarningTypography,
 )
-from api.pipeline import merge as merge_images
 from api.pipeline import ingest as ingest_mod
+from api.pipeline import merge as merge_images
 from api.pipeline import quality as quality_mod
 from api.provider.base import (
     ExtractionProvider,

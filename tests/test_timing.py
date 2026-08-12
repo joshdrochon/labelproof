@@ -851,7 +851,7 @@ def test_the_screen_does_not_render_the_servers_smaller_number() -> None:
 def test_the_banner_renders_the_elapsed_value_it_is_given() -> None:
     source = _web_source("components/AggregateBanner.tsx")
     assert "formatElapsed(elapsedMs)" in source
-    assert "data-testid=\"elapsed\"" in source
+    assert 'data-testid="elapsed"' in source
 
 
 def test_the_server_total_still_reaches_the_client_for_the_breakdown() -> None:

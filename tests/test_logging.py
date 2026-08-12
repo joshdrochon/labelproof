@@ -6,6 +6,7 @@ The rule is enforced structurally rather than by convention: the allowlist gover
 
 import io
 import json
+import logging
 
 import pytest
 
@@ -100,6 +101,45 @@ def test_stage_exposes_its_duration_to_the_caller() -> None:
     with lp_logging.stage("compare") as s:
         pass
     assert s.duration_ms >= 0
+
+
+# --- `level` cannot be captured by a field ------------------------------------------
+
+
+def test_a_field_named_level_is_rejected_rather_than_rerouted() -> None:
+    """`stage("extract", level="debug")` used to type-check and then explode.
+
+    `log()`'s `level` parameter was an ordinary one, so it competed with `**fields` for
+    the name, and the only way to make the kwargs unpack assignable was a `# type:
+    ignore` sitting directly on top of that hazard. `level` is positional-only now, so a
+    stray `level=` lands in `fields` and meets the allowlist — which is the loud, correct
+    outcome rather than a silenced one.
+    """
+    with pytest.raises(ContentInLogError, match="level"), lp_logging.stage(
+        "extract", level="debug"
+    ):
+        pass
+
+
+def test_the_severity_of_warn_and_error_still_gets_through(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Making `level` positional-only must not quietly demote every warning to info.
+
+    `warn()` and `error()` were the only two callers passing `level=` by keyword. They
+    now pass it positionally, and this asserts the severity that reaches the stdlib
+    logger, which the JSON payload does not carry.
+    """
+    seen: list[int] = []
+    monkeypatch.setattr(
+        lp_logging._logger, "log", lambda level, message: seen.append(level)
+    )
+
+    lp_logging.log("app_started")
+    lp_logging.warn("provider_unavailable", kind="provider")
+    lp_logging.error("unhandled_exception", kind="internal")
+
+    assert seen == [logging.INFO, logging.WARNING, logging.ERROR]
 
 
 # --- the log schema (LP-117, OPS-5) ---------------------------------------------------
@@ -212,28 +252,28 @@ def _rendered(record) -> str:  # type: ignore[no-untyped-def]
 def test_an_exception_passed_as_a_format_argument_is_redacted() -> None:
     """`logger.error("call failed: %s", exc)` — no exc_info, so traceback stripping does
     nothing, and the exception's own message reaches stdout."""
-    secret = "BARDSTOWN, KENTUCKY"
+    label_text = "BARDSTOWN, KENTUCKY"
     record = lp_logging.scrub_exception_arguments(
-        _record(msg="call failed: %s", args=(ValueError(secret),))
+        _record(msg="call failed: %s", args=(ValueError(label_text),))
     )
-    assert secret not in _rendered(record)
+    assert label_text not in _rendered(record)
     assert "ValueError" in _rendered(record)
 
 
 def test_an_exception_passed_as_the_message_is_redacted() -> None:
     """`logger.error(exc)` — the other natural spelling."""
-    secret = "OLD TOM DISTILLERY"
-    record = lp_logging.scrub_exception_arguments(_record(msg=RuntimeError(secret)))
-    assert secret not in _rendered(record)
+    label_text = "OLD TOM DISTILLERY"
+    record = lp_logging.scrub_exception_arguments(_record(msg=RuntimeError(label_text)))
+    assert label_text not in _rendered(record)
     assert "RuntimeError" in _rendered(record)
 
 
 def test_an_exception_in_a_dict_style_format_argument_is_redacted() -> None:
-    secret = "KENTUCKY STRAIGHT BOURBON"
+    label_text = "KENTUCKY STRAIGHT BOURBON"
     record = lp_logging.scrub_exception_arguments(
-        _record(msg="failed: %(why)s", args=({"why": ValueError(secret)},))
+        _record(msg="failed: %(why)s", args=({"why": ValueError(label_text)},))
     )
-    assert secret not in _rendered(record)
+    assert label_text not in _rendered(record)
 
 
 def test_a_pydantic_validation_error_is_the_case_this_exists_for() -> None:

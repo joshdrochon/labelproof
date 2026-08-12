@@ -287,10 +287,20 @@ def test_the_opt_out_marker_actually_opts_out() -> None:
 
 
 def test_no_other_test_in_the_suite_opts_out_of_the_guard() -> None:
-    """One marked test, and it is the one above.
+    """Two marked tests, and each one is a proof that the marker itself works.
 
     An opt-out that spreads is a guard that has been turned off a test at a time. If
     this list ever grows, the addition needs an argument in the judgment log.
+
+    The second entry arrived with the `wave/ci` merge. Both branches wrote a probe suite
+    for the offline guard, and neither is a subset of the other — `test_no_network.py`
+    covers `sendto` with flags, a connected UDP socket, the two lookups that are still
+    *allowed*, and egress at import and from a session fixture (each in a subprocess);
+    this file covers an HTTP client, sqlite, the ASGI test client, and the API-key
+    checks. So both are kept, and each marks exactly one test: the one asserting that
+    `@pytest.mark.allow_network` lifts the policy at all. That is the only justified use
+    of the marker, and it is still the only use in the suite. Consolidating the two
+    probe suites into one file is worth doing; losing half the probes to do it is not.
     """
     tests = Path(__file__).resolve().parents[1]
     marked = sorted(
@@ -301,7 +311,7 @@ def test_no_other_test_in_the_suite_opts_out_of_the_guard() -> None:
     )
     # By file, not by line number: pinning the line makes an unrelated edit above it a
     # failure, and a test that cries wolf about its own line numbers gets deleted.
-    assert marked == ["contract/test_offline.py"], marked
+    assert marked == ["contract/test_offline.py", "test_no_network.py"], marked
 
 
 # --------------------------------------------------------------------------------------

@@ -228,7 +228,7 @@ def check_prominence(signals: WarningTypography) -> list[Finding]:
     if not size_was_measured(signals):
         return []
     ratio = signals.relative_size
-    assert ratio is not None  # size_was_measured
+    assert ratio is not None  # noqa: S101 - narrowing only; size_was_measured ruled None out
     if ratio > PROMINENCE_CONCERN_RATIO:
         return []
     percent = round((1.0 - ratio) * 100)

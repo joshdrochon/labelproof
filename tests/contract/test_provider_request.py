@@ -346,7 +346,7 @@ def test_the_whole_request_is_json_serialisable(captured: _RecordedCall) -> None
     A `set`, a `Path`, an enum member — all of them look fine in a Python assertion and
     none of them survive the wire.
     """
-    payload = {k: v for k, v in captured.kwargs.items()}
+    payload = dict(captured.kwargs)
     json.dumps(payload)
 
 
@@ -428,7 +428,7 @@ def test_the_commodity_never_reaches_the_cached_prefix(commodity: Commodity) -> 
 def test_the_system_prompt_contains_no_volatile_looking_content() -> None:
     """A cheap smoke test for the class of mistake that kills prompt caching."""
     text = json.dumps(adapter.build_system_blocks())
-    for marker in ("datetime", "uuid", "request_id", "20260", "Z\"", "timestamp"):
+    for marker in ("datetime", "uuid", "request_id", "20260", 'Z"', "timestamp"):
         assert marker not in text, f"{marker!r} in the cached prefix"
 
 

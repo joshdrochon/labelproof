@@ -189,7 +189,7 @@ def test_agreement_is_material_not_literal() -> None:
     """
     label = merge(
         [
-            image(0, {BRAND: read("STONE’S THROW", 0.70)}),
+            image(0, {BRAND: read("STONE’S THROW", 0.70)}),  # noqa: RUF001 - the curly apostrophe IS the fixture
             image(1, {BRAND: read("Stone's Throw", 0.95)}),
         ]
     )
@@ -756,7 +756,7 @@ def test_merge_order_does_not_change_the_outcome(
     would surface as a flake nobody could reproduce.
     """
     shuffled = list(extractions)
-    random.Random(seed).shuffle(shuffled)
+    random.Random(seed).shuffle(shuffled)  # noqa: S311 - shuffling a list, not minting a key
     assert merge(shuffled) == merge(extractions)
 
 

@@ -63,6 +63,34 @@ class SpecBackedProvider:
         self.spec = by_name(spec) if isinstance(spec, str) else spec
         self.illegible = illegible or set()
 
+    def _put(
+        self,
+        fields: dict[FieldName, ExtractedField],
+        name: FieldName,
+        value: str | None,
+        present: bool,
+    ) -> None:
+        """Record one extracted field.
+
+        A method rather than a closure over the per-image `fields` dict: a function
+        defined inside the loop captures the loop variable by reference, which is a live
+        bug the day someone defers the call (ruff B023).
+        """
+        if not present:
+            return
+        if name in self.illegible:
+            fields[name] = ExtractedField(
+                value=None, confidence=0.0, legible=False,
+                bbox=_APPROX_REGIONS.get(name),
+            )
+            return
+        fields[name] = ExtractedField(
+            value=value or None,
+            confidence=0.95 if value else 0.0,
+            legible=True,
+            bbox=_APPROX_REGIONS.get(name),
+        )
+
     def extract(self, request: ExtractionRequest) -> ExtractionResponse:
         spec = self.spec
         extractions: list[Extraction] = []
@@ -73,29 +101,19 @@ class SpecBackedProvider:
             on_back = face in ("back", "single")
 
             fields: dict[FieldName, ExtractedField] = {}
+            put = self._put
 
-            def put(name: FieldName, value: str | None, present: bool) -> None:
-                if not present:
-                    return
-                if name in self.illegible:
-                    fields[name] = ExtractedField(
-                        value=None, confidence=0.0, legible=False,
-                        bbox=_APPROX_REGIONS.get(name),
-                    )
-                    return
-                fields[name] = ExtractedField(
-                    value=value or None,
-                    confidence=0.95 if value else 0.0,
-                    legible=True,
-                    bbox=_APPROX_REGIONS.get(name),
-                )
-
-            put(FieldName.BRAND_NAME, spec.brand_name, on_front)
-            put(FieldName.CLASS_TYPE, spec.class_type, on_front)
-            put(FieldName.ALCOHOL_CONTENT, spec.alcohol_text, on_front or face == "back")
-            put(FieldName.NET_CONTENTS, spec.net_contents, on_front or face == "back")
-            put(FieldName.COUNTRY_OF_ORIGIN, spec.country_of_origin, on_front or face == "back")
-            put(FieldName.PRODUCER, spec.producer, on_back)
+            put(fields, FieldName.BRAND_NAME, spec.brand_name, on_front)
+            put(fields, FieldName.CLASS_TYPE, spec.class_type, on_front)
+            put(fields, FieldName.ALCOHOL_CONTENT, spec.alcohol_text, on_front or face == "back")
+            put(fields, FieldName.NET_CONTENTS, spec.net_contents, on_front or face == "back")
+            put(
+                fields,
+                FieldName.COUNTRY_OF_ORIGIN,
+                spec.country_of_origin,
+                on_front or face == "back",
+            )
+            put(fields, FieldName.PRODUCER, spec.producer, on_back)
 
             warning_text: str | None = None
             typography = WarningTypography()

@@ -296,10 +296,13 @@ def log(event: str, level: int = logging.INFO, /, **fields: object) -> None:
     docstring. Add genuinely safe fields to ALLOWED_FIELDS deliberately; do not work
     around this.
 
-    `level` is positional-only on purpose. With it available by keyword, a caller
-    forwarding `**fields` could supply `level` from a dict and change the severity of a
-    line by accident — and the type checker cannot tell that apart from a real level, so
-    it flags every forwarding call site instead.
+    `level` is positional-only (the `/`) on purpose. As a normal parameter it competed
+    with `**fields` for the name "level": a caller writing `stage("extract",
+    level="debug")` type-checked and then failed at runtime, and the only way to make
+    `**dict[str, object]` assignable at all was a `# type: ignore` that silenced exactly
+    that hazard. Positional-only, `level` cannot be bound by keyword, `**fields` needs no
+    suppression, and a stray `level=` lands in `fields` where the allowlist rejects it
+    loudly.
     """
     rejected = sorted(set(fields) - ALLOWED_FIELDS)
     if rejected:

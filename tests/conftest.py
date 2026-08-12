@@ -58,7 +58,7 @@ ROOT = Path(__file__).resolve().parents[1]
 _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost", ""})
 
 
-class NetworkAccessDenied(RuntimeError):  # noqa: N818 - the name reads better at a call site
+class NetworkAccessDenied(RuntimeError):
     """Something in the test session tried to reach the outside world."""
 
 
@@ -386,7 +386,7 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
     for reported in measured.values():
         try:
             total, covered, _ = _measure(reported)
-        except Exception:  # pragma: no cover - unreadable file, already reported by cov
+        except Exception:  # noqa: BLE001, S112 - pragma: no cover - unreadable file, cov already said so
             continue
         project_statements += total
         project_covered += covered

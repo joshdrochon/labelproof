@@ -1,0 +1,200 @@
+# LabelProof CI (LP-009, ENG-1, ENG-3).
+#
+# install -> lint -> typecheck -> unit tests, on every push and every pull request.
+#
+# The one thing worth reading before changing anything here: **everything after `install`
+# runs with no network egress.** The suite is offline by design — every call that would
+# reach the vision provider goes through a recorded fixture or the fake adapter (ENG-3) —
+# and the way to keep that true is to take the network away and see whether the tests
+# still pass, not to promise it in a README. `pip install` and `npm ci` obviously need
+# PyPI and the npm registry; the claim being made is "the suite runs offline", not "this
+# machine has never seen a network", and conflating the two would be theatre.
+#
+# Two independent mechanisms enforce it, deliberately:
+#
+#   1. tests/conftest.py refuses any non-loopback socket or DNS lookup and names the test
+#      that tried. Portable, runs on a laptop too, and a laptop is where the mistake
+#      actually gets made.
+#   2. This workflow runs the verification inside a Linux network namespace, having first
+#      proven from *inside* that namespace that an outbound connection fails. Kernel
+#      level, and it trusts no application code.
+#
+# Mechanism 2 degrades loudly, never silently: if `unshare` is unavailable the step emits
+# a warning annotation and runs the same commands unwrapped, still under mechanism 1.
+
+name: CI
+
+on:
+  # Every push, per LP-009. `pull_request` as well, so a fork's PR is gated too — it costs
+  # a duplicate run on same-repo branches and that is the cheaper mistake to make.
+  push:
+  pull_request:
+
+# Read-only. Nothing here writes to the repository, and a token that cannot write cannot
+# be turned into a foothold by a compromised dependency.
+permissions:
+  contents: read
+
+# A superseded run is wasted minutes and a confusing red X on an already-fixed commit.
+# `main` is excluded so its history keeps a complete record.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+env:
+  # Pinned to what the development .venv runs. Floating this is how "works on my machine"
+  # gets into a repository whose whole argument is reproducibility.
+  PYTHON_VERSION: "3.14"
+  NODE_VERSION: "22"
+
+jobs:
+  api:
+    name: api · lint, typecheck, tests
+    runs-on: ubuntu-24.04
+    # A hung job otherwise burns the six-hour default. LP-247 budgets CI under ten
+    # minutes; this fails fast enough to notice.
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      # First, because if a credential is in the tree that is the finding, and a lint
+      # failure above it would only bury the report. Same scan the pre-commit hook runs,
+      # over every tracked file rather than the staged set (SEC-6, LP-010).
+      - name: Scan for credentials
+        run: python scripts/scan_secrets.py --all
+
+      # A hook committed without its executable bit does nothing and says nothing, which
+      # is the worst failure mode a git hook has. Board integrity depends on post-commit
+      # running; main-branch protection depends on pre-push (LP-016).
+      - name: Check the git hooks are usable
+        run: |
+          status=0
+          # scripts/install_hooks.sh is in this list because it is the one command the
+          # README tells every clone to run as `./scripts/install_hooks.sh`. If it loses
+          # its executable bit, that instruction fails and nobody's hooks get installed
+          # — the same silent-skip failure this step guards against, one level up.
+          for hook in .githooks/* scripts/install_hooks.sh; do
+            if [ -x "$hook" ]; then
+              echo "ok              $hook"
+            else
+              echo "NOT EXECUTABLE  $hook — it will be skipped silently" >&2
+              status=1
+            fi
+          done
+          # The board projector must parse history without choking. TICKETS.md is
+          # gitignored (a working document, not a deliverable), so this asserts the
+          # script RUNS and reports no unknown ticket — not that the board is current.
+          # Checked explicitly rather than relying on `set -e`, so a hook problem and a
+          # projector problem are both reported in one run instead of one hiding the
+          # other.
+          if ! python scripts/sync_board.py; then
+            echo "scripts/sync_board.py failed — the Closes: trailer projection is broken" >&2
+            status=1
+          fi
+          exit $status
+
+      - name: Lint, typecheck, and test with no network egress
+        run: |
+          set -eu
+
+          cat > /tmp/verify-api.sh <<'SCRIPT'
+          set -eu
+
+          if [ "${EXPECT_OFFLINE:-0}" = "1" ]; then
+            echo "--- proving the sandbox has no route out ---"
+            # The probe prints one of three words. Anything other than "unreachable"
+            # fails the step, including "probe-broken": reading *any* non-zero exit as
+            # proof would let a missing interpreter or an unrelated crash pass for
+            # evidence, which is the same mistake as trusting a green test that never ran.
+            verdict=$(python - <<'PY' || echo probe-broken
+          import socket, sys
+          try:
+              socket.create_connection(("1.1.1.1", 443), timeout=5).close()
+          except OSError as exc:
+              import errno
+              expected = {errno.ENETUNREACH, errno.EHOSTUNREACH, errno.ENETDOWN, errno.EACCES}
+              print("unreachable" if exc.errno in expected or isinstance(exc, TimeoutError)
+                    else f"unexpected-errno-{exc.errno}")
+          else:
+              print("reachable")
+          PY
+          )
+            if [ "$verdict" != "unreachable" ]; then
+              echo "offline probe said '$verdict', not 'unreachable'." >&2
+              echo "The sandbox is not doing what this step claims, so a green run here" >&2
+              echo "would prove nothing. Failing instead." >&2
+              exit 1
+            fi
+            echo "confirmed: no route out"
+          fi
+
+          echo "--- ruff check ---"
+          ruff check .
+          echo "--- mypy --strict ---"
+          mypy
+          echo "--- pytest ---"
+          python -m pytest
+          SCRIPT
+
+          if sudo -n unshare --net true 2>/dev/null; then
+            sudo -n env "PATH=$PATH" EXPECT_OFFLINE=1 unshare --net -- \
+              sh -c 'ip link set lo up || true; exec sh /tmp/verify-api.sh'
+          else
+            echo "::warning title=Offline sandbox unavailable::unshare --net is not usable on this runner, so lint, typecheck and tests ran with the network reachable. The in-process guard in tests/conftest.py still refused every attempt at egress from the suite, but the kernel-level proof did not run."
+            sh /tmp/verify-api.sh
+          fi
+
+  web:
+    name: web · lint, typecheck, tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      # `npm ci`, not `npm install`: it installs exactly the lockfile and fails if
+      # package.json and the lock have drifted, which is the point of committing a lock.
+      - name: Install
+        working-directory: web
+        run: npm ci --no-audit --no-fund
+
+      - name: Lint, typecheck, and test with no network egress
+        working-directory: web
+        run: |
+          set -eu
+
+          cat > /tmp/verify-web.sh <<'SCRIPT'
+          set -eu
+          echo "--- eslint ---"
+          npm run lint
+          echo "--- tsc --noEmit ---"
+          npm run typecheck
+          echo "--- vitest ---"
+          npm test
+          SCRIPT
+
+          if sudo -n unshare --net true 2>/dev/null; then
+            sudo -n env "PATH=$PATH" "HOME=$HOME" unshare --net -- \
+              sh -c 'ip link set lo up || true; exec sh /tmp/verify-web.sh'
+          else
+            echo "::warning title=Offline sandbox unavailable::web checks ran with the network reachable."
+            sh /tmp/verify-web.sh
+          fi

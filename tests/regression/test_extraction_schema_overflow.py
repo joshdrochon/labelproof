@@ -156,7 +156,7 @@ def _pre_fix_schema() -> dict[str, Any]:
     nullable_number = {"anyOf": [{"type": "number"}, {"type": "null"}]}
     nested_bbox = {
         "type": "object",
-        "properties": {axis: nullable_number for axis in ("x0", "y0", "x1", "y1")},
+        "properties": dict.fromkeys(("x0", "y0", "x1", "y1"), nullable_number),
         "required": ["x0", "y0", "x1", "y1"],
         "additionalProperties": False,
     }

@@ -57,7 +57,7 @@ class ExceptionContainmentMiddleware:
 
         try:
             await self.app(scope, receive, wrapped)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - outermost ASGI layer; nothing above it catches
             # This layer sits OUTSIDE the app factory's request-context middleware, so by
             # the time an exception arrives here the request ID that middleware assigns is
             # either unreachable (it runs the app in its own task) or never got assigned at

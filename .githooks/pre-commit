@@ -1,0 +1,8 @@
+#!/bin/sh
+# Refuse to commit a credential (SEC-6, LP-010).
+#
+# Deliberately dependency-free: `python3` and nothing else, so this works from a clean
+# clone with no `pip install` and no network. Install with scripts/install_hooks.sh.
+#
+# Bypass with `git commit --no-verify` if you are certain it is a false positive.
+python3 "$(git rev-parse --show-toplevel)/scripts/scan_secrets.py" --staged

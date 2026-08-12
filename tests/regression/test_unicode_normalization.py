@@ -28,7 +28,7 @@ the moment they are fixed, which is the signal to widen the property generators 
 tests/properties/test_normalize_properties.py.
 """
 
-# ruff: noqa: RUF001, RUF002
+# ruff: noqa: RUF001
 # This file is *about* visually ambiguous characters — an acute accent used as an
 # apostrophe, fullwidth forms, ligatures. Ruff's confusable check would flag every
 # one of them, which is the point of the test rather than a defect in it.

@@ -10,7 +10,7 @@ These properties are the standard that bug set. Each one is a statement about *e
 string, and each is here because violating it would change a verdict.
 """
 
-# ruff: noqa: RUF001, RUF002, RUF003
+# ruff: noqa: RUF001
 # This file is *about* visually ambiguous characters — an acute accent used as an
 # apostrophe, fullwidth forms, ligatures. Ruff's confusable check would flag every
 # one of them, which is the point of the test rather than a defect in it.

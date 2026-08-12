@@ -16,7 +16,6 @@ from api.rules.normalize import (
     variation_note,
 )
 
-
 # --- TC-02: the case the whole matching policy exists for ----------------------------
 
 @pytest.mark.tc("TC-02")

@@ -90,8 +90,8 @@ def test_stage_lines_become_one_series_each() -> None:
 def test_plain_text_lines_are_skipped_and_counted() -> None:
     """Production stdout is our JSON plus uvicorn's prose. Both arrive here."""
     reading = read(
-        'INFO:     Started server process [1]',
-        'INFO:     Application startup complete.',
+        "INFO:     Started server process [1]",
+        "INFO:     Application startup complete.",
         *requests(120),
     )
     assert reading.parsed == 1
@@ -107,14 +107,14 @@ def test_the_skipped_count_reaches_the_report() -> None:
 def test_a_fly_style_prefix_does_not_hide_the_json() -> None:
     """`fly logs` prefixes each line with the instance and stream."""
     reading = read(
-        '2026-08-11T09:00:00Z app[abc123] iad [info] '
+        "2026-08-11T09:00:00Z app[abc123] iad [info] "
         + line("request_complete", duration_ms=140, status=200)
     )
     assert reading.latencies[rollup.REQUEST_SERIES] == [140]
 
 
 def test_json_that_is_not_a_log_line_is_not_counted_as_one() -> None:
-    reading = read('{"hello": "world"}', '[1, 2, 3]', *requests(10))
+    reading = read('{"hello": "world"}', "[1, 2, 3]", *requests(10))
     assert reading.parsed == 1
     assert reading.skipped == 2
 

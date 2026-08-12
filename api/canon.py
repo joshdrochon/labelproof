@@ -287,7 +287,7 @@ VERIFICATIONS: Final[tuple[Verification, ...]] = (
         checked=date(2026, 8, 11),
         confirmed=True,
         note=(
-            "Reads: the first two words \"GOVERNMENT WARNING,\" shall appear in "
+            'Reads: the first two words "GOVERNMENT WARNING," shall appear in '
             "capital letters and in bold type; the remainder may not appear in bold "
             "type. The comma is inside the quotation mark and is not prescribed "
             "punctuation — Appendix B's reasoning is corrected above."

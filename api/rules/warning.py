@@ -91,7 +91,7 @@ _WHITESPACE = re.compile(r"\s+")
 _TOKEN = re.compile(r"\S+")
 
 #: Characters that are pure layout artefacts of printing and OCR, carrying no meaning.
-_INVISIBLE = str.maketrans({c: None for c in "­​‌‍﻿"})
+_INVISIBLE = str.maketrans(dict.fromkeys("\xad\u200b\u200c\u200d\ufeff"))
 
 #: A hyphen immediately followed by a line break is word wrapping, not punctuation.
 #: Rejoining is safe in this one module because the canonical statement contains no
@@ -243,7 +243,9 @@ def is_set_in_capitals(text: str) -> bool:
     return len(letters) >= 20 and all(character.isupper() for character in letters)
 
 
-def _compare_tokens(expected: list[str], found: list[str], found_text: str) -> tuple[list[str], list[str]]:
+def _compare_tokens(
+    expected: list[str], found: list[str], found_text: str
+) -> tuple[list[str], list[str]]:
     """The token lists to MATCH on — never the ones to display.
 
     Case is folded only when the label sets the whole statement in capitals. That is a
@@ -943,7 +945,7 @@ def _escalate(
         if text_in is not None and not isinstance(text_in, str):
             return None
         return typography.adopt_reread(signals, returned, first_text=text)
-    except Exception:  # any adapter failure degrades to the first pass (NET-3)
+    except Exception:  # noqa: BLE001 - any adapter failure degrades to the first pass (NET-3)
         return None
 
 

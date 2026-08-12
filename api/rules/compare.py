@@ -61,16 +61,44 @@ _STATE_ABBREVIATIONS: dict[str, str] = {
     "pr": "puerto rico",
 }
 
-_WORD = re.compile(r"\b[a-z]+\b")
+#: A two-letter code is a state only where a state goes: immediately after the comma that
+#: ends the city, at the end of the address or before another comma, optionally with a ZIP
+#: between. Expanding it anywhere a standalone word happens to match is a FALSE-PASS
+#: machine, and it was one — the expansion is many-to-one, so distinct producers collided
+#: into the same normalized string and compared as an exact Tier-1 Match:
+#:
+#:     La Crema Winery, Windsor, CA      == Louisiana Crema Winery, Windsor, CA
+#:     Casa de Campo, Ponce, PR          == Casa Delaware Campo, Ponce, PR
+#:     Mo's Distillery, Bend, OR         == Missouri's Distillery, Bend, OR
+#:     In-N-Out Spirits, Baltimore, MD   == Indiana-N-Out Spirits, Baltimore, MD
+#:     Old Tom Distilling Co, ...        == Old Tom Distilling Colorado, ...
+#:
+#: Symmetry does not save this. Applying the same corruption to both sides prevents false
+#: MISMATCHes; it does nothing about false MATCHes, because two different inputs can map
+#: onto one output. That last row is the one that would actually have shipped — every
+#: producer ending in "Co" or "Co." was becoming "colorado" (FIELD-5, and the asymmetry
+#: law: a false flag costs seconds, a false pass costs a compliance failure).
+_ZIP = r"\d{5}(?:-\d{4})?"
+_STATE_AFTER_COMMA = re.compile(rf",(\s*)([a-z]{{2}})\b(?=\s*(?:{_ZIP})?\s*(?:,|$))")
+_STATE_BEFORE_ZIP = re.compile(rf"\b([a-z]{{2}})\b(?=\s+{_ZIP}\b)")
 
 
 def expand_state_abbreviations(address: str) -> str:
-    """Rewrite two-letter state codes to full names so either form compares equal."""
+    """Rewrite two-letter state codes to full names so either form compares equal.
 
-    def replace(match: re.Match[str]) -> str:
-        return _STATE_ABBREVIATIONS.get(match.group(0), match.group(0))
+    `Frankfort, KY` and `Frankfort, Kentucky` are the same address. `Gin or Vodka` and
+    `Gin Oregon Vodka` are not, which is why position is checked and not just the word.
+    """
+    folded = address.casefold()
 
-    return _WORD.sub(replace, address.casefold())
+    def after_comma(match: re.Match[str]) -> str:
+        full = _STATE_ABBREVIATIONS.get(match.group(2))
+        return match.group(0) if full is None else f",{match.group(1)}{full}"
+
+    def before_zip(match: re.Match[str]) -> str:
+        return _STATE_ABBREVIATIONS.get(match.group(1), match.group(1))
+
+    return _STATE_BEFORE_ZIP.sub(before_zip, _STATE_AFTER_COMMA.sub(after_comma, folded))
 
 
 def _missing(field: FieldName, expected: str | None, label: str) -> FieldResult:

@@ -200,7 +200,7 @@ class Sweep:
                 "no level in this range is clean — the measure is wrong, not the threshold"
             )
         if not (band[0] <= self.current <= band[1]):
-            return f"current value is outside the clean band {band[0]:g}–{band[1]:g}; move it"
+            return f"current value is outside the clean band {band[0]:g}–{band[1]:g}; move it"  # noqa: RUF001 - en dash spans a numeric range
         if self.margin == 0:
             return "current value produces a false pass — move it now"
         if self.margin == 1:

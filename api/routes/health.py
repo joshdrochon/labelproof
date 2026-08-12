@@ -51,7 +51,7 @@ def ready(request: Request) -> JSONResponse:
             check()
     except errors.LabelProofError as known:
         return JSONResponse(status_code=known.status_code, content=known.to_payload())
-    except Exception:
+    except Exception:  # noqa: BLE001 - /ready reports an outage; it must never become one (NET-5)
         # Any other trouble on the provider path is an outage, reported as one rather
         # than leaked as a 500 with a class name in it.
         outage = errors.ProviderUnavailable()

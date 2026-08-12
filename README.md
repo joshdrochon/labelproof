@@ -4,14 +4,65 @@ AI label verification for TTB compliance review. An agent uploads the label artw
 the application; LabelProof returns a per-field checklist and a recommendation. It
 recommends — the agent decides.
 
-`PRD.md` is the source of truth for what this is, why, and what it must do.
+| | |
+|---|---|
+| **Source brief** | `TakeHome Project: AI-Powered Alcohol Label Verification App.docx`, sha `7f50443d68066298…` |
+| **Requirements** | [`PRD.md`](PRD.md) **v1.0** — 2026-08-10. Source of truth; requirement IDs (Appendix A) are cited throughout the code and tests. |
+| **Regulatory canon** | `PRD.md` Appendix B, verified against eCFR / ttb.gov on 2026-08-10 |
+| **Developer log** | [`CHANGES.md`](CHANGES.md) — how to run it, how to test it, how to roll it back |
+| **Licence** | MIT |
+
+Everything in this repository traces back to those two pinned documents. If a behaviour
+here disagrees with `PRD.md` v1.0, the PRD is right and the code is a bug — except where a
+trade-off is recorded explicitly, in which case it is written down as one.
+
+The brief's sha is the value recorded in the PRD's own front matter; the `.docx` itself is
+not committed, so the digest is cited from there rather than recomputed.
 
 **Contents**
 
+- [Getting started](#getting-started) — install, run, test
 - [Observability](#observability) — the log, the fields, the timings, what the numbers actually are
 - [Ops runbook](#ops-runbook) — read the log, the timings, the cost; the honesty check
 - [Network egress](#network-egress) — every external domain, allowlist-ready (NET-1)
 - [Security, privacy, and data retention](#security-privacy-and-data-retention) — SEC-1…SEC-10
+
+<!--
+Still missing from this file, and owned by tickets that have not landed:
+
+  LP-004  Architecture defence: stack, host, provider, with rationale
+  LP-139  Setup and run instructions, verified against a cold clone
+  LP-140  Approach and tools used
+  LP-141  Assumptions log — every gap the brief left open, filled and stated
+  LP-294  Accuracy report link
+
+Until they land, `CHANGES.md` carries the working setup, test, and rollback
+instructions. It is not a substitute for LP-139 — it is written for the next engineer
+rather than for a reviewer — but nothing about running this project is undocumented in
+the meantime.
+-->
+
+---
+
+## Getting started
+
+Setup, run, and test instructions live in [`CHANGES.md`](CHANGES.md#run-it) until LP-139
+lands the reviewer-facing version here.
+
+```bash
+./scripts/install_hooks.sh                  # once per clone
+python -m venv .venv && .venv/bin/pip install -e ".[dev]"
+.venv/bin/python -m pytest                  # offline, no API key needed
+```
+
+Lint and type-check are part of the gate, not an optional extra
+(`.github/workflows/ci.yml` runs all three, with the test job inside `unshare --net` so
+that "the suite is offline" is demonstrated rather than asserted):
+
+```bash
+.venv/bin/ruff check .
+.venv/bin/mypy --strict api/
+```
 
 ---
 
@@ -307,12 +358,11 @@ should be read as claiming it does.**
 Median single-call extraction latency, measured against the live API on one 2576px label
 by `scripts/spike_latency.py` and pinned in `api.config.MEASURED_EXTRACTION_MS`:
 
-| Extraction model | Median call | Input / output per MTok | Can pin `inference_geo` |
-|---|---|---|---|
-| `claude-opus-5` *(default)* | ~9,600 ms | $5 / $25 | Yes |
-| `claude-sonnet-5` | ~9,000 ms | $3 / $15 | Yes |
-| `claude-haiku-4-5` | ~5,500 ms | $1 / $5 | **No — 400s the parameter** |
-| Opus 5, extraction split into two concurrent calls | ~4,700 ms | $5 / $25 | Yes |
+| Extraction model | Median call | Split into two concurrent calls | Input / output per MTok | Can pin `inference_geo` |
+|---|---|---|---|---|
+| `claude-sonnet-5` *(shipped default)* | ~9,000 ms | ~6,900 ms | $3 / $15 | Yes |
+| `claude-opus-5` | ~9,600 ms | not measured | $5 / $25 | Yes |
+| `claude-haiku-4-5` | ~5,500 ms | ~4,700 ms | $1 / $5 | **No — 400s the parameter** |
 
 Our own non-provider work — ingest, quality scoring, rules, serialization — is about
 **130 ms**. The model call is essentially the whole number, which is why
@@ -320,19 +370,24 @@ Our own non-provider work — ingest, quality scoring, rules, serialization — 
 
 The honest reading:
 
-- On the default Opus 5 configuration the median is roughly **9.6 s**, near twice the
-  gate. The p95 is worse than the median by construction.
-- Dropping to Haiku 4.5 buys ~4 s and is still above the gate at the median — and it costs
-  two things a federal deployment cannot spend. Haiku **rejects `inference_geo` with a
-  400**, so US data residency cannot be pinned on it at all
-  (`api.provider.anthropic_adapter.supports_inference_geo` /`describe_residency`). And in
+- The shipped configuration is **Sonnet 5**, split into two concurrent extraction calls:
+  **~6.9 s**, about 1.9 s over the gate. Single-call it is ~9.0 s. The p95 is worse than
+  the median by construction. **PERF-1 is not met**, and no number in this repository
+  should be read as claiming otherwise.
+- Haiku 4.5 is the only model that fits the gate — ~4.7 s split — and it was **rejected
+  deliberately**, for two reasons a federal deployment cannot spend. Haiku **rejects
+  `inference_geo` with a 400**, so US data residency cannot be pinned on it at all
+  (`api.provider.anthropic_adapter.supports_inference_geo` / `describe_residency`). And in
   the typography spike, over 20 samples per model, Haiku got the header-bold judgement
   wrong 4 times and the body-bold judgement wrong 6 times where Sonnet 5 and Opus 5 got
-  both wrong zero times; all-caps was clean on all three. Haiku never abstained, and every
-  one of its errors was a **false pass** — the direction that ships a non-compliant label.
-- Splitting the extraction into two concurrent calls measures ~4.7 s and is the only
-  configuration that has come in under 5 s. That is a median on one machine, not a p95 on
-  a deployment.
+  all three signals — header-bold, body-bold, all-caps — wrong zero times. Haiku never
+  abstained, and every one of its errors was a **false pass**: the direction that ships a
+  non-compliant label, on the one field carrying a zero-false-pass gate.
+- So the trade is stated rather than hidden. The 5 s figure is a stakeholder quote about
+  adoption; data residency is a procurement condition, and procurement conditions do not
+  negotiate. A tool 1.9 s over the gate still replaces a 30–40 s vendor pilot and a paper
+  checklist. A tool that cannot say where a federal agency's label images were processed
+  may not be deployable at all.
 - **The gate has never been measured end-to-end on a deployed URL.** The deployment has
   not been run. `scripts/timed_run.py` is the instrument for it, PRD §221 defines the
   measurement (20 consecutive timed runs against the deployed URL, recorded in the repo),
@@ -512,7 +567,7 @@ wants the breakdown; the headline number is the one the stopwatch would agree wi
 |---|---|---|
 | `/ready` is red | `config_incomplete` lines | A missing environment variable. `/health` stays green on purpose — the process is fine. |
 | `/ready` says `sample_mode` | `verification_cost` lines with `provider: "fake:*"` | No API key. The service replays fixtures and says so on every verdict; it is not verifying uploads. |
-| `/ready` warns about the latency target | Startup lines | The configured model's measured latency is above `LABELPROOF_LATENCY_TARGET_MS`. This is the default state on Opus 5 — see *How fast it actually is*. |
+| `/ready` warns about the latency target | Startup lines | The configured model's measured latency is above `LABELPROOF_LATENCY_TARGET_MS`. This is the expected state on the shipped Sonnet 5 default — see *How fast it actually is*. |
 | p95 crept up | `extract` in the rollup | Almost always the model. Everything else is tens of milliseconds. |
 | Rising `provider_retry` | Degraded-but-handled table | An outage forming. `circuit_breaker` opening is the next line you will see. |
 | Unverified rate rising, error rate flat | Verification-outcome table | Pre-gate or budget stops. Both answer 200 — the service is up and is not checking labels. |
@@ -556,9 +611,19 @@ claim here has a test behind it, named at the end of its paragraph.
 ### No PII, by design
 
 There are no accounts, no names, no email addresses, and no login. The app processes label
-artwork and the application field data an agent types in, and nothing else. All demo and
-fixture data is synthetic. Nothing in this repository, in its fixtures, or in its golden set
-came from a real applicant.
+artwork and the application field data an agent types in, and nothing else. All demo data
+and every Tier A fixture is synthetic, and nothing in this repository came from a real
+applicant or a real TTB submission.
+
+The one exception is deliberate and worth naming: **Tier B is three photographs of
+retail bottles** — a Fireball back label, a torn IPA back label, and a Found North back
+label, in `golden/tier_b/photos/`. They are pictures of products already on a shelf, not
+applicant material, and they carry no personal data. Three photographs found three real
+false-rejections, all since fixed and pinned in
+`tests/test_real_photo_regressions.py` — which is the argument for Tier B existing. It is
+also a corpus of three. It is not a sample from which an accuracy claim about real
+photographs can be made, and Tier B is reported separately and never averaged into
+Tier A for exactly that reason.
 
 ### What is stored, and for how long
 

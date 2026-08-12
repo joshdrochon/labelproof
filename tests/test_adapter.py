@@ -525,7 +525,8 @@ def test_the_evidence_box_is_flat_and_never_a_nested_object() -> None:
     ids=["plain", "padded"],
 )
 def test_a_flat_box_string_is_parsed_into_an_evidence_box(raw: str) -> None:
-    provider, _ = a_provider(responds_with(a_label(fields={"brand_name": a_field("OLD TOM", bbox=raw)})))
+    labelled = a_label(fields={"brand_name": a_field("OLD TOM", bbox=raw)})
+    provider, _ = a_provider(responds_with(labelled))
     box = provider.extract(a_request()).extractions[0].fields[FieldName.BRAND_NAME].bbox
 
     assert box is not None
@@ -536,7 +537,8 @@ def test_an_empty_box_string_reads_as_no_box_and_is_not_logged_as_a_defect(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """"" is the expected answer for a field the model did not read, not a bad box."""
-    provider, _ = a_provider(responds_with(a_label(fields={"brand_name": a_field("OLD TOM", bbox="")})))
+    labelled = a_label(fields={"brand_name": a_field("OLD TOM", bbox="")})
+    provider, _ = a_provider(responds_with(labelled))
     with caplog.at_level(logging.WARNING):
         extraction = provider.extract(a_request()).extractions[0]
 
@@ -552,7 +554,8 @@ def test_an_empty_box_string_reads_as_no_box_and_is_not_logged_as_a_defect(
 )
 def test_a_malformed_box_string_is_dropped_and_the_reading_survives(raw: str) -> None:
     """A decorative field must never cost a correctly-read value (BUILD.md §1)."""
-    provider, _ = a_provider(responds_with(a_label(fields={"brand_name": a_field("OLD TOM", bbox=raw)})))
+    labelled = a_label(fields={"brand_name": a_field("OLD TOM", bbox=raw)})
+    provider, _ = a_provider(responds_with(labelled))
     brand = provider.extract(a_request()).extractions[0].fields[FieldName.BRAND_NAME]
 
     assert brand.value == "OLD TOM"

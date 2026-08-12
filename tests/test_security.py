@@ -493,8 +493,10 @@ def _drive(app: FastAPI, request: Any) -> tuple[int | None, bool]:
     client = TestClient(app, raise_server_exceptions=True)
     try:
         response = request(client)
-    except Exception:
-        _uvicorn_error_logger().error("Exception in ASGI application", exc_info=True)
+    except Exception:  # noqa: BLE001 - reproducing what uvicorn does with any exception
+        _uvicorn_error_logger().error(
+            "Exception in ASGI application", exc_info=True
+        )
         return None, True
     return response.status_code, False
 
@@ -584,7 +586,9 @@ def test_containment_holds_even_if_the_exception_reaches_the_server(capfd: Any) 
     try:
         raise RuntimeError(LABEL_TEXT)
     except RuntimeError:
-        logger.error("Exception in ASGI application", exc_info=True)
+        logger.error(  # noqa: G201 - uvicorn's exact spelling is the thing under test
+            "Exception in ASGI application", exc_info=True
+        )
 
     captured = capfd.readouterr()
     combined = captured.out + captured.err
@@ -794,7 +798,9 @@ def test_containment_still_scrubs_after_being_reasserted(capfd: Any) -> None:
     try:
         raise RuntimeError(LABEL_TEXT)
     except RuntimeError:
-        logger.error("Exception in ASGI application", exc_info=True)
+        logger.error(  # noqa: G201 - uvicorn's exact spelling is the thing under test
+            "Exception in ASGI application", exc_info=True
+        )
 
     combined = capfd.readouterr().out + capfd.readouterr().err
     assert LABEL_TEXT not in combined

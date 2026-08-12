@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """Answer "is this test stale, or did the merge break something?" mechanically.
 
 A failing test on a merge commit carries no information about *why* it was expected to
@@ -240,7 +241,8 @@ def render(triages: Iterable[Triage], parents: Sequence[str]) -> str:
     if counts.get(NEW_AGAINST_OTHER):
         lines += [
             "",
-            f"{counts[NEW_AGAINST_OTHER]} test(s) are NEW on one side and fail against the other's code.",
+            f"{counts[NEW_AGAINST_OTHER]} test(s) are NEW on one side and fail against "
+            "the other's code.",
             "Not stale — nobody has ever run them together before. Decide which side is",
             "right; the test may be asserting something the other branch deliberately changed.",
         ]
@@ -274,7 +276,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         print("nothing failing — no triage needed")
         return 0
 
-    print(f"triaging {len(node_ids)} failing test(s) against {len(parents)} parents…", file=sys.stderr)
+    print(
+        f"triaging {len(node_ids)} failing test(s) against {len(parents)} parents…",
+        file=sys.stderr,
+    )
 
     triages = [Triage(node_id=n, on_merge=False) for n in node_ids]
     by_id = {t.node_id: t for t in triages}

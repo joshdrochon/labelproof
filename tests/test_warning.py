@@ -793,7 +793,7 @@ def test_word_wrap_hyphenation_is_layout_not_a_difference() -> None:
 
 
 def test_soft_hyphens_and_zero_width_characters_are_layout() -> None:
-    littered = canon.CANONICAL_WARNING.replace("pregnancy", "preg­nan​cy")
+    littered = canon.CANONICAL_WARNING.replace("pregnancy", "preg­nan\u200bcy")
     assert warning.is_verbatim(littered)
 
 

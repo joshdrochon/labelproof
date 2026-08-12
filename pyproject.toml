@@ -17,11 +17,15 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Linters are pinned exactly, not floated. A new ruff release adds rules; a new mypy
+# release tightens inference. Either can turn CI red on a commit that changed nothing,
+# and "CI went red on its own" is how a gate stops being believed. Upgrades are a
+# deliberate commit that also fixes whatever the new version found (LP-006, LP-007).
 dev = [
     "pytest>=8.3",
     "pytest-cov>=6.0",
-    "mypy>=1.13",
-    "ruff>=0.8",
+    "mypy==2.3.0",
+    "ruff==0.16.2",
     "hypothesis>=6.119",
     "httpx>=0.28",
 ]
@@ -33,14 +37,173 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["api"]
 
+# --- Lint (LP-006, ENG-8) --------------------------------------------------------------
+#
+# Ruff is authoritative: `ruff check .` is the gate, it runs in CI on every push, and the
+# rule set below is chosen rather than inherited. Every family is here because someone
+# would have to review for it by hand otherwise; every exception below carries its reason.
+
 [tool.ruff]
 line-length = 100
+# Lint for the OLDEST interpreter the project claims to support, not the newest one the
+# developer happens to run. CI runs 3.14 (see .github/workflows/ci.yml) while
+# `requires-python` still says >=3.12, so target-version keeps 3.14-only syntax from
+# reaching a 3.12 deploy. Raise this and `requires-python` together, never separately.
 target-version = "py312"
+extend-exclude = ["web", ".venv"]
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "N", "UP", "B", "SIM", "RUF"]
+select = [
+    "F",     # pyflakes — undefined names, unused imports: real defects
+    "E",     # pycodestyle errors
+    "W",     # pycodestyle warnings — trailing whitespace, missing final newline
+    "I",     # isort — import order is diff noise otherwise
+    "N",     # pep8-naming
+    "UP",    # pyupgrade — keep syntax current with target-version
+    "B",     # bugbear — mutable defaults, loop-variable closures (real bug class)
+    "SIM",   # flake8-simplify
+    "RUF",   # ruff-specific, incl. RUF001 confusable Unicode (this codebase is FULL of it)
+    "BLE",   # blind except — the codebase already carries `# noqa: BLE001` in four places,
+             # which means it was written expecting this rule. Enabling it makes those
+             # markers real instead of dead text.
+    "S",     # bandit — a federal reviewer will run a security linter; run it first (SEC-*)
+    "A",     # builtin shadowing
+    "C4",    # comprehension correctness
+    "DTZ",   # naive datetime — retention TTLs (SEC-2) must not compare tz-naive clocks
+    "PTH",   # pathlib over os.path
+    "ASYNC", # blocking calls inside `async def` — the FastAPI foot-gun that eats p95
+    "LOG",   # logging-module misuse
+    "G",     # logging format — the no-content rule (SEC-4) is easier to hold with these
+    "PIE",   # misc. lints
+    "Q",     # quote consistency
+    "RSE",   # raise-statement style
+    "ICN",   # import conventions (np, cv2)
+    "TID",   # no banned/relative-parent imports — keeps `api/rules/` from reaching upward
+    "FA",    # future annotations
+    "EXE",   # shebang/executable-bit agreement
+    "YTT",   # sys.version comparisons
+    "SLOT",  # __slots__ correctness
+    "INT",   # gettext
+    "FLY",   # static str.join
+    "PLE",   # pylint ERRORS only — incl. PLE2515, invisible characters in source
+]
 
+ignore = [
+    # RUF001 (ambiguous character in a STRING) stays on: a homoglyph inside a literal can
+    # change what a comparison does, and this codebase compares label text for a living.
+    # RUF002/RUF003 are the same check against docstrings and comments, where the
+    # character cannot reach any behaviour at all. The repo's prose is written with real
+    # typography — `9.4–10.1s` uses an en dash because it is a numeric range — and
+    # demanding a hyphen there is a style opinion wearing a security rule's clothing.
+    "RUF002",
+    "RUF003",
+]
+
+# Deliberately NOT selected, with the reason, so the next engineer does not re-litigate:
+#   ANN   — api/ is already fully annotated and `mypy --strict` proves it; ANN would only
+#           add noise to tests, where annotations buy nothing.
+#   COM   — trailing-comma policy belongs to the formatter, not the linter.
+#   D     — docstring style. The codebase writes prose docstrings that cite regulations;
+#           a summary-line rule would flatten them.
+#   EM/TRY003 — would force every plain-language error message (UX-6 requires them to be
+#           plain-language sentences) into a named exception class. Wrong trade here.
+#   PLR2004 — magic values. 160 hits, ~all in tests asserting regulatory constants, which
+#           is the one place a magic value is the point.
+#   T20   — `print` is the interface for eval/run.py and scripts/.
+#   TC    — runtime-vs-typing import shuffling; churn without a defect class behind it.
+#   PERF  — its list-comprehension rewrites lose the loop bodies' comments.
+
+[tool.ruff.lint.pep8-naming]
+# Names that are deliberate, not accidents. Each one is a considered choice:
+#   stage                — a context manager used like a verb: `with stage("extract"):`
+#   T                    — `from api.rules import thresholds as T`; BUILD.md §7 puts every
+#                          threshold in one module, and `T.PREGATE_HOPELESS` reads as the
+#                          citation it is.
+#   E, F                 — one-letter result/expectation factories local to a test module.
+#   ProviderUnavailable, NetworkAccessDenied
+#                        — read as the state they describe. `…Error` adds a syllable and
+#                          no information, and the codebase set this convention first.
+extend-ignore-names = [
+    "stage",
+    "T",
+    "E",
+    "F",
+    "ProviderUnavailable",
+    "NetworkAccessDenied",
+]
+
+[tool.ruff.lint.flake8-tidy-imports]
+ban-relative-imports = "parents"
+
+[tool.ruff.lint.per-file-ignores]
+# --- confusable Unicode is the subject matter, not a mistake --------------------------
+# RUF001 exists to catch a Cyrillic 'а' typo'd into an identifier. In a Unicode
+# normalizer, in its tests, and in the label generator's copy, the confusable characters
+# ARE the payload: U+2019 is literally the STONE'S THROW apostrophe (MATCH-3, TC-02).
+"api/rules/normalize.py" = ["RUF001"]
+"tests/test_normalize.py" = ["RUF001"]
+"tests/test_compare.py" = ["RUF001"]
+"fixtures/generator/catalog.py" = ["RUF001"]
+
+# NOTE ON BLE001: there is deliberately no per-file exception for it. The seven blind
+# catches in api/batch/worker.py, api/routes/health.py and api/routes/verify.py are
+# resilience boundaries (BATCH-6, NET-5, NET-3) and each carries its own `# noqa: BLE001`
+# with the reason. A whole-file ignore would have covered exactly those seven and nothing
+# else, which makes the rule permanently silent in a 700-line worker — it would look
+# enabled and never be able to fail.
+
+# --- bandit exceptions ----------------------------------------------------------------
+# S101: pytest's entire assertion model is `assert`. Banning it in tests is nonsense.
+# SIM300: `assert actual == expected` is the universal test idiom; SIM300 reads a
+#         module-level CONSTANT as a literal and wants the comparison flipped.
+"tests/**" = ["S101", "SIM300", "S603", "S607"]
+# S608: the only f-string in these DELETEs is `?,?,?` — a placeholder count. Every value
+#       is still a bound parameter (api/batch/store.py, purge_expired).
+"api/batch/store.py" = ["S608"]
+# S603/S607: both scripts shell out to `git` only. The executable is resolved from PATH
+#       on purpose — hard-coding /usr/bin/git breaks on every machine that isn't the
+#       author's — and every argument is a repo-internal literal. No user input reaches
+#       either call. `shell=True` appears nowhere in this repository.
+"scripts/**" = ["S603", "S607"]
+
+# --- type-narrowing asserts in the request path ---------------------------------------
+# Starlette types every exception handler's `exc` as bare `Exception`, so the handler
+# opens with `assert isinstance(exc, ...)` purely to narrow for mypy. The invariant is
+# guaranteed by the framework's dispatch, not by the assert, so `python -O` stripping it
+# changes nothing. Same story for `assert job is not None` after `_require_job` has
+# already raised. Not a substitute for validation anywhere in this repo.
+"api/main.py" = ["S101"]
+"api/routes/batch.py" = ["S101"]
+
+# --- a wart, recorded rather than silenced ---------------------------------------------
+# `白` (a white-fill matrix in the glare synthesiser) should be `white`. This branch owns
+# the lint configuration, not fixtures/, so the rename belongs to whoever next touches
+# that file; the ignore is scoped to the one module so it cannot spread.
+"fixtures/generator/degrade.py" = ["N806"]
+
+# --- Format (LP-006) -------------------------------------------------------------------
+#
+# `ruff format` is configured here and is the formatter of record for NEW code. It is
+# deliberately NOT a CI gate yet. Reason, so nobody assumes it was an oversight: the
+# regulatory constant tables in api/canon.py and api/rules/normalize.py are hand-aligned
+# into readable grids (25 standards-of-fill values on 3 lines, the apostrophe map as a
+# glyph->ASCII table). Magic-trailing-comma expansion turns each into 25 one-value lines
+# and separates the values from the CFR citation comment above them, which makes the one
+# thing a compliance reviewer must audit by eye harder to audit. Enabling
+# `ruff format --check` in CI is a single-commit change once those tables carry
+# `# fmt: off`; until then `ruff check` (which owns E501 and import order) is the gate.
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+line-ending = "lf"
+skip-magic-trailing-comma = false
+docstring-code-format = true
+
+# --- Typecheck (LP-007, ENG-8) ---------------------------------------------------------
+#
+# `mypy --strict` is clean over everything listed in `files` and CI fails on any error.
 [tool.mypy]
+# Same reasoning as ruff's target-version: check against the oldest supported runtime.
 python_version = "3.12"
 # tests/ is not a package, so `from conftest import ...` in a test subdirectory is
 # unresolvable to mypy without this. Adding __init__.py files instead would change how
@@ -49,6 +212,50 @@ mypy_path = "tests"
 strict = true
 warn_unreachable = true
 disallow_any_generics = true
+# Strict mode leaves these off by default; each one closes a real class of bug and each
+# one is clean today.
+enable_error_code = [
+    "ignore-without-code",  # a bare `# type: ignore` also hides the NEXT error on that line
+    "redundant-expr",
+    "unused-awaitable",     # a forgotten `await` in the async request path
+    "redundant-cast",
+    "mutable-override",
+    "comparison-overlap",   # `x == y` where the types can never be equal
+    "deprecated",
+]
+# Considered and left off, with the reason:
+#   explicit-override  — would require decorating a Starlette subclass override in
+#                        api/main.py; worth turning on when that file is next touched.
+#   truthy-bool        — fires on `ImageOps.exif_transpose(img) or img`, where the `or`
+#                        is a deliberate guard against Pillow's return contract.
+#   possibly-undefined — one real hit in fixtures/generator/spec.py. A genuine finding,
+#                        left visible in this comment rather than enabled-and-ignored.
+#   exhaustive-match   — three hits in match statements over open string types.
+pretty = true
+# Scope. `api/` is the shipped code. Every script is listed individually and every one of
+# them is strict-clean, so "clean over api/ and scripts/" is a claim that can be checked.
+#
+# KNOWN GAP, measured rather than estimated: `mypy --strict api tests eval fixtures`
+# reports **22 errors in 9 files** as of this commit —
+#
+#     6  tests/test_batch.py          6  fixtures/generator/degrade.py
+#     2  tests/test_verify.py         2  tests/test_resilience.py
+#     2  tests/test_logging.py        1  tests/test_sample_mode_fails_closed.py
+#     1  tests/test_fixtures.py       1  tests/test_errors.py
+#     1  eval/run.py
+#
+# mostly missing annotations on test helpers and `Any` leaking out of fixture loaders.
+# They are excluded from the gate, not from the intent. (An earlier version of this
+# comment said 27, which was a stale count from before the scripts were cleaned — a
+# number nobody can reproduce is worse than no number, so it is now the output of
+# `mypy --strict api tests eval fixtures` and nothing else.)
+files = [
+    "api",
+    "scripts/scan_secrets.py",
+    "scripts/spike_latency.py",
+    "scripts/spike_typography.py",
+    "scripts/sync_board.py",
+]
 
 [[tool.mypy.overrides]]
 module = ["cv2.*", "pillow_heif.*", "pypdfium2.*"]

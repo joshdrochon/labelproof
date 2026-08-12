@@ -109,28 +109,28 @@ def build_multipart(
 
 def http_get(url: str, timeout: float = DEFAULT_TIMEOUT_S) -> Reply:
     try:
-        with urllib.request.urlopen(url, timeout=timeout) as response:
+        with urllib.request.urlopen(url, timeout=timeout) as response:  # noqa: S310 - the URL is an operator argument to a measurement tool
             return Reply(response.status, response.read())
     except urllib.error.HTTPError as exc:
         return Reply(exc.code, exc.read())
-    except Exception as exc:  # a measurement tool reports, never crashes
+    except Exception as exc:  # noqa: BLE001 - a measurement tool reports, never crashes
         return Reply(0, str(exc).encode())
 
 
 def poster_for(base_url: str, timeout: float = DEFAULT_TIMEOUT_S) -> Poster:
     def post(path: str, content_type: str, body: bytes) -> Reply:
-        request = urllib.request.Request(
+        request = urllib.request.Request(  # noqa: S310 - the URL is an operator argument to a measurement tool
             f"{base_url.rstrip('/')}{path}",
             data=body,
             headers={"Content-Type": content_type},
             method="POST",
         )
         try:
-            with urllib.request.urlopen(request, timeout=timeout) as response:
+            with urllib.request.urlopen(request, timeout=timeout) as response:  # noqa: S310 - the URL is an operator argument to a measurement tool
                 return Reply(response.status, response.read())
         except urllib.error.HTTPError as exc:
             return Reply(exc.code, exc.read())
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - a measurement tool reports, never crashes
             return Reply(0, str(exc).encode())
 
     return post
@@ -302,7 +302,7 @@ def git_commit() -> str:
             timeout=5,
             check=False,
         )
-    except Exception:
+    except Exception:  # noqa: BLE001 - a git probe that fails just has no answer
         return ""
     return out.stdout.strip() if out.returncode == 0 else ""
 

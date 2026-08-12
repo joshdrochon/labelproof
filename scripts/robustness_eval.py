@@ -519,7 +519,7 @@ def render_docs(report: Report) -> str:
         "Everything above is Tier A: labels this repo generated, degraded by code this repo",
         "wrote. It proves the pipeline can read our own renderer. Tier B — real phone",
         "photographs of real bottles — is reported separately and never averaged in, because",
-        "the difference between the two numbers is the honest answer to \"does this work\".",
+        'the difference between the two numbers is the honest answer to "does this work".',
         "",
         "Every harness above takes `--photos` and runs unchanged against that set.",
         "",
