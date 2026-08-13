@@ -1986,6 +1986,15 @@ kbd {
   color: var(--ink-faint);
 }
 
+/* The Tier 3 marker. Left border rather than a colour fill: it has to survive the
+   print stylesheet, where Dave reads it in black and white. */
+.detail__judged {
+  margin: 0.75rem 0 0;
+  padding: 0.6rem 0.85rem;
+  border-left: 4px solid var(--attention);
+  background: var(--surface-sunk);
+}
+
 @media print {
   /* Dave prints in black and white. Every verdict still reads, because every verdict
      is a word and an outline before it is ever a colour. */

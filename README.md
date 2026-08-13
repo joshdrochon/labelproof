@@ -288,7 +288,9 @@ here.
   focus trap in the batch dialog, a print stylesheet, no colour-only state anywhere — but
   written-for is not tested-for and the difference is the whole point of an audit.
 - **The 73-year-old test has not been run.** UX-1 asks for three cold users reaching a
-  verdict with no instructions. That needs three people and cannot be simulated.
+  verdict with no instructions. That needs three people and cannot be simulated. The
+  protocol is written and fixed in advance — [`docs/hallway-protocol.md`](docs/hallway-protocol.md)
+  — so the success criteria cannot be adjusted to whatever happens on the day.
 - **Geometric correction does not run on a real verification.** `api/pipeline/preprocess.py`
   and `api/pipeline/deskew.py` — deskew, perspective correction, contrast lifting — have
   **no caller in the request path**. What does run is ingest (magic-byte sniffing, EXIF and

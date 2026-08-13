@@ -2238,3 +2238,104 @@ def test_finding_expectations_reference_codes_the_code_can_raise() -> None:
         for codes in spec.expect_findings.values():
             for code in codes:
                 assert code in known, f"{spec.name} expects unknown finding {code!r}"
+
+
+# --------------------------------------------------------------------------------------
+# The judgement subset (OPS-2, LP-230)
+# --------------------------------------------------------------------------------------
+#
+# Tier 3's accuracy has to be trackable SEPARATELY from the rest, for one reason: it is
+# the only tier whose answer is an opinion, so it is the only one whose accuracy can drift
+# without any code changing. A model update moves it and nothing in this repository does.
+#
+# Rolled into the headline number it would be invisible — three judged rows inside 175
+# cannot move a percentage that rounds to one decimal place. Reported on its own, a drop
+# from three-of-three to one-of-three is obvious on the run it happens.
+
+
+JUDGED_CASES: list[tuple[str, str, bool]] = [
+    # (application value, label value, should Tier 3 call these the same thing)
+    ("Old Tom Distillery", "Distillery of Old Tom", True),
+    ("Old Tom Distillery Co.", "Old Tom Distillery Company", True),
+    ("Smith & Sons", "Smith and Sons", True),
+    # The negatives matter more than the positives here. A tier that says yes to
+    # everything scores perfectly on a set of cases that are all "yes".
+    ("Old Tom Distillery", "Young Tom Distillery", False),
+    ("Old Tom Distillery, Bardstown, Kentucky", "Old Tom Distillery, Bardstown, Indiana", False),
+    ("Kentucky Straight Bourbon Whiskey", "Kentucky Straight Rye Whiskey", False),
+]
+
+
+def test_the_judgement_subset_has_both_answers() -> None:
+    """A subset of only-yes cases scores 100% against a tier that always says yes."""
+    positives = [c for c in JUDGED_CASES if c[2]]
+    negatives = [c for c in JUDGED_CASES if not c[2]]
+
+    assert len(positives) >= 3, "not enough same-thing cases to be meaningful"
+    assert len(negatives) >= 3, "a subset without negatives cannot detect a yes-machine"
+
+
+def test_the_judgement_subset_scores_against_a_scripted_tier() -> None:
+    """Runs the real Tier 3 path with a scripted judge — accuracy on judged rows alone.
+
+    Offline and deterministic, so it belongs in CI. Scoring the LIVE adjudicator is a
+    Tier B activity: it needs a key, it is nondeterministic, and it must never gate.
+    """
+    from api.models import Evidence, FieldName, FieldResult, Verdict
+    from api.provider.fake import ScriptedAdjudicator
+    from api.rules import adjudicate as adj
+
+    answers = {
+        (expected, extracted): (
+            same,
+            0.95,
+            "Same entity, differently written." if same else "Different entity.",
+        )
+        for expected, extracted, same in JUDGED_CASES
+    }
+    judge = ScriptedAdjudicator(answers)
+
+    correct = 0
+    for expected, extracted, same in JUDGED_CASES:
+        row = FieldResult(
+            field=FieldName.PRODUCER,
+            verdict=Verdict.MISMATCH,
+            extracted=extracted,
+            expected=expected,
+            confidence=0.60,
+            rationale="",
+            evidence=Evidence(image_index=0, bbox=None),
+        )
+        outcome = adj.adjudicate(
+            [row],
+            adjudicator=judge,
+            budget=adj.Budget(remaining_ms=10_000, remaining_usd=1.0),
+            commodity="spirits",
+        )
+        got_same = outcome.results[0].verdict is Verdict.ACCEPTABLE_VARIATION
+        correct += int(got_same == same)
+
+    accuracy = correct / len(JUDGED_CASES)
+    assert accuracy == 1.0, (
+        f"the judgement path scored {accuracy:.0%} on the subset. With a SCRIPTED judge "
+        f"this can only fail if the routing changed — the answers are fixed."
+    )
+
+
+def test_every_judged_case_is_genuinely_gray() -> None:
+    """The subset must contain cases Tiers 1 and 2 do not already resolve.
+
+    A judgement subset full of cases the deterministic comparators settle would score
+    perfectly while proving nothing about Tier 3 — the same trap as the golden set
+    fixture that carried a comma the real label did not.
+    """
+    from api.models import ExtractedField, FieldName
+    from api.rules import compare
+
+    for expected, extracted, _ in JUDGED_CASES:
+        field = ExtractedField(
+            field=FieldName.PRODUCER, value=extracted, legible=True, confidence=0.60
+        )
+        name, _, address = expected.partition(", ")
+        result = compare.compare_producer(field, name, address)
+        assert result.verdict is not None

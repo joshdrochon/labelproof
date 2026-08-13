@@ -446,7 +446,7 @@ in LP-237, with fixtures across LP-068, 163, 195–198, 216, 226–229.
 - [x] **LP-308** Sample label set downloadable inside the app — graders test in seconds (DEL-5)
 - [x] **LP-310** PRD final sync: shipped reality matches the doc; deltas listed as trade-offs (DEL-7)
 - [x] **LP-311** TICKETS final sync: board true, counts updated (DEL-7)
-- [ ] **LP-312** Tag `v1.0` + release notes
+- [x] **LP-312** Tag `v1.0` + release notes
 
 ## F13 · Final QA
 
@@ -457,7 +457,7 @@ in LP-237, with fixtures across LP-068, 163, 195–198, 216, 226–229.
 - [x] **LP-317** PRD checklists (MVP + Final): line-by-line self-audit (ENG-9)
 - [x] **LP-318** Evaluation-criteria walkthrough: the brief's six criteria, each with pointable evidence (BR)
 - [ ] **LP-319** Fresh-eyes full walkthrough; final fixes (UX-1)
-- [ ] **LP-320** Submission sign-off: deliverables table complete, everything reachable (DEL-1..7)
+- [x] **LP-320** Submission sign-off: deliverables table complete, everything reachable (DEL-1..7)
 
 ---
 
