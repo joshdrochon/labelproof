@@ -303,10 +303,8 @@ export default function VerifyNow() {
         </ol>
         <div className="setup__sample">
           <p className="setup__sample-note">
-            Or try one of these. Each loads a real application and its label and checks it
-            straight away — nothing to fill in. This is closer to how an agent works: in
-            COLA the application already exists, and they are confirming it against the
-            artwork rather than typing it.
+            Or try one of these. Each one loads a real application and its label and
+            checks it right away — nothing to fill in.
           </p>
 
           {/* One card per sample, the WHOLE card clickable. This was a `.btn` with the
@@ -584,8 +582,14 @@ function ChecklistScreen({
         const prev = order[Math.max(0, index - 1)] ?? order[0];
         if (prev) jumpToField(prev.field);
         event.preventDefault();
-      } else if ((event.key === 'c' || event.key === 'o') && current) {
-        setDecisions({ ...decisions, [current]: event.key === 'c' ? 'confirmed' : 'overridden' });
+        // `a` and `d`, matching the words on the buttons. They were `c` and `o` — for
+        // "confirm" and "override", the vocabulary this UI deliberately does not use.
+        // A shortcut hint that teaches keys spelling words nobody can see on the screen
+        // is a hint for whoever wrote the handler. `c`/`o` still work for anyone who
+        // learned them, they are just not what the page advertises.
+      } else if ('adco'.includes(event.key) && current) {
+        const agreeing = event.key === 'a' || event.key === 'c';
+        setDecisions({ ...decisions, [current]: agreeing ? 'confirmed' : 'overridden' });
         event.preventDefault();
       }
     };
@@ -759,10 +763,17 @@ function ChecklistScreen({
             ) : null}
           </table>
 
-          <p className="checklist__shortcuts">
-            Keyboard: <kbd>n</kbd> next row, <kbd>p</kbd> previous, <kbd>c</kbd> agree,{' '}
-            <kbd>o</kbd> disagree.
-          </p>
+          {/* Folded away by default. It was a permanent band across the bottom of the
+              checklist, which puts a power-user affordance in front of the person the
+              73-year-old benchmark is about. Jenny finds it in one click; nobody else
+              has to read it. */}
+          <details className="checklist__shortcuts">
+            <summary>Keyboard shortcuts</summary>
+            <p>
+              <kbd>n</kbd> next row · <kbd>p</kbd> previous · <kbd>a</kbd> agree ·{' '}
+              <kbd>d</kbd> disagree
+            </p>
+          </details>
         </div>
       </div>
 

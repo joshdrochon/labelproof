@@ -62,7 +62,7 @@ CASES: Final[tuple[SampleCase, ...]] = (
         fixture="tc16_front_back",
         title="A label that checks out",
         summary=(
-            "Front and back, everything agreeing with the application. Ready to approve."
+            "Front and back. Everything matches. Ready to approve."
         ),
     ),
     SampleCase(
@@ -76,9 +76,8 @@ CASES: Final[tuple[SampleCase, ...]] = (
         # cannot fully stand behind. A demo card that names the wrong outcome teaches a
         # reviewer to distrust the ones that are right.
         summary=(
-            "The application says 45%; the label says 40%. A flat mismatch — and the "
-            "warning on the same label is disputed, so the tool asks for your eyes "
-            "rather than rejecting on its own."
+            "The application says 45%. The label says 40%. The warning on this label is "
+            "also unclear, so you get asked to look rather than a decision."
         ),
     ),
     SampleCase(
@@ -92,16 +91,15 @@ CASES: Final[tuple[SampleCase, ...]] = (
         # the design working — but a card promising a catch, above a row that says "could
         # not be read", reads as the tool missing it.
         summary=(
-            "“Government Warning:” in title case. The tool's own two readings of the "
-            "heading disagree, so it refuses to settle it and sends you to 27 CFR 16.22 "
-            "— a refusal, not a guess."
+            "“Government Warning:” is in title case, not capitals. The tool read the "
+            "heading two ways and they disagree, so it will not call it either way."
         ),
     ),
     SampleCase(
         slug="missing-warning",
         fixture="tc07_missing_warning",
         title="No government warning at all",
-        summary="Nothing on any face. Missing, and the most serious finding there is.",
+        summary="No warning on either side. The most serious problem a label can have.",
     ),
 )
 

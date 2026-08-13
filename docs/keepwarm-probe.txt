@@ -13,3 +13,13 @@ utc                     status    cold_s      warm_s      note
 2026-08-13T17:37:26Z    200       0.108739    0.141297    ok
 2026-08-13T17:57:26Z    200       0.148288    0.118002    ok
 2026-08-13T18:17:27Z    200       0.174912    0.194042    ok
+2026-08-13T18:37:28Z    200       0.112144    0.126255    ok
+
+finished:  2026-08-13T18:37:28Z
+probes:    9
+worst first-hit: 0.174912s
+RESULT:    PASS — every cold first hit answered under 2s. No machine stopped.
+
+Scope: this proves the machine does not stop over the window probed. It does not
+prove anything about longer drift, and the window is stated above rather than
+rounded up in prose.

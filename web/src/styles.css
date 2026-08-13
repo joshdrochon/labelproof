@@ -394,11 +394,11 @@ kbd {
   color: var(--navy);
 }
 
+/* STACKED, not side by side. This was a flex row with `align-items: center`, so the
+   note sat in a column of its own, vertically centred against four stacked cards — and
+   left a tall empty rectangle above and below it that was the first thing the eye found
+   on the screen. The note is one line of context; it does not need a column. */
 .setup__sample {
-  display: flex;
-  align-items: center;
-  gap: 1rem;
-  flex-wrap: wrap;
   border-top: 1px solid var(--rule);
   padding-top: 1rem;
 }
@@ -406,7 +406,8 @@ kbd {
 .setup__sample-note {
   color: var(--ink-soft);
   font-size: 1rem;
-  max-width: 34rem;
+  /* Capped for reading, not for layout — the cards below use the full width. */
+  max-width: 72ex;
 }
 
 .setup__columns {
@@ -1506,6 +1507,19 @@ kbd {
   font-size: 1rem;
 }
 
+.checklist__shortcuts summary {
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  min-height: 2.75rem;
+  font-weight: 600;
+  color: var(--navy);
+}
+
+.checklist__shortcuts p {
+  margin: 0.25rem 0 0;
+}
+
 /* -------------------------------------------------------- the determination --- */
 
 .determination {
@@ -2106,7 +2120,9 @@ kbd {
   display: grid;
   /* Two up on a desk, one up on a tablet. `auto-fit` rather than a fixed count so the
      cards never get narrower than a readable line. */
-  grid-template-columns: repeat(auto-fit, minmax(20rem, 1fr));
+  /* Four across on a desk, two on a tablet, one on a phone. They were locked to a
+     20rem minimum inside a half-width column, which forced a single tall stack. */
+  grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr));
   gap: 0.5rem;
 }
 

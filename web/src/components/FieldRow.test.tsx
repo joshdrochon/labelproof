@@ -167,8 +167,14 @@ describe('a row judged by Tier 3 says so', () => {
       </table>,
     );
 
-    expect(screen.getByText(/a second model judged this row/i)).toBeInTheDocument();
-    expect(screen.getByText(/that is a judgement, not a rule/i)).toBeInTheDocument();
+    // The PROPERTY: the row says a model decided it, not a rule. Pinned to the marker's
+    // own class and to the two words that carry the claim, not to a sentence — this test
+    // failed on a pure copy edit that made the sentence plainer, which is a test getting
+    // in the way of the thing it is supposed to protect.
+    const marker = document.querySelector('.detail__judged');
+    expect(marker).toBeInTheDocument();
+    expect(marker?.textContent?.toLowerCase()).toContain('model');
+    expect(marker?.textContent?.toLowerCase()).toContain('not a rule');
   });
 
   it('does not mark rows that a rule settled', () => {

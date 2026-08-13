@@ -198,10 +198,10 @@ export default function FieldRow({
                   warning label on the one tier that has an opinion. */}
               {result.tier === 3 ? (
                 <p className="detail__judged">
-                  <strong>A second model judged this row.</strong> Tiers 1 and 2 could not
-                  resolve the difference, so it was sent to a model to decide whether the
-                  two values name the same thing. That is a judgement, not a rule — read
-                  the reason above and decide for yourself.
+                  <strong>A model decided this row, not a rule.</strong> The usual checks
+                  could not settle it, so the two values were sent to a model to say
+                  whether they mean the same thing. Read the reason above and decide for
+                  yourself.
                 </p>
               ) : null}
               {legibility ? <p className="detail__text detail__text--soft">{legibility}</p> : null}
