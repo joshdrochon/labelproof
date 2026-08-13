@@ -30,6 +30,7 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
+from api import entry
 from api.batch.models import RowError
 from api.models import Application, Commodity
 
@@ -156,17 +157,6 @@ def _parse_bool(raw: str) -> bool | None:
     return None
 
 
-def _parse_float(raw: str) -> float | str | None:
-    """Returns the value, None for blank, or the offending string when unparseable."""
-    text = raw.strip().rstrip("%").strip()
-    if not text:
-        return None
-    try:
-        return float(text)
-    except ValueError:
-        return raw.strip()
-
-
 def _validation_errors(row: int, exc: ValidationError) -> list[RowError]:
     out: list[RowError] = []
     for detail in exc.errors():
@@ -180,6 +170,12 @@ def _validation_errors(row: int, exc: ValidationError) -> list[RowError]:
                 f"{label} must be spirits, wine or malt. Correct it and upload the "
                 f"manifest again."
             )
+        elif kind == "value_error":
+            # `api/entry.py` wrote a sentence naming the field and the fix. Replacing it
+            # with the generic line below would drop the only text that says WHICH of the
+            # two sizes in the cell the tool refused to choose between.
+            detail_msg = str(detail.get("msg", "")).removeprefix("Value error, ")
+            message = f"{detail_msg}. Correct it and upload the manifest again."
         else:
             message = (
                 f"{label} is not in a form this tool can read. Correct it and upload "
@@ -220,19 +216,22 @@ def _parse_row(row: int, raw: dict[str, str | None]) -> tuple[ManifestRow | None
         )
         commodity = ""
 
-    abv = _parse_float(values["alcohol_content"])
-    if isinstance(abv, str):
+    # ONE rule for reading a typed alcohol entry, shared with the form and the JSON API
+    # (LP-336). This used to be `_parse_float`, a second implementation that stripped a
+    # trailing "%" and called `float()` — so a manifest rejected `alc. 45% by vol.` and
+    # `90 proof`, which the single-check screen accepted. Two doors into one product
+    # disagreeing about what a valid entry is.
+    abv: float | None = None
+    try:
+        abv = entry.read_alcohol_content(values["alcohol_content"])
+    except entry.EntryError as problem:
         errors.append(
             RowError(
                 row=row,
                 column="alcohol_content",
-                message=(
-                    f"alcohol content reads “{abv}”. Enter a number such as "
-                    f"45, or leave it empty if the label does not state one."
-                ),
+                message=f"{problem}. Correct it and upload the manifest again.",
             )
         )
-        abv = None
 
     is_import = _parse_bool(values["is_import"])
     if is_import is None:

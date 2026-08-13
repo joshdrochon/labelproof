@@ -9,7 +9,9 @@ from __future__ import annotations
 
 from enum import StrEnum
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+from api import entry
 
 
 class Commodity(StrEnum):
@@ -61,6 +63,21 @@ class Application(BaseModel):
     producer_address: str
     country_of_origin: str | None = None
     is_import: bool = False
+
+    # The typed-entry readers live HERE rather than in the form, so every door gets them:
+    # the single-check screen, a batch manifest row, and a direct POST all read an entry
+    # the same way. Putting the leniency in the browser is what let the client file 45.0
+    # for "45% (Front) / 43% (Back)" — a guess the server never saw and could not have
+    # refused (LP-336).
+    @field_validator("alcohol_content", mode="before")
+    @classmethod
+    def _read_alcohol_entry(cls, value: object) -> object:
+        return entry.read_alcohol_content(value) if isinstance(value, str) else value
+
+    @field_validator("net_contents", mode="before")
+    @classmethod
+    def _read_net_contents_entry(cls, value: object) -> object:
+        return entry.check_net_contents(value) if isinstance(value, str) else value
 
 
 class BoundingBox(BaseModel):

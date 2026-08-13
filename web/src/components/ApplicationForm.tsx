@@ -56,12 +56,77 @@ export function draftFromApplication(application: Application): ApplicationDraft
   };
 }
 
-/** Reads the number out of whatever was pasted: `45`, `45.0%`, `45% ABV`, `80 proof`. */
+/**
+ * Reads ONE alcohol content out of a typed entry — the mirror of `api/entry.py`.
+ *
+ * The previous version was `raw.match(/-?\d+(\.\d+)?/)`: first number wins. That is the
+ * right rule for reading a label and the wrong rule for reading a person, and it filed
+ *
+ *     45% BY VOL. (Front label) / 43% BY VOL. (Back label)
+ *
+ * as 45.0 with no message. A silent guess, in the first box on the first screen, in a
+ * tool whose entire argument is that it never guesses.
+ *
+ * Returns `{ value }` when the entry names exactly one figure, `{ problem }` when it
+ * names none or several. The server enforces the same rule and is the authority; this
+ * exists so the agent hears about it before a request goes out, not after.
+ */
+export type EntryReading = { value: number | null; problem?: undefined } | { problem: string };
+
+export function readAlcoholContent(raw: string): EntryReading {
+  const text = raw.trim();
+  if (!text) return { value: null };
+
+  const numbers = (pattern: RegExp) =>
+    [...text.matchAll(pattern)].map((m) => Number.parseFloat((m[1] ?? '').replace(',', '.')));
+
+  const percents = numbers(/(\d{1,3}(?:[.,]\d{1,2})?)\s*(?:%|percent\b)/gi);
+  const proofs = numbers(/(\d{1,3}(?:[.,]\d{1,2})?)\s*(?:proof\b|°)/gi).map((p) => p / 2);
+  // Precedence, not union: `45% Alc./Vol. (90 Proof)` states one value twice.
+  const found = percents.length ? percents : proofs.length ? proofs : numbers(/(\d{1,3}(?:[.,]\d{1,2})?)/g);
+
+  const values = [...new Set(found.filter((n) => Number.isFinite(n)))].sort((a, b) => a - b);
+  const [only] = values;
+  if (only === undefined)
+    return { problem: 'Enter the alcohol content as a number, for example "45".' };
+  if (values.length > 1)
+    return {
+      problem:
+        `This says ${values.join(' and ')}. Enter only the figure the application ` +
+        `declares — this tool will not choose between them.`,
+    };
+  if (only < 0 || only > 100)
+    return { problem: 'Alcohol content is a percentage by volume, between 0 and 100.' };
+  return { value: only };
+}
+
+/** Two different sizes in the SAME unit is ambiguous; `750 mL (25.4 fl oz)` is not. */
+export function readNetContents(raw: string): { problem?: string } {
+  const byUnit = new Map<string, Set<number>>();
+  const pattern =
+    /(\d{1,5}(?:[.,]\d{1,3})?)\s*(ml|milliliters?|millilitres?|cl|centiliters?|centilitres?|l|liters?|litres?|fl\.?\s*oz\.?|fluid\s+ounces?|oz\.?)\b/gi;
+  for (const match of raw.matchAll(pattern)) {
+    const [, rawAmount = '', rawUnit = ''] = match;
+    const unit = rawUnit.replace(/[.\s]/g, '').toLowerCase().replace(/s$/, '');
+    const amount = Number.parseFloat(rawAmount.replace(',', '.'));
+    if (!byUnit.has(unit)) byUnit.set(unit, new Set());
+    byUnit.get(unit)!.add(amount);
+  }
+  for (const [unit, amounts] of byUnit) {
+    if (amounts.size > 1)
+      return {
+        problem:
+          `This says ${[...amounts].sort((a, b) => a - b).join(' and ')} ${unit}. Enter ` +
+          `only the size the application declares.`,
+      };
+  }
+  return {};
+}
+
+/** Back-compatible reader for callers that only need the number. */
 export function parseAlcoholContent(raw: string): number | null {
-  const match = raw.match(/-?\d+(\.\d+)?/);
-  if (!match) return null;
-  const value = Number.parseFloat(match[0]);
-  return Number.isFinite(value) ? value : null;
+  const reading = readAlcoholContent(raw);
+  return 'problem' in reading ? null : reading.value;
 }
 
 export function toApplication(draft: ApplicationDraft): Application {
@@ -94,11 +159,13 @@ export function validateDraft(draft: ApplicationDraft, imageCount: number): Draf
     problems.producer_address = 'Enter the producer city and state.';
   if (draft.is_import && !draft.country_of_origin.trim())
     problems.country_of_origin = 'Imports need a country of origin.';
-  if (
-    draft.alcohol_content.trim() !== '' &&
-    parseAlcoholContent(draft.alcohol_content) === null
-  ) {
-    problems.alcohol_content = 'Enter the alcohol content as a number, for example "45".';
+  const alcohol = readAlcoholContent(draft.alcohol_content);
+  if ('problem' in alcohol) problems.alcohol_content = alcohol.problem;
+  // Only when the box has something in it. An empty net contents is already caught above
+  // as required, and reporting both would put two sentences under one box.
+  if (draft.net_contents.trim()) {
+    const size = readNetContents(draft.net_contents);
+    if (size.problem) problems.net_contents = size.problem;
   }
   if (imageCount === 0) problems.images = 'Add at least one picture of the label.';
   return problems;

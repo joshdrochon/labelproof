@@ -106,7 +106,13 @@ def _validation_message(exc: ValidationError) -> str:
         location = str(error["loc"][0]) if error["loc"] else ""
         label = _FIELD_LABELS.get(location, location.replace("_", " ") or "application")
         kind = error["type"]
-        if kind == "missing":
+        if kind == "value_error":
+            # `api/entry.py` already wrote a sentence for this one, naming the field and
+            # what to do. Restating it as "alcohol content is not in a form this tool can
+            # read" would throw away the only message that tells the agent which of the
+            # two numbers they typed the tool refused to choose between.
+            problems.append(str(error.get("msg", "")).removeprefix("Value error, "))
+        elif kind == "missing":
             problems.append(f"{label} is required")
         elif kind == "enum":
             problems.append(f"{label} must be one of spirits, wine or malt")
