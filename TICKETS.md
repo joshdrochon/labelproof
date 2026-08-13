@@ -357,7 +357,7 @@ in LP-237, with fixtures across LP-068, 163, 195–198, 216, 226–229.
 - [x] **LP-239** E2E: unreadable path (ENG-2)
 - [x] **LP-240** E2E: provider-down degradation — TC-21 (ENG-2)
 - [x] **LP-241** E2E: batch flow consolidated in CI (with LP-181) (ENG-2)
-- [ ] **LP-242** CI stages: lint → typecheck → unit → integration → eval → E2E (ENG-1)
+- [x] **LP-242** CI stages: lint → typecheck → unit → integration → eval → E2E (ENG-1)
 - [ ] **LP-243** Red CI blocks deploy — verified with a deliberately failing PR (ENG-1)
 - [ ] **LP-244** Auto-rollback drill: forced bad deploy rolls itself back; output recorded (ENG-1)
 - [x] **LP-245** Coverage report on the rules engine; floor enforced on comparators (ENG-8)
@@ -402,14 +402,14 @@ in LP-237, with fixtures across LP-068, 163, 195–198, 216, 226–229.
 ## F9 · Performance verification
 
 - [x] **LP-277** p95 timed run (20×) on the deployed URL; table committed — **the stopwatch wins** (PERF-1)
-- [ ] **LP-278** Stage-breakdown analysis; attack the slowest stage first (OPS-1)
+- [x] **LP-278** Stage-breakdown analysis; attack the slowest stage first (OPS-1)
 - [x] **LP-279** Client-side downscale before upload (payload is the cheapest latency) (PERF-1)
 - [x] **LP-280** Parallel extraction when >1 image (front/back concurrently) (PERF-1)
 - [x] **LP-281** 300-item batch, live: wall-clock + throttle behavior recorded (PERF-4)
-- [ ] **LP-282** Verify-during-batch live check: priority lane holds (PERF-5)
+- [x] **LP-282** Verify-during-batch live check: priority lane holds (PERF-5)
 - [ ] **LP-283** Keep-warm verified across 48h of first-hit samples (PERF-6)
-- [ ] **LP-284** Latency regression gate in CI (fixture ceilings) (OPS-6)
-- [ ] **LP-285** UI-time vs server-time honesty check on production (PERF-2)
+- [x] **LP-284** Latency regression gate in CI (fixture ceilings) (OPS-6)
+- [x] **LP-285** UI-time vs server-time honesty check on production (PERF-2)
 - [x] **LP-286** README performance section: numbers, method, trade-offs (DEL-6)
 
 ## F10 · Accuracy report
@@ -440,7 +440,7 @@ in LP-237, with fixtures across LP-068, 163, 195–198, 216, 226–229.
 - [x] **LP-304** `CHANGES.md` final: complete build log, run/test/rollback current (ENG-5)
 - [ ] **LP-305** Repo hygiene: history scanned for secrets, structure clean (SEC-6)
 - [ ] **LP-306** Fresh-clone test on a clean machine; README gaps fixed (DEL-3)
-- [ ] **LP-307** Deployed URL final smoke + keep-warm confirmed (DEL-1)
+- [x] **LP-307** Deployed URL final smoke + keep-warm confirmed (DEL-1)
 - [x] **LP-308** Sample label set downloadable inside the app — graders test in seconds (DEL-5)
 - [ ] **LP-310** PRD final sync: shipped reality matches the doc; deltas listed as trade-offs (DEL-7)
 - [ ] **LP-311** TICKETS final sync: board true, counts updated (DEL-7)

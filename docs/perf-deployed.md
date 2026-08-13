@@ -56,3 +56,68 @@ Clock check: the server's reported total is below the client stopwatch on every 
 | 20 | warm | 200 | 8693 | 8519 | 174 | 567 | 7946 | 1 | ready_to_approve | `req_3fea363292cf4cf6` |
 
 Cost across 20 priced run(s): $0.6266 total, $0.0313 mean.
+
+
+---
+
+# Stage breakdown, the priority lane, and the honesty check
+
+Measured on <https://labelproof.fly.dev> the same day as the table above, warm, two images
+per request.
+
+## Where the time goes (OPS-1, LP-278)
+
+| Stage | ms | share |
+|---|--:|--:|
+| extract (the model) | 6,619–7,056 | **91%** |
+| preprocess | 570–597 | 8% |
+| quality | 312–329 | 4% |
+| ingest | 255–269 | 3% |
+| compare (the rules engine) | 1 | 0% |
+| adjudicate | not run | — |
+
+**The slowest stage is the model call and there is no second place.** Everything this
+project wrote comes to roughly 1.1 seconds against a 7-second extraction, so the
+instruction OPS-1 gives — attack the slowest stage first — points at the model, not at the
+code. That is what the model sweep in the README is: the only lever on this number is
+which model answers, and the trade it costs is argued there.
+
+Attacking the second-slowest stage is worth naming so it can be dismissed with a number.
+`preprocess` is ~580ms for two images and it is mostly the downscale to 2,576px, which is
+the resolution the government warning needs to be legible. Halving it would save ~290ms of
+a 7,400ms request — under 4% — in exchange for the tier the safety-critical field depends
+on. Not a trade this product makes.
+
+`compare` is 1ms. The entire rules engine — seven fields, the commodity matrix, the
+standards-of-fill table, every warning check in 27 CFR 16.21 and 16.22 — costs a
+millisecond. That is the argument for deterministic rules stated as a measurement.
+
+## Verify Now during a running batch (PERF-5, LP-282)
+
+A 22-application batch was submitted and left running; three single verifications were
+issued against the same machine while it worked.
+
+| | Idle | During a 22-item batch |
+|---|--:|--:|
+| Wall clock | 7,386–7,844 ms | 7,119–7,800 ms |
+
+**Indistinguishable.** The priority lane holds: `api/main.py` gives interactive
+verifications a reserved slot that batch workers never acquire, so an agent checking one
+label does not queue behind three hundred. The batch finished 17 of 22 during the
+measurement and lost nothing.
+
+## The screen never reports less time than passed (PERF-2, LP-285)
+
+| Run | Client stopwatch | Server `timings_ms.total` | Gap |
+|--:|--:|--:|--:|
+| 1 | 7,470 | 7,292 | 178 |
+| 2 | 7,669 | 7,484 | 185 |
+| 3 | 7,386 | 7,208 | 178 |
+| 4 | 7,844 | 7,658 | 186 |
+| 5 | 7,605 | 7,399 | 206 |
+
+The client number is larger on every run, by 178–206ms — upload, network and
+serialisation, the part the server cannot see. This is why the result card shows the
+CLIENT's measurement: a screen that displayed the server's 7,292 while the agent waited
+7,470 would be shaving its own homework, and the stopwatch is the thing a stakeholder will
+actually hold.
