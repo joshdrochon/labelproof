@@ -10,7 +10,7 @@ tracker if one is used.
 | **Source brief** | Take-home docx, sha `7f50443d68066298…` |
 | **MVP** | Day 2 EOD — §M tickets |
 | **Final** | Day 7 noon — §F tickets |
-| **Ticket prefix** | `LP-001` … `LP-332` |
+| **Ticket prefix** | `LP-001` … `LP-334` |
 | **State** | **317 of 330 closed.** Derived from `Closes:` trailers by `scripts/sync_board.py` and a post-commit hook — never hand-edited. A close with no commit behind it is a false close. |
 | **What remains** | Audited in [`docs/prd-audit.md`](docs/prd-audit.md). The open items are, in order of count: human testing that needs people, two deploy drills, and measurements that need scale. |
 
@@ -256,6 +256,7 @@ in LP-237, with fixtures across LP-068, 163, 195–198, 216, 226–229.
 - [x] **LP-155** Per-item isolation: one bad image fails one item, never the batch — TC-20 (BATCH-6)
 - [x] **LP-156** Per-item bounded retries, then failed-with-reason (BATCH-8)
 - [x] **LP-157** Retry endpoint: failed items only, no reprocessing the finished 290 (BATCH-8)
+- [ ] **LP-334** Batch wiring is check-then-assign and runs in a threadpool: two cold-start requests could each build a store (double `recover()`) and a pool (double the provider ceiling) (BATCH-6)
 - [x] **LP-158** Job survives service restart (state persisted) (BATCH-6)
 - [x] **LP-159** Progressive results: completed items pollable/streamable immediately (BATCH-5)
 - [x] **LP-160** Job status: counts by state + ETA (BATCH-4)
@@ -389,6 +390,7 @@ in LP-237, with fixtures across LP-068, 163, 195–198, 216, 226–229.
 - [x] **LP-263** Automated a11y audit (axe) on both modes; criticals fixed (UX-4)
 - [ ] **LP-264** Keyboard-only full walkthrough, recorded (UX-4)
 - [ ] **LP-265** Screen-reader pass: labels, roles, live regions (UX-4)
+- [ ] **LP-333** Enforce both UX-3 floors: type gate claimed 16px but permitted 15px, and nothing checked the 44px target rule at all (UX-3)
 - [x] **LP-266** Contrast verification, all states incl. verdict chips (UX-3)
 - [x] **LP-267** Focus order + visible-focus audit (UX-4)
 - [x] **LP-268** 200% zoom usable (UX-4)

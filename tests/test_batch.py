@@ -24,7 +24,9 @@ import tracemalloc
 import zipfile
 from collections.abc import Iterator, Sequence
 from pathlib import Path
-from typing import Any
+from types import SimpleNamespace
+from typing import Any, cast
+from unittest import mock
 
 import numpy as np
 import pytest
@@ -35,6 +37,7 @@ from api import logging as applog
 from api import main as main_mod
 from api.batch import manifest as manifest_mod
 from api.batch import store as store_mod
+from api.batch import worker as pool_mod
 from api.batch.models import (
     BatchItem,
     ItemFailure,
@@ -2106,3 +2109,66 @@ def test_the_export_route_applies_the_guard() -> None:
     body = client.get(f"/batch/{job_id}/export.csv").text
     assert "=cmd" in body, "the value should still be readable, just not executable"
     assert ",=cmd" not in body and body.count("'=cmd") == 1, body[:400]
+
+
+# --- cold-start wiring (LP-334) -------------------------------------------------------
+
+
+def test_a_cold_start_under_load_builds_exactly_one_store_and_one_pool(
+    tmp_path: Path,
+) -> None:
+    """LP-334. `get_store` and `get_pool` were check-then-assign, and they are reached
+    from a THREAD POOL — both are sync dependencies, so Starlette hands each to a worker
+    thread and two requests arriving together on a cold machine ran them concurrently.
+
+    The losing thread's objects were not merely wasted. Two stores each ran `recover()`,
+    so a job left `processing` by a dead process could be requeued twice; two pools meant
+    two sets of worker threads against one SQLite file and two independent
+    `ProviderBudget`s, quietly doubling the concurrency ceiling the pool exists to
+    enforce; and the orphaned pool kept its threads with nothing to shut them down.
+
+    Counting constructions rather than asserting `is` identity: identity only shows the
+    survivor, and the bug is the object that was built and thrown away.
+    """
+    built: list[str] = []
+    real_store = store_mod.BatchStore
+    real_pool = pool_mod.WorkerPool
+
+    class CountingStore(real_store):  # type: ignore[misc, valid-type]
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            built.append("store")
+            super().__init__(*args, **kwargs)
+
+    class CountingPool(real_pool):  # type: ignore[misc, valid-type]
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            built.append("pool")
+            super().__init__(*args, **kwargs)
+
+    app = create_app(config=make_config(tmp_path))
+    request = SimpleNamespace(app=app)
+
+    with (
+        mock.patch.object(batch_routes, "BatchStore", CountingStore),
+        mock.patch.object(batch_routes, "WorkerPool", CountingPool),
+    ):
+        # A barrier, so the threads are genuinely inside the window rather than merely
+        # started at roughly the same time. Without it this test passes on a bug.
+        gate = threading.Barrier(8)
+
+        def cold_hit() -> None:
+            gate.wait()
+            batch_routes.get_pool(cast(Any, request))
+
+        threads = [threading.Thread(target=cold_hit) for _ in range(8)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=10)
+
+    assert [t.is_alive() for t in threads] == [False] * 8, (
+        "a wiring thread never finished — the lock is likely being taken twice on one "
+        "thread. `_WIRING` is a Lock, not an RLock, and `get_pool` must resolve the "
+        "store BEFORE it acquires."
+    )
+    assert built.count("store") == 1, f"built {built.count('store')} stores: {built}"
+    assert built.count("pool") == 1, f"built {built.count('pool')} pools: {built}"

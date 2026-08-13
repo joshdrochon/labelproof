@@ -173,7 +173,9 @@ LIMITATIONS: list[Limitation] = [
         ),
         why=(
             "Real optics differ from simulated ones, and this is the most likely place "
-            "for the pipeline to be wrong. Tier B has not been captured yet."
+            "for the pipeline to be wrong. Tier B has since been captured — three real "
+            "bottles, 21 scored rows, 15 correct — and it found exactly this class of "
+            "defect: see docs/accuracy.md."
         ),
         evidence="scripts/calibrate_quality.py, api/rules/thresholds.py",
     ),

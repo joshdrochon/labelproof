@@ -17,8 +17,8 @@ type, and between them they show every verdict this tool produces.
 | Accuracy | [`accuracy.md`](accuracy.md) — Tier A 175/175, Tier B 15/21 (71.4%) on real photographs, gap published |
 | Batch | 22 applications in 42s, 0 failures, measured on the deployed URL |
 
-**The honest limit:** Tier B is six photographs and three scored rows. 71.4% on real
-bottles is the number to argue with, not the 100%.
+**The honest limit:** Tier B is three labels across six photographs — 21 scored rows.
+71.4% on real bottles is the number to argue with, not the 100%.
 
 ## 2. Verification quality — does it catch the right things?
 
@@ -49,12 +49,12 @@ toward a false pass, on the one field with a zero-false-pass requirement. We too
 
 | | |
 |---|---|
-| Gates | `ruff`, `mypy --strict` over `api/`, 3582 tests, the accuracy eval — all in CI |
+| Gates | `ruff`, `mypy --strict` over `api/`, 3585 tests, the accuracy eval — all in CI |
 | Offline | CI runs the suite inside `unshare --net`, so "no network" is demonstrated, not claimed |
 | Determinism | Tier A fixtures are byte-stable and generated from committed specs |
 | Structure | `api/rules/` is the regulated logic and imports nothing from the web layer; `api/provider/` is the only place an AI call happens |
 
-The suite is large (3582) and the concentration is deliberate: 560 in `test_warning.py`,
+The suite is large (3585) and the concentration is deliberate: 560 in `test_warning.py`,
 mostly four exhaustive sweeps over the canonical statement. That is a safety property
 proved by enumeration rather than by sampling.
 

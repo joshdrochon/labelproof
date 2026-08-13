@@ -1073,13 +1073,85 @@ def test_body_type_never_drops_below_sixteen_pixels() -> None:
     """UX-3's floor. Quiet is made with weight and spacing, never by shrinking type.
 
     The users include agents over fifty reading 4-point warning text off a bottle all
-    day. `0.9375rem` is 15px and would be a regression; the stylesheet's own header says
-    16px is the floor "including on the rows this stylesheet is deliberately quieting".
+    day. UX-3 reads "≥16px" with no carve-out, and the stylesheet's own header says the
+    floor holds "including on the rows this stylesheet is deliberately quieting".
+
+    **This gate used to permit 15px while its docstring claimed 16.** It allowed anything
+    at or above `0.9375rem`, and fifteen declarations sat under the stated floor —
+    including the regulatory citation on a finding and the column headings of the
+    checklist itself. A gate that enforces a looser rule than the one it describes is
+    worse than no gate: the claim reads as tested. The floor is now the number in the
+    sentence, so a carve-out has to be argued for in the PRD rather than added quietly
+    in a stylesheet.
     """
-    too_small = re.findall(r"font-size:\s*(0\.\d+)rem", _STYLES.read_text())
-    offenders = [value for value in too_small if float(value) < 0.9375]
+    too_small = re.findall(r"font-size:\s*(0?\.\d+)rem", _STYLES.read_text())
+    offenders = [value for value in too_small if float(value) < 1.0]
 
     assert offenders == [], (
-        f"font sizes below 15px found: {sorted(set(offenders))}rem. The floor is 1rem for "
-        f"body text; only chips and labels may go to 0.9375rem."
+        f"font sizes below 16px found: {sorted(set(offenders))}rem. UX-3's floor is 1rem "
+        f"everywhere — quiet a row with weight, colour and spacing, never with type size."
+    )
+
+
+#: `cursor: pointer` is this stylesheet's own mark for "a person clicks this". Four rules
+#: carry it, and it is a better handle than the tag name — half these controls are
+#: `<button>` styled to look like a link, and a selector list would drift from the markup.
+_CLICKABLE = re.compile(r"(?<=\n)(\.[^{}\n]*?)\{([^{}]*cursor:\s*pointer[^{}]*)\}")
+_MIN_TARGET_REM = 2.75  # 44px
+
+
+def _hit_area_rem(styles: str, selector: str, block: str) -> float:
+    """The tallest thing a finger can land on for this rule, in rem.
+
+    Either the box itself declares `min-height`, or an `::after` extends the target past
+    the drawn box — which is what the evidence tags do, because a 44px chip floating over
+    a photograph covers the region it is labelling.
+    """
+    heights = [float(v) for v in re.findall(r"min-height:\s*([\d.]+)rem", block)]
+
+    base = selector.strip().rstrip(",").split(",")[0].split("[")[0].split(":")[0].strip()
+    pseudo = re.search(rf"{re.escape(base)}::after\s*\{{([^{{}}]*)\}}", styles)
+    if pseudo:
+        heights += [float(v) for v in re.findall(r"height:\s*([\d.]+)rem", pseudo.group(1))]
+
+    return max(heights) if heights else 0.0
+
+
+def test_every_control_a_person_clicks_is_at_least_forty_four_pixels() -> None:
+    """UX-3's other floor — and until now, the untested half of it.
+
+    The stylesheet's header has said "click targets never drop below 44px" since the
+    first commit, and nothing checked it. `.evidence__tag` — the numbered chip that ties
+    a finding to a region on the photograph, and the control most likely to be tapped on
+    a tablet — measured about 27px tall. A claim of Section 508 conformance that no test
+    exercises is a claim about intent.
+
+    The floor counts the TARGET, not the drawn box: an `::after` that extends the hit
+    area without growing the chip is a pass, because that is what a finger lands on.
+    """
+    styles = _STYLES.read_text()
+
+    too_small = {
+        selector.strip(): round(reach * 16)
+        for selector, block in _CLICKABLE.findall(styles)
+        if (reach := _hit_area_rem(styles, selector, block)) < _MIN_TARGET_REM
+    }
+
+    assert too_small == {}, (
+        f"click targets below 44px: {too_small} (px). UX-3 binds this tool; give the rule "
+        f"a min-height, or an ::after that carries the hit area when the drawn box has to "
+        f"stay small."
+    )
+
+
+def test_the_click_target_gate_is_actually_looking_at_something() -> None:
+    """A gate over an empty set passes forever. This is the same guard the eval harness
+    puts on its zero-false-pass check, for the same reason: `_CLICKABLE` is a regex over
+    a hand-written stylesheet, and the way it fails is by matching nothing at all.
+    """
+    found = _CLICKABLE.findall(_STYLES.read_text())
+
+    assert len(found) >= 4, (
+        f"the clickable-rule regex matched {len(found)} rules. It matched 4 when written; "
+        f"if the stylesheet was reformatted, fix the pattern rather than the count."
     )

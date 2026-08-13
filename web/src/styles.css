@@ -142,7 +142,7 @@ p {
   display: grid;
   place-items: center;
   font-family: var(--font-display);
-  font-size: 0.95rem;
+  font-size: 1rem;
   letter-spacing: 0.06em;
   color: #e9d9a6;
   flex: none;
@@ -277,7 +277,7 @@ p {
 
 kbd {
   font-family: var(--font-mono);
-  font-size: 0.95rem;
+  font-size: 1rem;
   border: 1px solid var(--rule-strong);
   border-bottom-width: 2px;
   border-radius: var(--radius);
@@ -706,7 +706,7 @@ kbd {
 .checked__reference-label {
   text-transform: uppercase;
   letter-spacing: 0.07em;
-  font-size: 0.95rem;
+  font-size: 1rem;
 }
 
 .checked__reference-value {
@@ -890,21 +890,36 @@ kbd {
 
 .evidence__tag {
   position: absolute;
-  transform: translate(-0.35rem, -1.9rem);
+  transform: translate(-0.35rem, -2.1rem);
   display: inline-flex;
   align-items: center;
   gap: 0.35rem;
   font: inherit;
-  font-size: 0.95rem;
+  font-size: 1rem;
   font-weight: 600;
   line-height: 1.1;
-  padding: 0.2rem 0.45rem;
+  padding: 0.35rem 0.5rem;
   background: var(--surface);
   color: var(--ink);
   border: 2px solid var(--slate);
   border-radius: var(--radius);
   cursor: pointer;
   max-width: 12rem;
+}
+
+/* UX-3 asks for 44px of TARGET, and a 44px-tall chip floating over a photograph covers
+   the very thing it is pointing at. So the drawn box stays the size of its words and an
+   invisible pseudo-element carries the rest of the hit area, centred on the chip. It is
+   absolutely positioned, so it costs no layout and moves with the tag. */
+.evidence__tag::after {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: 100%;
+  min-width: 2.75rem;
+  height: 2.75rem;
 }
 
 .evidence__tag[data-attention='true'] {
@@ -920,12 +935,12 @@ kbd {
 .evidence__tag-number {
   display: inline-grid;
   place-items: center;
-  width: 1.35rem;
-  height: 1.35rem;
+  width: 1.6rem;
+  height: 1.6rem;
   border-radius: 50%;
   background: var(--serious);
   color: #fff;
-  font-size: 0.9375rem;
+  font-size: 1rem;
   flex: none;
 }
 
@@ -966,7 +981,7 @@ kbd {
 .checklist thead th {
   text-align: left;
   font-family: var(--font-text);
-  font-size: 0.95rem;
+  font-size: 1rem;
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.07em;
@@ -1212,7 +1227,7 @@ kbd {
 
 .detail__heading {
   font-family: var(--font-text);
-  font-size: 0.95rem;
+  font-size: 1rem;
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.07em;
@@ -1252,7 +1267,7 @@ kbd {
 .detail__citation {
   display: block;
   font-family: var(--font-mono);
-  font-size: 0.95rem;
+  font-size: 1rem;
   color: var(--ink-soft);
   margin-top: 0.15rem;
 }
@@ -1260,7 +1275,7 @@ kbd {
 .detail__reference {
   margin-top: 0.85rem;
   font-family: var(--font-mono);
-  font-size: 0.95rem;
+  font-size: 1rem;
   color: var(--ink-soft);
 }
 
@@ -1280,7 +1295,7 @@ kbd {
 
 .detail__decision-label {
   display: block;
-  font-size: 0.95rem;
+  font-size: 1rem;
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.07em;
@@ -1320,7 +1335,7 @@ kbd {
 
 .diff__caption {
   display: block;
-  font-size: 0.95rem;
+  font-size: 1rem;
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.07em;
@@ -1451,7 +1466,7 @@ kbd {
 
   .cell__mobile-caption {
     display: block;
-    font-size: 0.95rem;
+    font-size: 1rem;
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.07em;
@@ -1715,7 +1730,7 @@ kbd {
 }
 
 .triage thead th {
-  font-size: 0.9375rem;
+  font-size: 1rem;
   text-transform: uppercase;
   letter-spacing: 0.04em;
   color: var(--ink-faint);
@@ -1935,7 +1950,7 @@ kbd {
   background: var(--navy);
   color: var(--surface);
   font-family: var(--font-text);
-  font-size: 0.9375rem;
+  font-size: 1rem;
   font-weight: 700;
   letter-spacing: 0.02em;
   vertical-align: middle;
@@ -1997,7 +2012,7 @@ kbd {
 
 .masthead__disclaimer {
   margin: 0.15rem 0 0;
-  font-size: 0.9375rem;
+  font-size: 1rem;
   color: var(--ink-faint);
 }
 

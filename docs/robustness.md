@@ -72,7 +72,7 @@ costs nothing. Everything in this section executes on a real request.
 
 **Not handled.** They are calibrated against generated labels, not photographs. Several 'clean bands' are wide because the set is coarse, which is an absence of evidence rather than evidence of safety.
 
-**Why.** Real optics differ from simulated ones, and this is the most likely place for the pipeline to be wrong. Tier B has not been captured yet.
+**Why.** Real optics differ from simulated ones, and this is the most likely place for the pipeline to be wrong. Tier B has since been captured — three real bottles, 21 scored rows, 15 correct — and it found exactly this class of defect: see docs/accuracy.md.
 
 *Evidence:* `scripts/calibrate_quality.py, api/rules/thresholds.py`
 

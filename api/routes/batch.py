@@ -41,6 +41,7 @@ from __future__ import annotations
 import contextlib
 import csv
 import io
+import threading
 import zipfile
 from collections.abc import Awaitable, Callable, Sequence
 from pathlib import Path
@@ -98,33 +99,72 @@ _MANIFEST_SUFFIXES = (".csv", ".tsv", ".txt")
 # --- wiring ---------------------------------------------------------------------------
 
 
+#: Guards first use of the store and the pool. Both were plain check-then-assign, and
+#: both are reached from a THREAD POOL — these are sync dependencies, so Starlette hands
+#: each one to a worker thread and two requests arriving together on a cold machine ran
+#: them concurrently. The losing thread's objects were not merely wasted:
+#:
+#:   - two `BatchStore`s each ran `recover()`, so a job left `processing` by the previous
+#:     process could be requeued twice and counted twice in `batch_recovered`;
+#:   - two `WorkerPool`s meant two sets of worker threads against one SQLite file and two
+#:     independent `ProviderBudget`s, so the concurrency ceiling this pool exists to
+#:     enforce was quietly doubled;
+#:   - the orphaned pool kept running, holding threads nothing would ever shut down.
+#:
+#: One lock, double-checked inside it, so the fast path after startup is still a bare
+#: `getattr`. Deliberately module-level rather than per-app: `app.state` is the thing
+#: being raced, so the guard cannot live there.
+_WIRING = threading.Lock()
+
+
 def get_store(request: Request) -> BatchStore:
     """One store per process, built on first use under `Config.storage_dir`."""
     store: BatchStore | None = getattr(request.app.state, "batch_store", None)
-    if store is None:
-        config = get_config(request)
-        store = BatchStore(Path(config.storage_dir))
-        # Anything left `processing` belongs to a process that no longer exists (BATCH-6).
-        recovered = store.recover()
-        if recovered:
-            applog.log("batch_recovered", count=recovered)
-        request.app.state.batch_store = store
-    return store
+    if store is not None:
+        return store
+
+    with _WIRING:
+        # Re-read inside the lock. Another thread may have finished between the check
+        # above and acquiring here, and building a second store is the whole bug.
+        store = getattr(request.app.state, "batch_store", None)
+        if store is None:
+            config = get_config(request)
+            store = BatchStore(Path(config.storage_dir))
+            # Anything left `processing` belongs to a process that no longer exists
+            # (BATCH-6).
+            recovered = store.recover()
+            if recovered:
+                applog.log("batch_recovered", count=recovered)
+            request.app.state.batch_store = store
+        return store
 
 
 def get_pool(request: Request) -> WorkerPool:
     pool: WorkerPool | None = getattr(request.app.state, "batch_pool", None)
-    if pool is None:
+    if pool is not None:
+        return pool
+
+    # Resolved BEFORE the lock is taken. `_WIRING` is a plain `Lock`, not an `RLock`, so
+    # calling `get_store` from inside the block below would deadlock this thread against
+    # itself. Taking the two in a fixed order — store, then pool — is also what keeps
+    # this from being a lock-ordering problem later.
+    store = get_store(request)
+
+    with _WIRING:
+        built: WorkerPool | None = getattr(request.app.state, "batch_pool", None)
+        if built is not None:
+            return built
+
         config = get_config(request)
         budget: ProviderBudget | None = getattr(request.app.state, "provider_budget", None)
         if budget is None:
             budget = ProviderBudget(config.batch_workers)
             request.app.state.provider_budget = budget
-        pool = WorkerPool(
-            get_store(request), config, _provider_factory(request), budget=budget
-        )
+        # `get_store` takes the same non-reentrant lock, so it is called with the store
+        # resolved BEFORE this block rather than from inside it.
+        pool = WorkerPool(store, config, _provider_factory(request), budget=budget)
         request.app.state.batch_pool = pool
-    return pool
+        return pool
 
 
 def _provider_factory(request: Request) -> Callable[[Sequence[str]], ExtractionProvider]:

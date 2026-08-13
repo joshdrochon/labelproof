@@ -45,7 +45,7 @@ Nothing below needs an API key. The suite and the demo both run offline.
 git clone <this repo> && cd labelproof
 python3.14 -m venv .venv && .venv/bin/pip install -e ".[dev]"
 
-.venv/bin/python -m pytest                        # 3582 tests, offline, ~4 min
+.venv/bin/python -m pytest                        # 3585 tests, offline, ~5 min
 .venv/bin/python -m eval.run                      # the accuracy gate
 LABELPROOF_FAKE_PROVIDER=1 .venv/bin/uvicorn api.main:app --reload
 ```
@@ -292,7 +292,10 @@ here.
   published in [`docs/accuracy.md`](docs/accuracy.md) rather than averaged away.
 - **Accessibility is audited automatically and never by a person.** axe runs in CI over
   all five screens with zero violations and nothing disabled; contrast is gated as data
-  (21 pairs, worst 5.41:1 against a 4.5 floor) and so is the type-size floor. What has NOT
+  (21 pairs, worst 5.41:1 against a 4.5 floor), and so are both of UX-3's floors — 16px
+  of type and 44px of click target. Those two gates are newer than the claim they check:
+  the type gate shipped enforcing 15px while its own docstring said 16, and nothing
+  checked the 44px rule at all until the evidence chips were found at 27px. What has NOT
   happened is the half a tool cannot do: **no keyboard-only walkthrough, no screen-reader
   pass**. An automated audit covers perhaps half of WCAG, and reading a green run as a
   pass is the actual risk — see [`docs/prd-audit.md`](docs/prd-audit.md).
