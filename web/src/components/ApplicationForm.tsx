@@ -207,11 +207,13 @@ function TextField({
       <label className="field__label" htmlFor={id}>
         {label}
       </label>
-      {hint ? (
-        <span className="field__hint" id={hintId}>
-          {hint}
-        </span>
-      ) : null}
+      {/* ALWAYS rendered, empty or not. The row slots below are a CSS subgrid, and a slot
+          that disappears when a field has no hint is a slot the neighbouring field cannot
+          line up against — which is why "Alcohol content" (two-line hint) and "Net
+          contents" (one-line hint) had their inputs at different heights. */}
+      <span className="field__hint" id={hintId} aria-hidden={hint ? undefined : true}>
+        {hint}
+      </span>
       <input
         className="field__input"
         id={id}
@@ -225,11 +227,12 @@ function TextField({
         aria-invalid={problem ? true : undefined}
         onChange={(event) => onChange(event.target.value)}
       />
-      {problem ? (
-        <span className="field__problem" id={problemId}>
-          {problem}
-        </span>
-      ) : null}
+      {/* Same reasoning, and it is the one the user asked for by name: when one field in a
+          row shows an error and its neighbour does not, both must stay aligned. The slot
+          is always here; only its contents change. */}
+      <span className="field__problem" id={problemId} aria-hidden={problem ? undefined : true}>
+        {problem}
+      </span>
     </div>
   );
 }

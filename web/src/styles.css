@@ -180,7 +180,22 @@ p {
   flex: none;
   /* Optical, not geometric: aligns the seal to the product name's cap height rather than
      to the top of its line box. */
-  margin-top: 0.125rem;
+  margin-top: 0.25rem;
+}
+
+/* Narrow screens: the disclaimer wraps under the titles rather than crushing them into
+   two words a line. `flex-wrap` plus a full-width basis is enough — no second rule set. */
+@media (max-width: 48rem) {
+  .masthead__inner {
+    flex-wrap: wrap;
+  }
+
+  .masthead__disclaimer {
+    flex-basis: 100%;
+    margin: 0.25rem 0 0;
+    text-align: left;
+    max-width: none;
+  }
 }
 
 .masthead__product {
@@ -423,7 +438,10 @@ kbd {
   padding: 0;
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 1rem;
+  /* Row gap is 0 here on purpose — the separation between form rows is carried by the
+     error slot's margin below, because these rows are shared by a subgrid. */
+  column-gap: 1rem;
+  row-gap: 0;
 }
 
 .form__legend,
@@ -437,14 +455,41 @@ kbd {
   margin: 0 0 1rem;
 }
 
+/* SUBGRID, so a row's four parts — label, hint, input, error — line up across both
+   columns no matter how tall any one of them is. Before this each field was its own
+   flex column, so "Alcohol content" with a two-line hint pushed its input 24px below
+   "Net contents" with a one-line hint, and an error under one field shoved that field's
+   input out of line with its neighbour's. The slots are always present in the markup;
+   only their contents change. */
 .field {
-  display: flex;
-  flex-direction: column;
-  gap: 0.25rem;
+  display: grid;
+  grid-template-rows: subgrid;
+  grid-row: span 4;
+  row-gap: 0.25rem;
+}
+
+/* Firefox 70 and Safari 15 and older. They get the previous behaviour rather than a
+   broken one: fields stack, rows may not align, nothing overlaps. */
+@supports not (grid-template-rows: subgrid) {
+  .form {
+    row-gap: 1rem;
+  }
+
+  .field {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+  }
 }
 
 .field--wide {
   grid-column: 1 / -1;
+}
+
+/* The error slot is the last row of every field, so its margin is what separates one
+   form row from the next. Empty slots collapse to nothing and still carry it. */
+.field__problem {
+  margin-bottom: 0.75rem;
 }
 
 .field__label {
@@ -474,8 +519,26 @@ kbd {
   border-width: 2px;
 }
 
+/* `appearance: none` plus our own chevron, because the native caret sat hard against
+   the right frame with no room to breathe and its position is not controllable
+   otherwise. The SVG is inline so it costs no request and survives the CSP. */
 .field__select {
-  background: var(--surface);
+  appearance: none;
+  background-color: var(--surface);
+  background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='9' viewBox='0 0 14 9'%3E%3Cpath d='M1 1l6 6 6-6' fill='none' stroke='%2355514a' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 1rem center;
+  padding-right: 2.75rem;
+}
+
+/* The chevron is decoration; the control is still a native select, so forced-colours
+   users get their own. */
+@media (forced-colors: active) {
+  .field__select {
+    appearance: auto;
+    background-image: none;
+    padding-right: 1rem;
+  }
 }
 
 .field__problem {
@@ -493,8 +556,18 @@ kbd {
 }
 
 .field__checkbox input {
-  width: 1.4rem;
-  height: 1.4rem;
+  width: 1.5rem;
+  height: 1.5rem;
+}
+
+/* UX-3 wants 44px of target. The box itself stays 24px — a 44px checkbox looks like a
+   mistake — so the LABEL carries the height, and clicking the words toggles it, which is
+   what the `for` attribute has always meant. */
+.field__checkbox {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-height: 2.75rem;
 }
 
 /* -------------------------------------------------------------- dropzone ------ */
@@ -2081,9 +2154,19 @@ kbd {
 }
 
 .masthead__disclaimer {
-  margin: 0.25rem 0 0;
+  /* Pushed to the far right and vertically centred against the two-line title block.
+     Below 40rem it drops under the titles rather than squeezing them. */
+  margin: 0 0 0 auto;
+  align-self: center;
+  text-align: right;
+  max-width: 16rem;
   font-size: 1rem;
-  color: var(--ink-faint);
+  /* NOT --ink-faint. That token is a quiet ink for PAPER; on the navy masthead it
+     measured 2.8:1 — dark grey on dark blue, failing AA on the one line that says this
+     is a prototype and not a TTB system. The jsdom axe run could not see it: jsdom has
+     no computed colour, so axe skips colour-contrast there entirely. A real browser
+     caught it on the first run. */
+  color: var(--on-navy-soft);
 }
 
 @media print {

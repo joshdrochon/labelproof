@@ -13,6 +13,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { flushSync } from 'react-dom';
 import type {
   AgentDecision,
   AgentEntry,
@@ -137,12 +138,21 @@ export default function VerifyNow() {
 
   const runCheck = useCallback(async () => {
     const found = validateDraft(draft, files.length);
-    setProblems(found);
     if (Object.keys(found).length > 0) {
-      const first = document.querySelector<HTMLElement>('[aria-invalid="true"]');
-      first?.focus();
+      // `flushSync`, because this used to call `setProblems` and then read the DOM on the
+      // very next line. React had not re-rendered yet, so `[aria-invalid="true"]` matched
+      // NOTHING on the first submit and focus never moved — a keyboard user pressed the
+      // button, heard nothing, and had no way to know five fields below had just been
+      // marked. It looked correct in manual testing only because the second submit finds
+      // the marks the first one left behind.
+      //
+      // The jsdom suite could not catch this. It asserted the fields were marked, which
+      // they were. A real browser found it on the first run.
+      flushSync(() => setProblems(found));
+      document.querySelector<HTMLElement>('[aria-invalid="true"]')?.focus();
       return;
     }
+    setProblems(found);
     const application = toApplication(draft);
     const previews = localPreviewUrls(files);
     abortRef.current?.abort();

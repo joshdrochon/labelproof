@@ -69,14 +69,17 @@ export default function App() {
             <p className="masthead__agency">
               Alcohol and Tobacco Tax and Trade Bureau
             </p>
-            {/* This page carries a real federal agency's name on a public URL. Saying
-                plainly that it is neither theirs nor endorsed by them is the minimum, and
-                it belongs in the masthead rather than the footer — a disclaimer nobody
-                scrolls to is a disclaimer for the author's benefit, not the reader's. */}
-            <p className="masthead__disclaimer">
-              Prototype — not affiliated with or endorsed by TTB
-            </p>
           </div>
+          {/* OUT of the title stack and over to the right. This page carries a real
+              federal agency's name on a public URL, so saying plainly that it is neither
+              theirs nor endorsed by them is the minimum — and it belongs in the masthead
+              rather than the footer, because a disclaimer nobody scrolls to is a
+              disclaimer for the author's benefit. But stacked as a third line it made the
+              masthead read as three competing titles. On the right it is unmistakably an
+              aside, and the masthead is two lines again. */}
+          <p className="masthead__disclaimer">
+            Prototype — not affiliated with or endorsed by TTB
+          </p>
         </div>
       </header>
 
