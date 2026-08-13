@@ -2112,6 +2112,10 @@ kbd {
   gap: 0.25rem;
   width: 100%;
   height: 100%;
+  /* Stated, not merely true. This card renders far taller than 44px, but the UX-3 gate
+     reads the stylesheet rather than the page — and a target that is tall only because
+     of the text inside it stops being tall when the text changes. */
+  min-height: 2.75rem;
   text-align: left;
   font: inherit;
   padding: 1rem;

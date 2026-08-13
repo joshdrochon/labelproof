@@ -457,7 +457,7 @@ in LP-237, with fixtures across LP-068, 163, 195–198, 216, 226–229.
 - [x] **LP-313** Full regression + eval + E2E green on the final commit (ENG-1)
 - [ ] **LP-314** Cross-browser: Chrome, Safari, Firefox, Edge (UX)
 - [ ] **LP-315** Tablet sanity pass (UX)
-- [ ] **LP-316** Error-path sweep: every error state visited by hand (UX-6)
+- [ ] **LP-316** Error-path sweep: every error state visited (UX-6). Automated in `web/e2e/errors.spec.ts` rather than done by hand — it asserts each message is actionable BY SHAPE (no trace, no jargon, a way forward), which is a weaker claim than a person reading it and is stated as such
 - [x] **LP-317** PRD checklists (MVP + Final): line-by-line self-audit (ENG-9)
 - [x] **LP-318** Evaluation-criteria walkthrough: the brief's six criteria, each with pointable evidence (BR)
 - [ ] **LP-319** Fresh-eyes full walkthrough; final fixes (UX-1)
