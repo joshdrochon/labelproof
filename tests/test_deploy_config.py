@@ -472,9 +472,15 @@ def test_the_csp_is_no_looser_than_the_spa_requires(fly: dict[str, Any]) -> None
     assert "'unsafe-inline'" not in directives["script-src"]
     assert "'unsafe-eval'" not in directives["script-src"]
 
+    # An XML NAMESPACE is not a network origin. `xmlns='http://www.w3.org/2000/svg'` is
+    # an identifier — the browser never dereferences it, and a CSP has nothing to say
+    # about it. The inline SVG chevron on the commodity select carries one, and flagging
+    # it as external egress would push someone toward deleting a namespace declaration
+    # that has to be there for the SVG to render at all.
+    sources_without_namespaces = re.sub(r"xmlns(:\w+)?=['\"]?[^'\"\s>]+", "", sources)
     external = {
         match
-        for match in re.findall(r"https?://[a-zA-Z0-9.-]+", sources)
+        for match in re.findall(r"https?://[a-zA-Z0-9.-]+", sources_without_namespaces)
         if "localhost" not in match and "127.0.0.1" not in match
     }
     assert not external, (

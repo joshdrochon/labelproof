@@ -203,8 +203,15 @@ test.describe('LP-315 — targets and layout hold at every size', () => {
           // A pseudo-element may carry the hit area without growing the drawn box.
           const after = getComputedStyle(el, '::after');
           const extra = parseFloat(after.height) || 0;
+          // And a checkbox's target is its LABEL. A 24px box bound to a 44px label is a
+          // 44px target — clicking the words toggles it, which is what `for` has always
+          // meant. Measuring the input alone would have forced a 44px checkbox, which
+          // looks like a mistake and is not what UX-3 asks for.
+          const id = (el as HTMLInputElement).id;
+          const label = el.closest('label') ?? (id ? document.querySelector(`label[for="${id}"]`) : null);
+          const labelHeight = label ? label.getBoundingClientRect().height : 0;
           return { el: el.tagName + '.' + (el.className || '').toString().split(' ')[0],
-                   h: Math.max(r.height, extra) };
+                   h: Math.max(r.height, extra, labelHeight) };
         })
         .filter((x) => x.h > 0 && x.h < 44),
     );
