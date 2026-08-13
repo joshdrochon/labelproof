@@ -2094,27 +2094,60 @@ kbd {
 
 .samples {
   list-style: none;
-  margin: 0.75rem 0 0;
+  margin: 1rem 0 0;
   padding: 0;
   display: grid;
+  /* Two up on a desk, one up on a tablet. `auto-fit` rather than a fixed count so the
+     cards never get narrower than a readable line. */
+  grid-template-columns: repeat(auto-fit, minmax(20rem, 1fr));
   gap: 0.5rem;
 }
 
-.samples li {
+/* The whole card is the button. This was a `.btn` with the summary running beside it,
+   so four buttons of four different widths produced four different text starts and the
+   block read as rubble — and the target was the words rather than the card. */
+.sample {
   display: flex;
-  flex-wrap: wrap;
-  align-items: baseline;
-  gap: 0.5rem;
+  flex-direction: column;
+  gap: 0.25rem;
+  width: 100%;
+  height: 100%;
+  text-align: left;
+  font: inherit;
+  padding: 1rem;
+  background: var(--surface);
+  border: 1px solid var(--rule);
+  border-left: 4px solid var(--rule-strong);
+  border-radius: var(--radius);
+  cursor: pointer;
 }
 
-.samples li .btn {
-  flex: none;
+/* The first one is the clean pass, and it is the one to click first — a reviewer who
+   opens on a rejection learns what the tool refuses before learning what it does. */
+.sample[data-lead='true'] {
+  border-left-color: var(--navy);
 }
 
-.samples__summary {
+.sample:hover:not(:disabled) {
+  background: var(--surface-selected);
+  border-color: var(--navy);
+}
+
+.sample:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.sample__title {
+  font-family: var(--font-display);
+  font-size: 1.25rem;
+  font-weight: 700;
+  color: var(--navy);
+}
+
+.sample__summary {
   color: var(--ink-soft);
-  flex: 1 1 18rem;
-  min-width: 0;
+  max-width: 60ex;
 }
 
 @media (max-width: 700px) {

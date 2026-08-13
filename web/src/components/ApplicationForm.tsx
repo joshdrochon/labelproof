@@ -257,6 +257,11 @@ export default function ApplicationForm({
         <label className="field__label" htmlFor="commodity">
           Kind of product
         </label>
+        {/* The empty hint slot is load-bearing. `.field` spans four subgrid rows, so a
+            field with only two children puts its control in row 2 while every TextField
+            beside it puts its input in row 3 — which is why this select sat a whole row
+            above "Brand name". The slot costs nothing and keeps the row honest. */}
+        <span className="field__hint" aria-hidden="true" />
         <select
           className="field__input field__select"
           id="commodity"
@@ -270,6 +275,7 @@ export default function ApplicationForm({
             </option>
           ))}
         </select>
+        <span className="field__problem" aria-hidden="true" />
       </div>
 
       <TextField

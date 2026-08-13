@@ -309,19 +309,24 @@ export default function VerifyNow() {
             artwork rather than typing it.
           </p>
 
+          {/* One card per sample, the WHOLE card clickable. This was a `.btn` with the
+              summary running beside it, so four buttons of four different widths gave
+              four different text starts and the block read as rubble — and the target
+              was the words rather than the card. */}
           {samples.length > 0 ? (
             <ul className="samples">
               {samples.map((sample, index) => (
                 <li key={sample.slug}>
                   <button
                     type="button"
-                    className={index === 0 ? 'btn btn--secondary' : 'btn btn--quiet'}
+                    className="sample"
+                    data-lead={index === 0 ? 'true' : 'false'}
                     onClick={() => void runSample(sample.slug)}
                     disabled={phase === 'working'}
                   >
-                    {sample.title}
+                    <span className="sample__title">{sample.title}</span>
+                    <span className="sample__summary">{sample.summary}</span>
                   </button>
-                  <span className="samples__summary">{sample.summary}</span>
                 </li>
               ))}
             </ul>
