@@ -4,6 +4,7 @@ The rule is enforced structurally rather than by convention: the allowlist gover
 *we* log, and the record guard governs what everything else in the process can print.
 """
 
+import ast
 import io
 import json
 import logging
@@ -12,7 +13,6 @@ from pathlib import Path
 import pytest
 
 from api import logging as lp_logging
-from api.logging import ContentInLogError
 
 
 @pytest.fixture(autouse=True)
@@ -28,24 +28,43 @@ def _lines(stream: io.StringIO) -> list[dict]:
 
 # --- the rule -----------------------------------------------------------------------
 
-def test_logging_a_label_value_raises() -> None:
-    """There is no channel through which a brand name reaches a log line."""
-    with pytest.raises(ContentInLogError):
-        lp_logging.log("extracted", brand_name="OLD TOM DISTILLERY")
+def test_logging_a_label_value_never_reaches_the_line(_capture: io.StringIO) -> None:
+    """There is no channel through which a brand name reaches a log line.
+
+    This asserts the PROPERTY — the value is not in the output — rather than the
+    mechanism that used to deliver it. `log` raised until a counter name missing from the
+    allowlist turned into a 500 on every label with a class-or-producer disagreement; it
+    drops now. Had this test been written against the property, that change would have
+    been a one-line edit in `logging.py` and nothing here.
+    """
+    lp_logging.log("extracted", brand_name="OLD TOM DISTILLERY")
+
+    raw = _capture.getvalue()
+    assert "OLD TOM DISTILLERY" not in raw, raw
+    assert "brand_name" not in _lines(_capture)[0]
 
 
 @pytest.mark.parametrize(
     "field",
     ["brand_name", "extracted", "value", "warning_text", "text", "producer", "address"],
 )
-def test_content_bearing_fields_are_all_rejected(field: str) -> None:
-    with pytest.raises(ContentInLogError):
-        lp_logging.log("event", **{field: "anything"})
+def test_content_bearing_fields_are_all_rejected(field: str, _capture: io.StringIO) -> None:
+    lp_logging.log("event", **{field: "a-distinctive-value"})
+
+    assert "a-distinctive-value" not in _capture.getvalue()
+    assert field not in _lines(_capture)[0]
 
 
-def test_the_error_explains_why_rather_than_just_refusing() -> None:
-    with pytest.raises(ContentInLogError, match="SEC-4"):
-        lp_logging.log("event", brand_name="x")
+def test_a_rejected_field_is_loud_rather_than_silent(_capture: io.StringIO) -> None:
+    """Dropping must not mean swallowing. The line still goes out, at ERROR, naming what
+    was refused — a keyword from our own source, never the value behind it.
+    """
+    lp_logging.log("event", brand_name="OLD TOM")
+
+    line = _lines(_capture)[0]
+    assert line["reason_code"] == "fields_rejected"
+    assert line["dropped"] == ["brand_name"]
+    assert "OLD TOM" not in _capture.getvalue()
 
 
 def test_allowlisted_fields_are_accepted(_capture: io.StringIO) -> None:
@@ -107,7 +126,7 @@ def test_stage_exposes_its_duration_to_the_caller() -> None:
 # --- `level` cannot be captured by a field ------------------------------------------
 
 
-def test_a_field_named_level_is_rejected_rather_than_rerouted() -> None:
+def test_a_field_named_level_is_rejected_rather_than_rerouted(_capture: io.StringIO) -> None:
     """`stage("extract", level="debug")` used to type-check and then explode.
 
     `log()`'s `level` parameter was an ordinary one, so it competed with `**fields` for
@@ -116,10 +135,11 @@ def test_a_field_named_level_is_rejected_rather_than_rerouted() -> None:
     stray `level=` lands in `fields` and meets the allowlist — which is the loud, correct
     outcome rather than a silenced one.
     """
-    with pytest.raises(ContentInLogError, match="level"), lp_logging.stage(
-        "extract", level="debug"
-    ):
+    with lp_logging.stage("extract", level="debug"):
         pass
+
+    line = _lines(_capture)[-1]
+    assert line["dropped"] == ["level"], line
 
 
 def test_the_severity_of_warn_and_error_still_gets_through(
@@ -427,7 +447,12 @@ def test_the_readme_states_the_no_content_rule_rather_than_only_implying_it() ->
 
     readme = (pathlib.Path(__file__).resolve().parents[1] / "README.md").read_text()
     assert "SEC-4" in readme
-    assert "raises on anything else" in readme or "raises on anything" in readme
+    # The CLAIM, not the wording. This used to grep for "raises on anything else", so it
+    # failed the moment the logger stopped raising — flagging a doc that had just been
+    # made accurate. What an operator needs is that the README says a non-allowlisted
+    # field never reaches a line; how the writer achieves that is not their concern.
+    assert "never label text" in readme
+    assert "dropped before the line" in readme or "is dropped" in readme
 
 
 # --- the ops runbook is executable, not aspirational (LP-125, ENG-5) ------------------
@@ -566,3 +591,68 @@ def test_a_full_golden_set_run_emits_no_label_text_at_all(
         f"label text reached the log: {leaked[:5]}. SEC-4 says an operator reading logs "
         f"must never see an applicant's label."
     )
+
+
+# --- the gate that would have caught the 500 (LP-335) ---------------------------------
+
+
+def test_every_applog_call_site_uses_only_allowlisted_field_names() -> None:
+    """Parse `api/`, find every applog call, check its keywords against the allowlist.
+
+    THIS IS THE TEST THAT WAS MISSING, and its absence cost a production outage.
+
+    `api/verify.py` logged `considered`, `judged` and `changed` — three counters nobody
+    had added to `ALLOWED_FIELDS`. The logger raised, the raise became an unhandled
+    exception, and the agent got "Something went wrong on our side". It only fired when
+    Tier 3 was considered, which needs a Mismatch on brand, class, producer or origin, so
+    every sample and every test passed while every real label with a class-or-producer
+    disagreement returned a 500 — the exact rows this product exists to catch.
+
+    A runtime check only sees the call sites a test executes. This one sees all of them,
+    including branches nothing covers, and it fails the build rather than the request.
+    """
+    offenders: list[str] = []
+
+    for path in sorted(Path("api").rglob("*.py")):
+        tree = ast.parse(path.read_text())
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            if not isinstance(func, ast.Attribute):
+                continue
+            if func.attr not in {"log", "warn", "error", "stage"}:
+                continue
+            # `applog.log(...)`, `lp_logging.warn(...)`, `logging.stage(...)` — matched by
+            # the attribute name rather than the module alias, because the alias differs
+            # across this codebase and a missed alias is a silent hole in the gate.
+            unlisted = sorted(
+                {kw.arg for kw in node.keywords if kw.arg} - lp_logging.ALLOWED_FIELDS
+            )
+            if unlisted:
+                offenders.append(f"{path}:{node.lineno} {func.attr}(...) passes {unlisted}")
+
+    assert offenders == [], (
+        "log call sites pass field names that are not on the allowlist:\n  "
+        + "\n  ".join(offenders)
+        + "\n\nEither the name carries label content — in which case do not log it — or "
+        "it is a safe identifier or counter, in which case add it to ALLOWED_FIELDS with "
+        "a reason next to it."
+    )
+
+
+def test_the_call_site_gate_is_actually_finding_call_sites() -> None:
+    """A gate over an empty set passes forever, and an AST walk is exactly the kind of
+    check that quietly matches nothing after a refactor.
+    """
+    found = 0
+    for path in Path("api").rglob("*.py"):
+        for node in ast.walk(ast.parse(path.read_text())):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr in {"log", "warn", "error", "stage"}
+            ):
+                found += 1
+
+    assert found >= 50, f"the AST walk found {found} log call sites; it found 100+ when written"

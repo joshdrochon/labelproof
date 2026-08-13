@@ -460,12 +460,16 @@ lists one nothing emits.
 
 #### Fields
 
-**A log line may carry only these field names, and the logger raises on anything else.**
+**A log line may carry only these field names. Anything else is dropped before the line
+is written, and the line goes out at ERROR naming what was refused.**
 
 That is the mechanism, not a convention. SEC-4 says logs carry ids, timings, token counts
 and verdict summaries — never label text, never extracted values, never image bytes. A
-comment saying so is a rule that erodes; an allowlist that raises `ContentInLogError` is a
-rule that holds. Every name below is an identifier, a measurement, or a category. None of
+comment saying so is a rule that erodes; an allowlist enforced in the writer is a rule
+that holds. It used to raise instead, which sounds stricter and was not: one unlisted
+counter in `verify.py` turned into a 500 on every label whose class or producer
+disagreed, while the check that would have caught it — an AST walk over every call site
+in `api/`, now in `tests/test_logging.py` — did not exist. Every name below is an identifier, a measurement, or a category. None of
 them can contain something read off a label.
 
 Adding a field is deliberate: put it in `api.logging.ALLOWED_FIELDS` with a reason.
@@ -477,6 +481,8 @@ Working around the check is not a shortcut, it is a compliance failure.
 |---|---|
 | `attempt` | Which retry this is, from 1. |
 | `blur` | Image sharpness score, 0–1, higher is better. |
+| `changed` | How many rows Tier 3 actually moved. A count, never a row's value. |
+| `considered` | How many rows were eligible for Tier 3. A count. |
 | `bytes` | Size of something in bytes. Never its contents. |
 | `cache_creation_tokens` | Prompt-cache tokens written on this call. Priced at 1.25x input. |
 | `cache_read_tokens` | Prompt-cache tokens read on this call. Priced at a tenth of input. |
@@ -484,6 +490,7 @@ Working around the check is not a shortcut, it is a compliance failure.
 | `commodity` | `spirits`, `wine` or `malt`. |
 | `confidence` | Extractor confidence for a field, 0–1. |
 | `count` | How many of the thing this line is about. |
+| `dropped` | Field names this logger refused to write. Identifiers from our own source, never values. |
 | `duration_ms` | Elapsed milliseconds. |
 | `event` | The event name. Always present. |
 | `exposure` | Image exposure score, 0–1, higher is better. |
@@ -495,6 +502,7 @@ Working around the check is not a shortcut, it is a compliance failure.
 | `input_tokens` | Prompt tokens billed on this call, excluding cache reads. |
 | `item_id` | One item inside a batch job. |
 | `job_id` | One batch job. |
+| `judged` | How many rows Tier 3 was actually asked about. A count. |
 | `kind` | Error taxonomy class: `user`, `image`, `provider` or `internal`. |
 | `media_type` | Detected content type, e.g. `image/png`. Sniffed, never taken from a filename. |
 | `model` | Model id the call was made against. |
@@ -993,9 +1001,11 @@ Two layers, both documented in full under
 [Observability → Fields](#fields) and
 [Nothing else in the process can print a traceback either](#nothing-else-in-the-process-can-print-a-traceback-either):
 
-1. **An allowlist that raises.** `api/logging.py` accepts only the field names in the table
-   above and raises `ContentInLogError` on anything else. There is no channel through which a
-   brand name can be logged deliberately.
+1. **An allowlist enforced in the writer, and a build-time gate over every caller.**
+   `api/logging.py` writes only the field names in the table above and drops anything else,
+   loudly. `tests/test_logging.py` parses every `applog` call under `api/` and fails the
+   build on an unlisted keyword — including call sites no test executes. There is no
+   channel through which a brand name can be logged deliberately.
 2. **Process-wide traceback containment.** The allowlist governs `applog.log` and nothing
    else, so a second layer covers the way a leak would actually happen — a traceback. A
    `pydantic.ValidationError` on the extraction path renders `input_value=...`, which is the

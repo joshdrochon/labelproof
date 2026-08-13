@@ -1069,3 +1069,82 @@ def test_a_defect_on_a_readable_image_survives_an_unreadable_one() -> None:
     assert verdicts["alcohol_content"] == "mismatch", (
         "the ABV mismatch was visible on an image we DID read and must stand"
     )
+
+
+# --- LP-335: the adjudication log took production down ---------------------------------
+
+
+@pytest.mark.regression
+def test_a_class_type_disagreement_does_not_500(tmp_path: Path) -> None:
+    """LP-335. Reported from production as "Something went wrong on our side".
+
+    `verify` logs three Tier-3 counters, and none of the three were on the logging
+    allowlist. The logger raised, the raise reached the catch-all handler, and the agent
+    got a 500. The line only runs when Tier 3 is CONSIDERED, which needs a Mismatch on
+    brand, class, producer or origin — so all four demo samples passed, the whole suite
+    passed, and the failure was reachable only by checking a real label whose class or
+    producer disagreed with the application. Which is the case this product exists for.
+
+    The application below says "Bourbon" where the label says the full class designation,
+    exactly as the report had it.
+    """
+    from api.models import ExtractedField, Extraction, FieldName
+    from api.provider.base import ExtractionResponse
+
+    class LowConfidenceMismatch:
+        """A class/type the extractor is UNSURE about — which is the whole trigger.
+
+        `is_adjudicable` requires `confidence < TIER3_TRIGGER` (0.90): a confident
+        disagreement between two obviously different strings is not a gray case and never
+        reaches Tier 3. Every offline fake answers at full confidence, so no test in this
+        suite had ever produced a gray row, and the log line below the adjudicator had
+        never executed. That is the gap this reproduces.
+        """
+
+        name = "fake:low-confidence"
+
+        def extract(self, request: object) -> ExtractionResponse:
+            return ExtractionResponse(
+                extractions=[
+                    Extraction(
+                        image_index=0,
+                        fields={
+                            FieldName.CLASS_TYPE: ExtractedField(
+                                value="Kentucky Straight Bourbon Whiskey", confidence=0.62
+                            ),
+                        },
+                    )
+                ]
+            )
+
+    app = create_app(
+        config=Config(use_fake_provider=True, storage_dir=str(tmp_path)),
+        provider=LowConfidenceMismatch(),
+    )
+    client = TestClient(app)
+
+    application = {
+        "commodity": "spirits",
+        "brand_name": "OLD OAK",
+        "class_type": "Bourbon",
+        "alcohol_content": 45.0,
+        "net_contents": "750 mL",
+        "producer_name": "OLD OAK IMPORTERS, LLC",
+        "producer_address": "LOUISVILLE, KENTUCKY",
+        "is_import": False,
+        "country_of_origin": None,
+    }
+    image = (ROOT / "fixtures" / "labels" / "tc01_old_tom_clean.png").read_bytes()
+
+    response = client.post(
+        "/verify",
+        data={"application": json.dumps(application)},
+        files=[("images", ("front.png", image, "image/png"))],
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    # Not just "not a 500" — the disagreement has to actually reach the agent as a
+    # finding. A 200 carrying nothing would satisfy the status check and fail the point.
+    verdicts = {field["field"]: field["verdict"] for field in body["fields"]}
+    assert verdicts["class_type"] != "match", verdicts

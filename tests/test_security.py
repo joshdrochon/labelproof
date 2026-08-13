@@ -934,10 +934,16 @@ def test_a_real_verification_writes_no_label_string_to_the_logs(capfd: Any) -> N
         assert set(line) <= applog.ALLOWED_FIELDS | {"ts"}
 
 
-def test_the_allowlist_still_refuses_an_unlisted_field() -> None:
-    """Nothing in this wave weakened `api/logging.py`, and this asserts it."""
-    with pytest.raises(applog.ContentInLogError):
-        applog.log("verify_complete", brand_name="Old Tom Distillery")
+def test_the_allowlist_still_refuses_an_unlisted_field(capfd: pytest.CaptureFixture[str]) -> None:
+    """Nothing in this wave weakened `api/logging.py`, and this asserts it.
+
+    Refusing means the value is not written. It stopped meaning "raises" when raising
+    turned a missing allowlist entry into a 500 on the verification path.
+    """
+    applog.configure()
+    applog.log("verify_complete", brand_name="Old Tom Distillery")
+
+    assert "Old Tom Distillery" not in capfd.readouterr().out
 
 
 # --------------------------------------------------------------------------------------

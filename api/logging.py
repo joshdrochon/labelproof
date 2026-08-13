@@ -5,8 +5,14 @@
 SEC-4 says logs carry IDs, timings, token counts, and verdict summaries — never label
 text, never extracted values, never image bytes. A comment saying so would be a
 convention that erodes; instead the logger accepts only an allowlist of field names, and
-anything else raises. There is no channel through which a brand name can reach a log line,
-so the rule holds by construction rather than by discipline.
+anything else is DROPPED before the line is written. There is no channel through which a
+brand name can reach a log line, so the rule holds by construction rather than discipline.
+
+Enforcement runs at build time, not at request time. `tests/test_logging.py` parses every
+`applog` call in `api/` and fails on an unlisted keyword — every call site, including the
+ones no test happens to execute. This module used to raise instead, which sounds stricter
+and was not: it enforced only on paths a test reached, and it turned one unlisted counter
+in `verify` into a 500 on every label whose class or producer disagreed.
 
 Tested by LP-086 and LP-251: run a verification, scan the logs, assert no label string
 appears.
@@ -37,6 +43,12 @@ ALLOWED_FIELDS: frozenset[str] = frozenset(
         "event", "kind", "code", "verdict", "recommendation", "field",
         "commodity", "model", "provider", "tier", "status", "attempt",
         "media_type", "quality", "reason_code", "ok",
+        # Tier-3 adjudication counters. Counts of ROWS, never a row's value — how many
+        # were eligible, how many were sent, how many the judge actually moved.
+        "considered", "judged", "changed",
+        # Names of keywords this module refused to write. Identifiers from our own
+        # source, never a value — see the drop path in `log`.
+        "dropped",
     }
 )
 
@@ -187,15 +199,6 @@ EVENTS: dict[str, tuple[int, str]] = {
     ),
 }
 
-class ContentInLogError(RuntimeError):
-    """Raised when a caller tries to log a field that is not on the allowlist.
-
-    This is deliberately loud. A rejected field is almost always someone about to log
-    an extracted value, and SEC-4 makes that a compliance failure rather than a style
-    issue.
-    """
-
-
 _request_id: ContextVar[str] = ContextVar("request_id", default="")
 
 _logger = logging.getLogger("labelproof")
@@ -298,9 +301,9 @@ def set_request_id(rid: str) -> None:
 def log(event: str, level: int = logging.INFO, /, **fields: object) -> None:
     """Emit one structured line.
 
-    Raises ContentInLogError if any field is outside the allowlist — see the module
-    docstring. Add genuinely safe fields to ALLOWED_FIELDS deliberately; do not work
-    around this.
+    Fields outside the allowlist are dropped and the line goes out at ERROR naming them
+    — see the module docstring and the drop path below. Add genuinely safe fields to
+    ALLOWED_FIELDS deliberately; do not work around this.
 
     `level` is positional-only (the `/`) on purpose. As a normal parameter it competed
     with `**fields` for the name "level": a caller writing `stage("extract",
@@ -311,17 +314,35 @@ def log(event: str, level: int = logging.INFO, /, **fields: object) -> None:
     loudly.
     """
     rejected = sorted(set(fields) - ALLOWED_FIELDS)
-    if rejected:
-        raise ContentInLogError(
-            f"Refusing to log field(s) {rejected}: not on the allowlist. Logs must "
-            f"carry no label content or PII (SEC-4). If a field is genuinely safe, add "
-            f"it to ALLOWED_FIELDS with a reason."
-        )
 
     payload: dict[str, object] = {"event": event, "ts": round(time.time(), 3)}
     if rid := current_request_id():
         payload["request_id"] = rid
-    payload.update(fields)
+    payload.update({k: v for k, v in fields.items() if k not in rejected})
+
+    if rejected:
+        # DROPPED, NOT RAISED — and this changed because raising took production down.
+        #
+        # One log call in `verify` passed three counter names that were never added to
+        # the allowlist. It only runs when Tier 3 is considered, which needs a Mismatch
+        # on brand, class, producer or origin — so every sample passed, every test passed,
+        # and the first agent to check a real label whose class/type disagreed got a 500
+        # reading "Something went wrong on our side". A guard against leaking label
+        # content had become the thing that stopped labels being checked.
+        #
+        # Dropping protects exactly what raising protected: a rejected field is never
+        # written. What it stops doing is converting a logging mistake into an outage on
+        # the verification path. The mistake is still loud — the event goes out at ERROR
+        # with the offending NAMES, which are identifiers in our own source, never values.
+        #
+        # Loudness now lives where it belongs: `test_logging.py` walks the AST of every
+        # applog call site in `api/` and fails CI on an unlisted keyword. That is a
+        # build-time check over every call, including the ones no test happens to reach —
+        # which is the property this raise was reaching for and never actually had.
+        payload["reason_code"] = "fields_rejected"
+        payload["dropped"] = rejected
+        level = logging.ERROR
+
     _logger.log(level, json.dumps(payload, sort_keys=True, default=str))
 
 
