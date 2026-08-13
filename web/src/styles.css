@@ -17,10 +17,17 @@
    ===================================================================================== */
 
 :root {
-  --font-display: 'Iowan Old Style', 'Charter', 'Bitstream Charter', Georgia,
-    'Times New Roman', serif;
-  --font-text: 'Public Sans', 'Source Sans Pro', 'Segoe UI', 'Helvetica Neue', Helvetica,
-    Arial, sans-serif;
+  /* Faces that are actually installed, in the order they are actually reached. This
+     stack used to lead with 'Public Sans' — the USWDS font — and 'Source Sans Pro',
+     neither of which ships with this app and neither of which is installed by default on
+     Windows or macOS. So the app has never once rendered in either: every user fell
+     through to Segoe UI or Helvetica, while the stylesheet claimed alignment with a
+     federal design system it was not using. Nothing in the PRD ever asked for it.
+     Naming a font you do not serve is a claim, not a choice. */
+  --font-display: Georgia, 'Iowan Old Style', Charter, 'Times New Roman', serif;
+  --font-text:
+    system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Helvetica, Arial,
+    sans-serif;
   --font-mono: ui-monospace, 'SFMono-Regular', Menlo, Consolas, 'Liberation Mono',
     monospace;
 
@@ -96,8 +103,8 @@ h2,
 h3,
 h4 {
   font-family: var(--font-display);
-  /* 700, not 600. No face in the display stack HAS a 600 — Iowan ships Roman/Bold/Black,
-     Charter Roman/Bold, Georgia 400/700 — so every heading was a synthesized faux-bold,
+  /* 700, not 600. No face in the display stack HAS a 600 — Georgia ships 400/700, Iowan
+     Roman/Bold/Black, Charter Roman/Bold — so every heading was a synthesized faux-bold,
      visibly smeared at 30px. Asking for a weight that exists costs nothing and renders. */
   font-weight: 700;
   line-height: 1.15;
