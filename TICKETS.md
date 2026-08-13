@@ -65,7 +65,7 @@ in LP-237, with fixtures across LP-068, 163, 195–198, 216, 226–229.
 - [x] **LP-001** Initialize `labelproof` repo, default branch `main`, license, `.gitignore` (DEL-2)
 - [x] **LP-002** Commit `PRD.md` (source of truth) and `TICKETS.md`
 - [x] **LP-003** Seed `CHANGES.md` with run/test/rollback skeleton (ENG-5)
-- [ ] **LP-004** Architecture Defense note: stack, host, provider — decisions + rationale recorded in README (SCOPE-5)
+- [x] **LP-004** Architecture Defense note: stack, host, provider — decisions + rationale recorded in README (SCOPE-5)
 - [x] **LP-005** Scaffold workspace per stack decision; empty build passes
 - [x] **LP-006** Lint + formatter config, CI-enforced (ENG-8)
 - [x] **LP-007** Typecheck in strict mode (ENG-8)
@@ -233,9 +233,9 @@ in LP-237, with fixtures across LP-068, 163, 195–198, 216, 226–229.
 - [x] **LP-140** README: approach + tools used (DEL-4)
 - [x] **LP-141** README: assumptions log seeded — every gap the brief left, filled and stated (SCOPE-5)
 - [x] **LP-142** `CHANGES.md` current through MVP (ENG-5)
-- [ ] **LP-143** MVP checklist self-audit vs `PRD.md` §MVP; gaps become tickets before anything else does
+- [x] **LP-143** MVP checklist self-audit vs `PRD.md` §MVP; gaps become tickets before anything else does
 - [x] **LP-144** Timed p95 run on the deployed URL, table committed (PERF-1)
-- [ ] **LP-146** Tag `v0.1-mvp`
+- [x] **LP-146** Tag `v0.1-mvp`
 
 ---
 
