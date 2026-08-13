@@ -5,3 +5,4 @@ plan:      9 probes, 1200s idle before each (4x Fly's ~5 min auto-stop window)
 route:     /healthz — no model call, so latency is transport plus boot
 
 utc                     status    cold_s      warm_s      note
+2026-08-13T15:57:21Z    200       0.098590    0.092752    ok

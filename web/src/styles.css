@@ -128,10 +128,11 @@ p {
 .masthead__inner {
   max-width: 84rem;
   margin: 0 auto;
-  padding: 0.9rem var(--gutter);
+  padding: 0.55rem var(--gutter);
   display: flex;
   align-items: center;
   gap: 1rem;
+  line-height: 1.25;
 }
 
 .masthead__seal {
