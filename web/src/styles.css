@@ -65,6 +65,7 @@
   --gold: #c0a24a;
   --gold-soft: #e9d9a6;
   --on-navy: #f5f3ee;
+  --on-dark: #ffffff;
   --on-navy-soft: #cdd4e0;
 
   /* An 8px scale, the same one USWDS uses. What was here before was `--step: 0.75rem`,
@@ -137,7 +138,7 @@ p {
   left: -9999px;
   top: 0;
   background: var(--navy);
-  color: #fff;
+  color: var(--on-dark);
   padding: 0.75rem 1rem;
   z-index: 20;
 }
@@ -207,7 +208,7 @@ p {
 
 .masthead__product {
   font-family: var(--font-display);
-  font-size: 1.4rem;
+  font-size: 1.5rem;
   letter-spacing: 0.01em;
 }
 
@@ -265,17 +266,21 @@ p {
   padding: var(--gutter);
 }
 
+/* The padding used to sit on EACH paragraph, so the two lines were 40px apart (16 + 16
+   plus an 8px margin) while the first sat only 16px below the rule. The block owns the
+   padding now, and the gap between the lines matches the gap around them. */
 .site-footer {
   border-top: 1px solid var(--rule);
   background: var(--surface);
   color: var(--ink-soft);
   font-size: 1rem;
+  padding: 1rem 0;
 }
 
 .site-footer p {
   max-width: 84rem;
   margin: 0 auto;
-  padding: 1rem var(--gutter);
+  padding: 0 var(--gutter);
 }
 
 /* --------------------------------------------------------------- buttons ------ */
@@ -296,7 +301,7 @@ p {
 .btn--primary {
   background: var(--navy);
   border-color: var(--navy);
-  color: #fff;
+  color: var(--on-dark);
 }
 
 .btn--primary:hover:not(:disabled) {
@@ -327,7 +332,7 @@ p {
 .btn[aria-pressed='true'] {
   background: var(--navy);
   border-color: var(--navy);
-  color: #fff;
+  color: var(--on-dark);
 }
 
 .btn:disabled {
@@ -361,7 +366,7 @@ kbd {
 }
 
 .setup__title {
-  font-size: 1.75rem;
+  font-size: 1.875rem;
   margin-bottom: 0.75rem;
 }
 
@@ -389,7 +394,12 @@ kbd {
   place-items: center;
   border: 2px solid var(--navy);
   border-radius: 50%;
-  font-family: var(--font-display);
+  /* NOT --font-display. Georgia has OLD-STYLE figures: 3, 4, 5, 7 and 9 descend below
+     the baseline while 1 and 2 sit on it. Inside a 32px circle that reads as the 3 being
+     off-centre — because it is, by a couple of pixels, by design of the typeface.
+     Lining figures sit on one baseline and centre properly. */
+  font-family: var(--font-text);
+  font-variant-numeric: lining-nums tabular-nums;
   font-weight: 700;
   color: var(--navy);
 }
@@ -455,7 +465,7 @@ kbd {
 .form__legend,
 .panel__legend {
   font-family: var(--font-display);
-  font-size: 1.35rem;
+  font-size: 1.5rem;
   font-weight: 600;
   padding: 0;
   /* 1rem, matching `.form`'s own row gap. At 0.5rem the heading sat closer to the first
@@ -598,7 +608,7 @@ kbd {
 
 .dropzone__lead {
   font-family: var(--font-display);
-  font-size: 1.35rem;
+  font-size: 1.5rem;
   font-weight: 600;
 }
 
@@ -786,7 +796,7 @@ kbd {
 }
 
 .problem__title {
-  font-size: 1.35rem;
+  font-size: 1.5rem;
 }
 
 .problem__actions {
@@ -895,7 +905,7 @@ kbd {
 
 .banner__prefix {
   font-family: var(--font-text);
-  font-size: 1.1rem;
+  font-size: 1.0625rem;
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.08em;
@@ -909,7 +919,7 @@ kbd {
 
 .banner__rationale {
   margin-top: 0.5rem;
-  font-size: 1.125rem;
+  font-size: 1.25rem;
   max-width: 62ex;
 }
 
@@ -928,7 +938,7 @@ kbd {
   color: var(--navy);
   background: none;
   border: 0;
-  padding: 0.25rem 0.1rem;
+  padding: 0.25rem 0.25rem;
   min-height: 2.75rem;
   text-decoration: underline;
   text-underline-offset: 3px;
@@ -1015,7 +1025,7 @@ kbd {
   border-style: solid;
   border-color: var(--navy);
   box-shadow:
-    0 0 0 2px #fff,
+    0 0 0 2px var(--on-dark),
     0 0 0 5px var(--navy);
 }
 
@@ -1060,7 +1070,7 @@ kbd {
 .evidence__tag[data-active='true'] {
   background: var(--navy);
   border-color: var(--navy);
-  color: #fff;
+  color: var(--on-dark);
 }
 
 .evidence__tag-number {
@@ -1070,7 +1080,7 @@ kbd {
   height: 1.6rem;
   border-radius: 50%;
   background: var(--serious);
-  color: #fff;
+  color: var(--on-dark);
   font-size: 1rem;
   flex: none;
 }
@@ -1133,7 +1143,7 @@ kbd {
   border-top: 2px solid var(--rule-strong);
   border-bottom: 1px solid var(--rule-strong);
   font-family: var(--font-display);
-  font-size: 1.15rem;
+  font-size: 1.25rem;
   font-weight: 700;
   color: var(--ink);
 }
@@ -1213,7 +1223,7 @@ kbd {
   height: 1.6rem;
   border-radius: 50%;
   background: var(--serious);
-  color: #fff;
+  color: var(--on-dark);
   font-size: 1rem;
   margin-right: 0.5rem;
   vertical-align: baseline;
@@ -1224,7 +1234,7 @@ kbd {
 }
 
 .row[data-variant='attention'] .row__label {
-  font-size: 1.15rem;
+  font-size: 1.25rem;
 }
 
 .row__region-note {
@@ -1233,7 +1243,7 @@ kbd {
   font-weight: 400;
   font-size: 1rem;
   color: var(--ink-soft);
-  margin-top: 0.2rem;
+  margin-top: 0.25rem;
 }
 
 .cell__value {
@@ -1247,7 +1257,7 @@ kbd {
   font-family: var(--font-text);
   font-size: 1rem;
   color: var(--ink-soft);
-  margin-top: 0.2rem;
+  margin-top: 0.25rem;
 }
 
 .cell__mobile-caption {
@@ -1267,7 +1277,7 @@ kbd {
   color: var(--navy);
   background: none;
   border: 0;
-  padding: 0.5rem 0.1rem;
+  padding: 0.5rem 0.25rem;
   min-height: 2.75rem;
   text-decoration: underline;
   text-underline-offset: 3px;
@@ -1380,7 +1390,7 @@ kbd {
 .detail__text {
   font-size: 1.0625rem;
   max-width: 68ex;
-  margin-top: 0.2rem;
+  margin-top: 0.25rem;
 }
 
 .detail__text--soft {
@@ -1653,7 +1663,7 @@ kbd {
 
 .batch__title {
   font-family: var(--font-display);
-  font-size: 1.75rem;
+  font-size: 1.875rem;
   color: var(--navy);
   margin: 0 0 0.5rem;
 }
@@ -1680,7 +1690,7 @@ kbd {
 }
 
 .batch__step-title {
-  font-size: 1.125rem;
+  font-size: 1.25rem;
   margin: 0 0 0.25rem;
 }
 
@@ -2094,11 +2104,19 @@ kbd {
    The first person to use this screen uploaded a label and asked "and then what?" — the
    form on the right read as a separate panel rather than as the next thing to do. */
 
+/* One size for every step pill. `inline-block` sized each to its own text, so a pill
+   whose word ran a pixel wider than its neighbour's WAS a pixel wider — two badges doing
+   the same job at two different sizes. A fixed min-width with centred text makes them
+   match whatever the words are. */
 .dropzone__step,
 .form__step {
-  display: inline-block;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 4.5rem;
   margin-right: 0.5rem;
-  padding: 0.1rem 0.5rem;
+  font-variant-numeric: lining-nums tabular-nums;
+  padding: 0.25rem 0.5rem;
   border-radius: 999px;
   background: var(--navy);
   color: var(--surface);
@@ -2189,7 +2207,7 @@ kbd {
 }
 
 .site-footer__notice {
-  margin-top: 0.5rem;
+  margin-top: 0.25rem;
   color: var(--ink-faint);
 }
 
