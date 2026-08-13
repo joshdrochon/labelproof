@@ -11,6 +11,7 @@ recommendation. **It recommends — the agent decides.**
 | **Regulatory canon** | `PRD.md` Appendix B, verified against GPO CFR XML and Cornell LII, with retrieval dates recorded per item in `api/canon.py` |
 | **Developer log** | [`CHANGES.md`](CHANGES.md) — deploy, roll back, operate |
 | **Execution plan** | [`TICKETS.md`](TICKETS.md) — 330 tickets, each traced to a requirement ID |
+| **Start here (reviewers)** | [`docs/evaluation.md`](docs/evaluation.md) — the brief's criteria, each with something to open |
 | **MVP audit** | [`docs/mvp-audit.md`](docs/mvp-audit.md) — the PRD's MVP checklist, line by line, 14 of 15 |
 | **Accuracy** | [`docs/accuracy.md`](docs/accuracy.md) — Tier A 100% on 175 rows, Tier B 71.4% on 21, confusion matrices, every miss explained |
 | **Cost** | [`docs/cost.md`](docs/cost.md) — $0.031 a verification, $0.018 in batch, measured |
