@@ -108,6 +108,15 @@ export default function Dropzone({ files, onChange, disabled = false }: Dropzone
 
   return (
     <div className="dropzone-panel">
+      {/* OUTSIDE the dropzone, and that is the point. This heading used to live inside
+          the dashed box, which is `text-align: center` — so "Step 1" sat centred and 26px
+          lower than "Step 2" on the panel beside it. Two panels numbered 1 and 2, side by
+          side, sharing no line. It read as the single thing most wrong with the screen.
+          Out here it is a sibling of the box and matches `.form__legend` exactly. */}
+      <p className="panel__legend">
+        <span className="dropzone__step">Step 1</span>
+        Pictures of the label
+      </p>
       <div
         className="dropzone"
         data-dragging={dragging ? 'true' : 'false'}
@@ -125,10 +134,6 @@ export default function Dropzone({ files, onChange, disabled = false }: Dropzone
           accept(event.dataTransfer.files);
         }}
       >
-        <p className="dropzone__lead">
-          <span className="dropzone__step">Step 1</span>
-          Pictures of the label
-        </p>
         <p className="dropzone__help">
           Front and back if you have both. The government warning is usually on the back.
         </p>
