@@ -116,8 +116,10 @@ a false finding either way.
 
 **Flag, never pass.** A false flag costs an agent seconds. A false pass costs the agency a
 compliance failure. Every ambiguity in this codebase resolves toward Needs review, and the
-government warning is exempt from every confidence threshold in the system — it fails
-closed unconditionally.
+government warning fails closed unconditionally. It is exempt from every threshold that
+could EXCUSE a defect, and subject to one that can only refuse to certify: a reading the
+model itself disclaimed cannot clear a label. That floor demotes Match to Unreadable and
+never the reverse, so low confidence can neither pass a violation nor wash one away.
 
 **A pre-gate before any spend.** An image nobody could read gets a plain-language retake
 reason and **zero** model calls. That path cannot produce a false pass, because its

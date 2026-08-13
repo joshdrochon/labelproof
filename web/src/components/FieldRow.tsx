@@ -32,7 +32,7 @@ const CELL_PREVIEW = 48;
 
 interface FieldRowProps {
   result: FieldResult;
-  /** What the agent read off the bottle, when the picture could not answer this row. */
+  /** What the agent read off the ARTWORK, when the tool could not answer this row. */
   entry?: AgentEntry | null;
   onEnter?: (entry: AgentEntry | null) => void;
   onRetake?: () => void;

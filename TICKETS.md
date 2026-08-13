@@ -392,7 +392,7 @@ in LP-237, with fixtures across LP-068, 163, 195–198, 216, 226–229.
 - [x] **LP-268** 200% zoom usable (UX-4)
 - [x] **LP-269** Reduced-motion support (UX-4)
 - [x] **LP-270** Print stylesheet for the report — **Dave prints; the printout must read** (HITL-5)
-- [ ] **LP-271** Copy final pass: reading level, zero jargon (UX-6)
+- [x] **LP-271** Copy final pass: reading level, zero jargon (UX-6)
 - [ ] **LP-272** Hallway test protocol: tasks + success criteria written first (UX-1)
 - [ ] **LP-273** **Run the 73-year-old test:** ≥3 cold users reach a verdict, zero instructions; notes committed (UX-1)
 - [ ] **LP-274** Fix rounds from hallway findings (UX-1)

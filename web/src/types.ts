@@ -162,8 +162,14 @@ export interface ApiError {
 export type AgentDecision = 'confirmed' | 'overridden';
 
 /**
- * A value the agent read off the bottle themselves, because the picture could not be
- * read (UX-6, HITL-2).
+ * A value the agent read off the ARTWORK themselves, because the tool could not read it
+ * (UX-6, HITL-2).
+ *
+ * Off the artwork, not off a bottle. A TTB agent reviews submitted images and has no
+ * physical product to consult — `PRD.md:145` puts the real fallback as
+ * reject-and-request-a-better-image. This records the case where a person can make out
+ * something the model could not, which is real; it is not an invitation to supply a value
+ * from nowhere.
  *
  * Deliberately NOT merged into `FieldResult.extracted`. `extracted` means "this is what
  * the label image says, as read by the model", and an agent's typing is a different kind

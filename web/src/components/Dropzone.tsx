@@ -29,7 +29,12 @@ function isAccepted(file: File): boolean {
 }
 
 function describeSize(bytes: number): string {
-  return `${(bytes / (1024 * 1024)).toFixed(1)}MB`;
+  // KB below a megabyte. A 37 KB file rendered as "0.0MB" reads as a failed upload —
+  // which is exactly how it looked to the first person who used this screen, on a real
+  // label photograph that had uploaded perfectly.
+  if (bytes < 1024) return `${bytes} bytes`;
+  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 interface DropzoneProps {
@@ -120,7 +125,10 @@ export default function Dropzone({ files, onChange, disabled = false }: Dropzone
           accept(event.dataTransfer.files);
         }}
       >
-        <p className="dropzone__lead">Pictures of the label</p>
+        <p className="dropzone__lead">
+          <span className="dropzone__step">Step 1</span>
+          Pictures of the label
+        </p>
         <p className="dropzone__help">
           Front and back if you have both. The government warning is usually on the back.
         </p>

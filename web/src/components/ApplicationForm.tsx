@@ -178,7 +178,10 @@ export default function ApplicationForm({
 
   return (
     <fieldset className="form" disabled={disabled}>
-      <legend className="form__legend">What the application says</legend>
+      <legend className="form__legend">
+        <span className="form__step">Step 2</span>
+        What the application says
+      </legend>
 
       <div className="field">
         <label className="field__label" htmlFor="commodity">

@@ -11,7 +11,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 
-import ReadItYourself, { agreesWithApplication } from './ReadItYourself';
+import ReadItYourself, { agreesWithApplication, retakeRequest } from './ReadItYourself';
 import { fieldResult } from '../testing';
 import type { AgentEntry } from '../types';
 
@@ -51,15 +51,49 @@ describe('agreement is loose, and is not the matching engine', () => {
 });
 
 describe('what the panel offers', () => {
-  it('offers both ways forward before either is chosen', async () => {
+  it('leads with requesting a better image, which is the real fallback', () => {
+    // PRD.md:145 — "Today the fallback is reject-and-request-a-better-image." A TTB
+    // agent reviews submitted artwork and has no bottle to consult, so this is the
+    // action that matches what they can actually do.
     setup();
-    expect(screen.getByRole('button', { name: /type what the bottle says/i })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /better picture/i })).toBeInTheDocument();
+    expect(
+      screen.getByRole('button', { name: /request a better image/i }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole('button', { name: /upload a different image/i }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole('button', { name: /i can read it on the artwork/i }),
+    ).toBeInTheDocument();
+  });
+
+  it('never invites the agent to read a bottle they do not have', () => {
+    // The wording this replaced said "Type what the bottle says", justified by a comment
+    // claiming the bottle was on the agent's desk. That was invented, and it pointed the
+    // agent at a source they do not have — which leaves guessing, or copying the
+    // application across into the evidence column.
+    setup();
+    expect(screen.queryByText(/bottle/i)).not.toBeInTheDocument();
+  });
+
+  it('offers wording to paste, and sends nothing', async () => {
+    const { user } = setup();
+    await user.click(screen.getByRole('button', { name: /request a better image/i }));
+
+    expect(screen.getByText(/please supply a sharper image/i)).toBeInTheDocument();
+    expect(screen.getByText(/never contacts an applicant/i)).toBeInTheDocument();
+  });
+
+  it('names the field in the request, so the applicant knows what to reshoot', () => {
+    const request = retakeRequest(
+      fieldResult('net_contents', 'unreadable', { extracted: null, expected: '750 mL' }),
+    );
+    expect(request.toLowerCase()).toContain('net contents');
   });
 
   it('hands back a typed value with its agreement flag', async () => {
     const { user, onEnter } = setup();
-    await user.click(screen.getByRole('button', { name: /type what the bottle says/i }));
+    await user.click(screen.getByRole('button', { name: /i can read it on the artwork/i }));
     await user.type(screen.getByRole('textbox'), '750 mL');
     await user.click(screen.getByRole('button', { name: /save what i read/i }));
 
@@ -68,7 +102,7 @@ describe('what the panel offers', () => {
 
   it('flags a typed value that disagrees with the application', async () => {
     const { user, onEnter } = setup(null, '750 mL');
-    await user.click(screen.getByRole('button', { name: /type what the bottle says/i }));
+    await user.click(screen.getByRole('button', { name: /i can read it on the artwork/i }));
     await user.type(screen.getByRole('textbox'), '375 mL');
     await user.click(screen.getByRole('button', { name: /save what i read/i }));
 
@@ -77,24 +111,24 @@ describe('what the panel offers', () => {
 
   it('never prefills the box with the application value', async () => {
     // A box that arrives holding the expected answer invites agreement with it, and
-    // agreement is the finding. The agent has to read the bottle.
+    // agreement is the finding. The agent has to read the artwork.
     const { user } = setup(null, '750 mL');
-    await user.click(screen.getByRole('button', { name: /type what the bottle says/i }));
+    await user.click(screen.getByRole('button', { name: /i can read it on the artwork/i }));
     expect(screen.getByRole('textbox')).toHaveValue('');
   });
 
   it('treats a blank entry as no entry rather than as an empty reading', async () => {
     const { user, onEnter } = setup();
-    await user.click(screen.getByRole('button', { name: /type what the bottle says/i }));
+    await user.click(screen.getByRole('button', { name: /i can read it on the artwork/i }));
     await user.type(screen.getByRole('textbox'), '   ');
     await user.click(screen.getByRole('button', { name: /save what i read/i }));
 
     expect(onEnter).toHaveBeenCalledWith(null);
   });
 
-  it('asks for a better picture without recording anything', async () => {
+  it('goes back for a different image without recording anything', async () => {
     const { user, onEnter, onRetake } = setup();
-    await user.click(screen.getByRole('button', { name: /better picture/i }));
+    await user.click(screen.getByRole('button', { name: /upload a different image/i }));
 
     expect(onRetake).toHaveBeenCalledTimes(1);
     expect(onEnter).not.toHaveBeenCalled();
@@ -109,7 +143,9 @@ describe('what a typed value does NOT do', () => {
     setup({ value: '750 mL', agrees: true });
 
     expect(screen.getByText(/still Unreadable/i)).toBeInTheDocument();
-    expect(screen.getByText(/nothing has been verified against the picture/i)).toBeInTheDocument();
+    expect(
+      screen.getByText(/nothing has been verified automatically/i),
+    ).toBeInTheDocument();
   });
 
   it('carries the caveat even when the reading agrees with the application', () => {

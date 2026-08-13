@@ -64,7 +64,7 @@ export default function VerifyNow() {
   const [activeField, setActiveField] = useState<FieldName | null>(null);
   const [decisions, setDecisions] = useState<Partial<Record<FieldName, AgentDecision>>>({});
   const [determination, setDetermination] = useState<'approved' | 'returned' | null>(null);
-  // What the agent read off the bottle for rows the picture could not answer. Session
+  // What the agent read off the ARTWORK for rows the tool could not answer. Session
   // only, and never merged into the result — see the note on `AgentEntry`.
   const [entries, setEntries] = useState<Partial<Record<FieldName, AgentEntry>>>({});
   const [imageIndex, setImageIndex] = useState(0);

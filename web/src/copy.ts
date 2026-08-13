@@ -80,7 +80,8 @@ export const VERDICTS: Record<Verdict, VerdictMeta> = {
     icon: 'question',
     meaning:
       'The picture was not clear enough to read this. Nothing has been verified here either way.',
-    whatToDo: 'Request a better image, or read this row off the bottle yourself.',
+    whatToDo:
+      'Request a better image from the applicant, or look at the artwork yourself — the tool could not read it, and a person often can.',
   },
   not_applicable: {
     word: 'Not applicable',
