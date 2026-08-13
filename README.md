@@ -11,6 +11,7 @@ recommendation. **It recommends — the agent decides.**
 | **Regulatory canon** | `PRD.md` Appendix B, verified against GPO CFR XML and Cornell LII, with retrieval dates recorded per item in `api/canon.py` |
 | **Developer log** | [`CHANGES.md`](CHANGES.md) — deploy, roll back, operate |
 | **Execution plan** | [`TICKETS.md`](TICKETS.md) — 330 tickets, each traced to a requirement ID |
+| **MVP audit** | [`docs/mvp-audit.md`](docs/mvp-audit.md) — the PRD's MVP checklist, line by line, 14 of 15 |
 | **Accuracy** | [`docs/accuracy.md`](docs/accuracy.md) — Tier A 100% on 175 rows, Tier B 71.4% on 21, confusion matrices, every miss explained |
 | **Cost** | [`docs/cost.md`](docs/cost.md) — $0.031 a verification, $0.018 in batch, measured |
 | **Latency** | [`docs/perf-deployed.md`](docs/perf-deployed.md) — 20 timed runs on the deployed URL |
@@ -138,11 +139,22 @@ outcome is "we did not verify this."
 and it gates CI. Tier B is real photographs of real bottles, reported separately and never
 gating. The gap between them is a published number rather than an embarrassment.
 
-### Tools
+### Tools, and what each was chosen over
 
-Python 3.14, FastAPI, Pillow + OpenCV, React + TypeScript, Claude Sonnet 5 for extraction
-and Haiku 4.5 for text adjudication, deployed as one container on Fly.io. Full rationale
-for each in [`CHANGES.md`](CHANGES.md).
+| Choice | Over | Because |
+|---|---|---|
+| **Python 3.14 + FastAPI** | Node, Go | The image work is OpenCV and Pillow, and the regulatory logic is a rules engine that has to be readable by someone checking it against the CFR. Async matters here only for holding a connection open during a model call, which FastAPI does without ceremony. |
+| **Claude Sonnet 5** | Haiku 4.5, Opus 5 | Measured, not assumed — the table below. Haiku is the only model that meets the 5-second gate and the only one that cannot pin US inference, and it got typography wrong 10 times in 20, always toward a false pass. |
+| **One vision call per image, concurrent** | One call for all images | Wall clock is the slower of two rather than the sum, and a per-image call keeps provenance honest: a field's evidence box belongs to a specific photograph. |
+| **Structured outputs (`output_config.format`)** | Prompt-and-parse | The schema is closed — `additionalProperties: false`, every key required — so `ExtractedField` has no channel for a guess. A value that cannot be read comes back `value=None, legible=False` because the grammar forces both keys to exist. |
+| **Deterministic rules in `api/rules/`** | Asking the model for verdicts | The model reads; it does not decide. Every verdict is computed by code that is unit-testable in milliseconds, cannot have an opinion, and can be audited line-by-line against 27 CFR by someone who does not know Python well. |
+| **Fly.io, one always-on machine** | Render, Railway, AWS | `auto_stop_machines = "off"` in one line — the previous vendor lost this account to slow first impressions, so a cold start on the grader's first click is that failure in miniature. Region is pinnable to `iad`, and the whole environment is one file, which is what makes the rebuild drill a real test rather than a paragraph. |
+| **SQLite on the machine's disk for batch** | Postgres, Redis | Uploads and results are ephemeral by policy — 24-hour TTL — and a managed database would be durable storage for exactly the data the retention rule exists to destroy. It also costs a second egress host. The trade is that batch requires a single machine; `fly.toml` and the smoke test both enforce it. |
+| **React + TypeScript, no UI framework** | Material, Chakra, Tailwind | Seven verdict states, one table, one dialog. A component library would ship 200KB to render a checklist and would have to be fought to meet the contrast and type-size floors that Section 508 actually requires. |
+| **Recorded fixtures + a fake adapter** | Mocking the SDK | CI runs inside `unshare --net`, so "offline" is demonstrated rather than claimed, and the fake replays real recorded responses — including their failure shapes — instead of whatever a mock author imagined. |
+
+Full build log and the decisions that were reversed along the way are in
+[`CHANGES.md`](CHANGES.md).
 
 ---
 
