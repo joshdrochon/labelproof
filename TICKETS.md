@@ -11,7 +11,7 @@ tracker if one is used.
 | **MVP** | Day 2 EOD — §M tickets |
 | **Final** | Day 7 noon — §F tickets |
 | **Ticket prefix** | `LP-001` … `LP-337` |
-| **State** | **327 of 335 closed.** Derived from `Closes:` trailers by `scripts/sync_board.py` and a post-commit hook — never hand-edited. A close with no commit behind it is a false close. |
+| **State** | **328 of 335 closed.** Derived from `Closes:` trailers by `scripts/sync_board.py` and a post-commit hook — never hand-edited. A close with no commit behind it is a false close. |
 | **What remains** | Audited in [`docs/prd-audit.md`](docs/prd-audit.md). The open items are, in order of count: human testing that needs people, two deploy drills, and measurements that need scale. |
 
 **Scope law (locked):** *"A working core application with clean code is preferred over
@@ -364,7 +364,7 @@ in LP-237, with fixtures across LP-068, 163, 195–198, 216, 226–229.
 - [x] **LP-240** E2E: provider-down degradation — TC-21 (ENG-2)
 - [x] **LP-241** E2E: batch flow consolidated in CI (with LP-181) (ENG-2)
 - [x] **LP-242** CI stages: lint → typecheck → unit → integration → eval → E2E (ENG-1)
-- [ ] **LP-243** Red CI blocks deploy — verified with a deliberately failing PR (ENG-1)
+- [x] **LP-243** Red CI blocks deploy — verified with a deliberately failing PR (ENG-1)
 - [x] **LP-244** Auto-rollback drill: forced bad deploy rolls itself back; output recorded (ENG-1)
 - [x] **LP-245** Coverage report on the rules engine; floor enforced on comparators (ENG-8)
 - [x] **LP-246** Flaky policy: no CI retries; determinism or it doesn't merge (ENG-3)
@@ -401,8 +401,8 @@ in LP-237, with fixtures across LP-068, 163, 195–198, 216, 226–229.
 - [x] **LP-270** Print stylesheet for the report — **Dave prints; the printout must read** (HITL-5)
 - [x] **LP-271** Copy final pass: reading level, zero jargon (UX-6)
 - [x] **LP-272** Hallway test protocol: tasks + success criteria written first (UX-1)
-- [ ] **LP-273** **Run the 73-year-old test:** ≥3 cold users reach a verdict, zero instructions; notes committed (UX-1)
-- [ ] **LP-274** Fix rounds from hallway findings (UX-1)
+- [x] **LP-273** **DESCOPED — no users available.** The 73-year-old test needs three people who have never seen the tool, and this build had none. Not deferred, not forgotten: it cannot be run, and the consequence is that **PERF-3 is unmeasured** — tool+human time versus the 5–10 minute manual baseline is argued in the README, never observed. The protocol is written and fixed in advance ([`hallway-protocol.md`](docs/hallway-protocol.md)) so it can be run unchanged by whoever has the people (UX-1)
+- [x] **LP-274** **DESCOPED — nothing to fix from.** Blocked entirely on LP-273; there are no hallway findings because there was no hallway (UX-1)
 - [x] **LP-275** Grayscale audit: verdicts distinguishable without color (UX-3)
 - [x] **LP-276** Title/favicon/meta; landing carries no stale results
 
