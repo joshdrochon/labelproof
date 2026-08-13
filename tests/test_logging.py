@@ -7,6 +7,7 @@ The rule is enforced structurally rather than by convention: the allowlist gover
 import io
 import json
 import logging
+from pathlib import Path
 
 import pytest
 
@@ -488,3 +489,80 @@ def test_the_runbook_has_a_triage_table_for_when_things_are_wrong() -> None:
     assert "When something is wrong" in readme
     for signal in ("unhandled_exception", "provider_retry", "sample_mode"):
         assert signal in readme
+
+
+# --------------------------------------------------------------------------------------
+# The audit, not the unit test (SEC-4, LP-251)
+# --------------------------------------------------------------------------------------
+
+
+def test_a_full_golden_set_run_emits_no_label_text_at_all(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Run the whole set through the real stack and read every line back.
+
+    The allowlist is unit-tested above — `test_logging_a_label_value_raises` proves a
+    banned key is refused. That is a test of the mechanism. This is the audit SEC-4
+    actually asks for: exercise the pipeline the way production does and prove no brand
+    name, producer, address or warning sentence reached the log, whatever path it took.
+
+    The difference matters because the ways label text escapes are not all through the
+    allowlist. An exception message quoting a value, a pydantic `input_value=...`, a
+    third-party library logging a request body — none of those go near the key check, and
+    each one is a real way an applicant's brand name ends up in a log aggregator.
+    """
+    import io as _io
+    import json as _json
+
+    from fastapi.testclient import TestClient
+
+    from api.config import Config
+    from api.main import create_app
+    from api.provider.fake import SpecBackedProvider
+    from fixtures.generator.catalog import CATALOG
+
+    root = Path(__file__).resolve().parents[1]
+    labels = root / "fixtures" / "labels"
+
+    stream = _io.StringIO()
+    handler = logging.StreamHandler(stream)
+    logging.getLogger().addHandler(handler)
+    try:
+        for spec in CATALOG:
+            files = [
+                ("images", (name, (labels / name).read_bytes(), "image/png"))
+                for name in [f"{spec.name}.png"]
+                + [f"{spec.name}_{face}.png" for face in ("front", "back")]
+                if (labels / name).is_file()
+            ]
+            if not files:
+                continue
+            client = TestClient(
+                create_app(config=Config(use_fake_provider=True), provider=SpecBackedProvider(spec))
+            )
+            client.post(
+                "/verify",
+                files=files,
+                data={"application": _json.dumps(spec.application())},
+            )
+    finally:
+        logging.getLogger().removeHandler(handler)
+
+    emitted = stream.getvalue() + capsys.readouterr().out
+
+    # Every value the applications and the labels carry. If any of it is in the log, the
+    # containment failed somewhere, and the point is not to guess where.
+    secrets: set[str] = set()
+    for spec in CATALOG:
+        application = spec.application()
+        for key in ("brand_name", "class_type", "producer_name", "producer_address"):
+            value = str(application.get(key, "")).strip()
+            if len(value) > 4:
+                secrets.add(value)
+        secrets.add(spec.rendered_warning()[:60])
+
+    leaked = sorted(value for value in secrets if value in emitted)
+    assert leaked == [], (
+        f"label text reached the log: {leaked[:5]}. SEC-4 says an operator reading logs "
+        f"must never see an applicant's label."
+    )

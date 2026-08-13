@@ -26,7 +26,7 @@ The brief's sha is quoted from the PRD's front matter; the `.docx` is not commit
 
 ## Contents
 
-- [Run it](#run-it) · [What it checks](#what-it-checks) · [Approach](#approach) · [Assumptions](#assumptions) · [What is not done](#what-is-not-done)
+- [Run it](#run-it) · [What it checks](#what-it-checks) · [Approach](#approach) · [Checking a batch](#checking-a-batch) · [Assumptions](#assumptions) · [What is not done](#what-is-not-done)
 - [Observability](#observability) — the log, the fields, the timings, and what the numbers actually are
 - [Ops runbook](#ops-runbook) — read the log, the timings, the cost; the honesty check
 - [Network egress](#network-egress) — every external domain, allowlist-ready (NET-1)
@@ -143,6 +143,44 @@ gating. The gap between them is a published number rather than an embarrassment.
 Python 3.14, FastAPI, Pillow + OpenCV, React + TypeScript, Claude Sonnet 5 for extraction
 and Haiku 4.5 for text adjudication, deployed as one container on Fly.io. Full rationale
 for each in [`CHANGES.md`](CHANGES.md).
+
+---
+
+## Checking a batch
+
+The second tab. An agent with a queue rather than a label — Janet has been asking for this
+for years, and the brief puts it at 300 applications at once (BATCH-1).
+
+**What you upload.** A CSV with one row per application, and the images those rows name —
+either as loose files or as a single `.zip`. `GET /batch/manifest-template.csv` is the
+template, linked from the page; the columns are the same seven fields the single-label
+form asks for, plus `front_image` and `back_image`.
+
+**A bad row does not reject the upload.** Three malformed rows out of 300 means 297 are
+queued and the three are reported by row number with the column that failed (TC-20).
+Making an agent fix a typo before any work starts is the batch equivalent of doing them
+one at a time.
+
+**Results appear while the job runs.** The table is not gated on completion — a 300-item
+batch takes minutes and the first rejections are triageable within seconds. Rows arrive
+**worst first**: return-for-correction, then items that could not be checked at all, then
+needs-review, then the clean ones. That order is computed on the server by the same ladder
+the single-label view uses, and the page never re-sorts it. Filters hide rows; they do not
+reorder them.
+
+**Failed is not the same as rejected.** An item that errored shows "Could not check" and
+says so on its own row — it never appears as a finding against the label. Retry requeues
+only the failed items and leaves the finished ones alone.
+
+**When it is done**: `Export CSV` writes one row per application with every field verdict,
+the driving field, the findings and the rationale — the file that goes in the case file
+and gets printed. Cells that a spreadsheet would execute are neutralised.
+
+Measured on the deployed URL: **22 applications in 42 seconds, 0 failures, $0.0179 per
+label** — cheaper than a single verification because the prompt cache is read on every
+item after the first. A 300-item run has not been performed; the extrapolation is roughly
+9.5 minutes against a 10-minute goal, and an extrapolation is exactly what cannot see rate
+limiting at that scale.
 
 ---
 

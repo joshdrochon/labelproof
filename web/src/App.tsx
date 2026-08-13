@@ -107,6 +107,15 @@ export default function App() {
           A prototype. It compares a label against an application and hands you a
           checklist — it does not approve, reject, or file anything.
         </p>
+        {/* SEC-1 and SCOPE-4, on screen rather than only in the README. Someone
+            evaluating this needs to know what they are looking at without reading a
+            document, and "no real applicant data" is a claim worth making where the
+            data would be. */}
+        <p className="site-footer__notice">
+          Every label here is synthetic or a photograph of a retail bottle. No applicant
+          data, no personal data, and nothing you upload is kept — images and results are
+          deleted within 24 hours.
+        </p>
       </footer>
     </div>
   );

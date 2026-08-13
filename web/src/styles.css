@@ -1981,6 +1981,11 @@ kbd {
   }
 }
 
+.site-footer__notice {
+  margin-top: 0.4rem;
+  color: var(--ink-faint);
+}
+
 @media print {
   /* Dave prints in black and white. Every verdict still reads, because every verdict
      is a word and an outline before it is ever a colour. */

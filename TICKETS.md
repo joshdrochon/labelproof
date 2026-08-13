@@ -281,7 +281,7 @@ in LP-237, with fixtures across LP-068, 163, 195–198, 216, 226–229.
 - [x] **LP-179** Keyboard navigation through the triage table (UX-4)
 - [x] **LP-180** Batch empty/error states in plain language (UX-6)
 - [x] **LP-181** E2E: batch flow incl. progressive results (ENG-2)
-- [ ] **LP-182** Batch docs: README section + in-app help blurb
+- [x] **LP-182** Batch docs: README section + in-app help blurb
 
 ## F3 · Image robustness
 
@@ -369,17 +369,17 @@ in LP-237, with fixtures across LP-068, 163, 195–198, 216, 226–229.
 
 - [x] **LP-249** EXIF/GPS strip verification test (SEC-3)
 - [x] **LP-250** TTL purge verification incl. batch artifacts (SEC-2)
-- [ ] **LP-251** Log audit test: golden-set run produces zero label strings in logs (SEC-4)
+- [x] **LP-251** Log audit test: golden-set run produces zero label strings in logs (SEC-4)
 - [x] **LP-252** Upload re-encode verification: polyglot file neutralized (SEC-5)
 - [x] **LP-253** Content-sniffing tests: renamed executable, scripted SVG, absurd dimensions (SEC-5)
 - [x] **LP-254** PDF renderer constrained: page cap, no external fetches, timeout (SEC-5)
 - [x] **LP-255** Rate-limit tests: burst → 429 with a plain-language body (SEC-9)
 - [x] **LP-256** Security headers scan in CI (SEC-6)
-- [ ] **LP-257** Dependency audit in CI, pinned versions, baseline documented (SEC-10)
+- [x] **LP-257** Dependency audit in CI, pinned versions, baseline documented (SEC-10)
 - [x] **LP-258** Secrets scan: pre-commit + CI (SEC-6)
 - [x] **LP-259** Provider data-handling documented: retention/training posture (SEC-7)
 - [x] **LP-260** Retention policy user-facing: UI notice + README (SEC-2)
-- [ ] **LP-261** Synthetic-data disclaimer in the UI footer (SEC-1, SCOPE-4)
+- [x] **LP-261** Synthetic-data disclaimer in the UI footer (SEC-1, SCOPE-4)
 - [x] **LP-262** Production-path doc: FedRAMP-authorized endpoints, Azure alignment, agency IdP, records schedules — documented, not built (SEC-8, SCOPE-2)
 
 ## F8 · Accessibility & UX polish

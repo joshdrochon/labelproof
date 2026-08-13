@@ -84,6 +84,24 @@ jobs:
       - name: Scan for credentials
         run: python scripts/scan_secrets.py --all
 
+      # SEC-10. Advisory-only on purpose: a new CVE in a transitive dependency is
+      # information, not a reason a correct commit stops being correct, and a gate that
+      # goes red on someone else's publication schedule gets switched off within a week.
+      # It runs on every commit so the baseline is a fact rather than a memory — both
+      # trees were clean when this was added, and a change from that shows up here.
+      #
+      # The dependency set is NOT pinned (floors, no lockfile — see the Dockerfile's
+      # note), so this is the only thing standing between a resolved version and nobody
+      # noticing. That trade is documented rather than quietly accepted.
+      - name: Audit dependencies
+        continue-on-error: true
+        run: |
+          python -m pip install pip-audit
+          echo "--- python ---"
+          pip-audit --progress-spinner off || echo "::warning title=Python advisory::pip-audit reported findings"
+          echo "--- javascript ---"
+          npm --prefix web audit || echo "::warning title=npm advisory::npm audit reported findings"
+
       # A hook committed without its executable bit does nothing and says nothing, which
       # is the worst failure mode a git hook has. Board integrity depends on post-commit
       # running; main-branch protection depends on pre-push (LP-016).
