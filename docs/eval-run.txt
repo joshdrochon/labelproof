@@ -1,23 +1,23 @@
 LabelProof eval -- Tier A (synthetic fixtures -- deterministic, gates CI)
 ==============================================================================
-Fixtures run: 19    Field rows scored: 133    Extractor: fake:spec
+Fixtures run: 25    Field rows scored: 175    Extractor: fake:spec
 
-Field accuracy: 133/133 (100.0%)   floor 95.0%   OK
+Field accuracy: 175/175 (100.0%)   floor 95.0%   OK
 
 Confusion matrix -- rows: expected, columns: actual
                            match  accvar  mismat  missng  unread     n/a  |   total  recall
-  match                      101       0       0       0       0       0  |     101    100%
-  acceptable_variation         0       1       0       0       0       0  |       1    100%
+  match                      132       0       0       0       0       0  |     132    100%
+  acceptable_variation         0       5       0       0       0       0  |       5    100%
   mismatch                     0       0       6       0       0       0  |       6    100%
-  missing                      0       0       0       2       0       0  |       2    100%
+  missing                      0       0       0       3       0       0  |       3    100%
   unreadable                   0       0       0       0       3       0  |       3    100%
-  not_applicable               0       0       0       0       0      20  |      20    100%
+  not_applicable               0       0       0       0       0      26  |      26    100%
   A '!' marks an expected verdict the pipeline did not always reproduce.
 
 ==============================================================================
 GOVERNMENT WARNING - ZERO-FALSE-PASS GATE (OPS-3, release-blocking)
 ==============================================================================
-  Warning rows scored:                  19
+  Warning rows scored:                  25
   Of those, violations the set says must NOT pass:    9   (required: 4)
   Of those, reported as passing (FALSE PASSES):       0   <- must be 0
 
@@ -34,10 +34,10 @@ LabelProof eval -- Tier B (real bottle photographs -- reported, never gates)
 ==============================================================================
 Fixtures run: 3    Field rows scored: 21    Extractor: live
 
-Field accuracy: 12/21 (57.1%)   floor 95.0%   BELOW FLOOR
+Field accuracy: 13/21 (61.9%)   floor 95.0%   BELOW FLOOR
 
-Mismatched expectations (9):
-  courtyard_rose_back                government_warning   expected match                  got unreadable
+Mismatched expectations (8):
+  courtyard_rose_back                government_warning   expected match                  got mismatch
   courtyard_rose_back                alcohol_content      expected not_applicable         got missing
   courtyard_rose_back                producer             expected acceptable_variation   got mismatch
   courtyard_rose_back                class_type           expected match                  got acceptable_variation
@@ -45,15 +45,14 @@ Mismatched expectations (9):
   bacardi151_glare_cropped_back      alcohol_content      expected unreadable             got missing
   bacardi151_glare_cropped_back      net_contents         expected unreadable             got missing
   bacardi151_glare_cropped_back      brand_name           expected match                  got mismatch
-  growler_warning_rotated            net_contents         expected unreadable             got missing
 
 Confusion matrix -- rows: expected, columns: actual
                            match  accvar  mismat  missng  unread     n/a  |   total  recall
-! match                        3       1       1       0       1       0  |       6     50%
+! match                        3       1       2       0       0       0  |       6     50%
 ! acceptable_variation         0       0       1       0       0       0  |       1      0%
   mismatch                     0       0       0       0       0       0  |       0       -
   missing                      0       0       0       3       0       0  |       3    100%
-! unreadable                   0       0       0       4       2       0  |       6     33%
+! unreadable                   0       0       0       3       3       0  |       6     50%
 ! not_applicable               0       0       0       1       0       4  |       5     80%
   A '!' marks an expected verdict the pipeline did not always reproduce.
 
@@ -67,7 +66,7 @@ GOVERNMENT WARNING - ZERO-FALSE-PASS GATE (OPS-3, release-blocking)
   Clean: 1 violation(s) checked, none slipped through.
 ------------------------------------------------------------------------------
 
-A-to-B accuracy gap: +42.9 pp   (Tier A 100.0% on 133 rows, Tier B 57.1% on 21 rows)
+A-to-B accuracy gap: +38.1 pp   (Tier A 100.0% on 175 rows, Tier B 61.9% on 21 rows)
   Published, not averaged, and they measure different things. Tier A scores the
   RULES ENGINE against hand-authored ground truth: no pixels and no model are
   involved. Tier B scores the whole pipeline, model included, on photographs.
@@ -78,8 +77,8 @@ Tier B does not gate. The verdict below is Tier A's alone.
 CI gates (OPS-6) -- blocking gates set the exit code:
   [pass] warning_zero_false_pass  blocking  exit 3   0 false passes across 9 violation row(s)
   [pass] warning_gate_exercised   blocking  exit 5   9 warning-violation row(s) scored, 4 required
-  [pass] harness_ran_clean        blocking  exit 4   19 fixture(s) ran
-  [pass] field_accuracy           blocking  exit 1   100.0% of 133 rows, floor 95.0%
+  [pass] harness_ran_clean        blocking  exit 4   25 fixture(s) ran
+  [pass] field_accuracy           blocking  exit 1   100.0% of 175 rows, floor 95.0%
 
 PASS
 

@@ -11,7 +11,7 @@ recommendation. **It recommends — the agent decides.**
 | **Regulatory canon** | `PRD.md` Appendix B, verified against GPO CFR XML and Cornell LII, with retrieval dates recorded per item in `api/canon.py` |
 | **Developer log** | [`CHANGES.md`](CHANGES.md) — deploy, roll back, operate |
 | **Execution plan** | [`TICKETS.md`](TICKETS.md) — 330 tickets, each traced to a requirement ID |
-| **Accuracy** | [`docs/accuracy.md`](docs/accuracy.md) — Tier A 100%, Tier B 57.1%, confusion matrices, every miss explained |
+| **Accuracy** | [`docs/accuracy.md`](docs/accuracy.md) — Tier A 100% on 175 rows, Tier B 61.9% on 21, confusion matrices, every miss explained |
 | **Cost** | [`docs/cost.md`](docs/cost.md) — $0.031 a verification, $0.018 in batch, measured |
 | **Latency** | [`docs/perf-deployed.md`](docs/perf-deployed.md) — 20 timed runs on the deployed URL |
 | **Robustness** | [`docs/robustness.md`](docs/robustness.md) — angle, blur, glare, occlusion |
@@ -43,7 +43,7 @@ Nothing below needs an API key. The suite and the demo both run offline.
 git clone <this repo> && cd labelproof
 python3.14 -m venv .venv && .venv/bin/pip install -e ".[dev]"
 
-.venv/bin/python -m pytest                        # 3417 tests, offline, ~4 min
+.venv/bin/python -m pytest                        # 3523 tests, offline, ~4 min
 .venv/bin/python -m eval.run                      # the accuracy gate
 LABELPROOF_FAKE_PROVIDER=1 .venv/bin/uvicorn api.main:app --reload
 ```
@@ -134,7 +134,7 @@ never the reverse, so low confidence can neither pass a violation nor wash one a
 reason and **zero** model calls. That path cannot produce a false pass, because its
 outcome is "we did not verify this."
 
-**Two tiers of evidence.** Tier A is 19 synthetic fixtures, deterministic and byte-stable,
+**Two tiers of evidence.** Tier A is 25 synthetic fixtures, deterministic and byte-stable,
 and it gates CI. Tier B is real photographs of real bottles, reported separately and never
 gating. The gap between them is a published number rather than an embarrassment.
 
@@ -227,10 +227,10 @@ here.
   against a 10-minute goal. Extrapolation is not measurement, and rate limiting at that
   scale is exactly what an extrapolation cannot see.
 - **Tier B is six photographs, three of them scored.** They earned their place — each
-  found a real defect the 19 synthetic fixtures could not — but six is a sample, not a
+  found a real defect the synthetic fixtures could not — but six is a sample, not a
   corpus, none of the ground truth is hand-transcribed, and every image-quality threshold
-  in the system is still calibrated against rendered PNGs. Tier B scores **57.1%** against
-  Tier A's 100%; that 42.9-point gap is the honest answer to "does this work", and it is
+  in the system is still calibrated against rendered PNGs. Tier B scores **61.9%** against
+  Tier A's 100%; that 38-point gap is the honest answer to "does this work", and it is
   published in [`docs/accuracy.md`](docs/accuracy.md) rather than averaged away.
 - **Accessibility has not been audited.** No axe run, no keyboard-only walkthrough, no
   screen-reader pass. The markup was written for it — semantic tables, live regions, a

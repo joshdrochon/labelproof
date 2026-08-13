@@ -297,16 +297,40 @@ would otherwise have to discover.
 > auto-rollback have never executed against the deployed artifact. That is a real gap and
 > it is the reason this section is a plan.
 >
-> Local gates are green: ruff clean, `mypy --strict api/` clean, 3403 tests passing, the
-> eval at 100% on Tier A with zero warning false passes. CI on this branch was red for
-> eight commits on three environment differences (an SPA build CI does not run, a Linux
-> font rasterizer, and a timing ceiling set from a laptop) — all three fixed, none of them
-> defects in the product.
+> Local gates are green: ruff clean, `mypy --strict api/` clean, 3510 tests passing, the
+> eval at 100% on Tier A across 175 rows with zero warning false passes. CI on this branch
+> was red for ten commits on environment differences rather than defects — an SPA build CI
+> does not run, a Linux font rasterizer measuring different pixels than macOS, a timing
+> ceiling set from a laptop, and four retention tests asserting a SQLite build detail as a
+> precondition. All fixed.
 >
 > It remains true that nothing below has been exercised end to end, and it is *why* a
 > production returning 503 on every verification survived long enough to be found by hand.
 > The first green pipeline run is the thing to watch for; until then, read
 > this section as intended behaviour rather than observed.
+
+### Deploying by hand
+
+Every deployment so far has been this, because the pipeline has never run:
+
+```bash
+fly deploy --app labelproof --ha=false
+scripts/smoke.sh https://labelproof.fly.dev
+```
+
+**`--ha=false` is not optional.** Without it `fly deploy` creates TWO machines, and batch
+state is SQLite on each machine's own disk — no volume, deliberately. A job queued on one
+does not exist on the other, the edge round-robins, and a status poll alternates 200 and
+400 `batch_not_found`. Observed in production: `400 200 400 200 400 200`. The batch itself
+completes fine on the machine that owns it while the page watching it flickers "no batch
+with that reference" every other tick.
+
+`fly.toml` cannot pin the machine count — Fly takes it from the deploy command — so this
+line and step 6 of `scripts/smoke.sh` are the control. The smoke test queues a real batch
+and polls it six times, which fails on a two-machine app and cannot be satisfied by
+reading configuration back. If you ever find two machines: `fly scale count 1`.
+
+### What the pipeline would do
 
 `main` deploys itself. `.github/workflows/deploy.yml` runs the release gate — lint, types,
 the full test suite, the golden-set eval, a production web build — and only then ships.
