@@ -78,7 +78,7 @@ spinner. `api/errors.py` is the taxonomy; `next_step` drives what the UI offers.
 |---|---|
 | [`README.md`](../README.md) | Setup, approach, tools, assumptions, trade-offs, limitations, egress, production path |
 | [`PRD.md`](../PRD.md) | Requirements, 114 of them, cited by ID throughout the code |
-| [`TICKETS.md`](../TICKETS.md) | 330 tickets; a checkbox is derived from a `Closes:` trailer, never hand-set |
+| [`TICKETS.md`](../TICKETS.md) | 332 tickets; a checkbox is derived from a `Closes:` trailer, never hand-set |
 | [`CHANGES.md`](../CHANGES.md) | Run, test, deploy, roll back |
 | [`prd-audit.md`](prd-audit.md) | Both PRD checklists, line by line — MVP 14/15, Final 6/11 |
 
