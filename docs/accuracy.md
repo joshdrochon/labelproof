@@ -21,18 +21,18 @@ byte-for-byte.
 | What it scores | The rules engine | The whole pipeline, model included |
 | Input | 25 synthetic labels | 3 photographs of real bottles |
 | Field rows | 175 | 21 |
-| **Field accuracy** | **100.0%** | **61.9%** |
+| **Field accuracy** | **100.0%** | **71.4%** |
 | Warning false passes | **0** | **0** |
 | Gates CI | yes | never |
 
-**A-to-B gap: +38.1 percentage points.**
+**A-to-B gap: +28.6 percentage points.**
 
 Published rather than averaged, because the two measure different things. Tier A scores
 deterministic comparison logic against hand-authored ground truth — no pixels and no model
 are involved, so 100% means "the rules do what the rules are specified to do" and nothing
 about whether a photograph can be read. Tier B scores everything, on real bottles.
 
-Blending them would produce a number around 96% that describes no real situation. The gap
+Blending them would produce a number around 97% that describes no real situation. The gap
 is the honest answer to "does this work", and it is the number to argue with.
 
 ---
@@ -78,69 +78,68 @@ scored. Both conditions held.
 
 ## Tier B — real photographs
 
-13 of 21 rows correct. Every miss from the committed run:
+15 of 21 rows correct. Every miss from the committed run:
 
 | Label | Field | Expected | Got | |
 |---|---|---|---|---|
-| bacardi151_glare_cropped | class_type | unreadable | **missing** | Real defect |
-| bacardi151_glare_cropped | alcohol_content | unreadable | **missing** | Real defect |
-| bacardi151_glare_cropped | net_contents | unreadable | **missing** | Real defect |
-| bacardi151_glare_cropped | brand_name | match | mismatch | Real defect |
-| courtyard_rose_back | producer | acc. variation | mismatch | Real defect |
-| courtyard_rose_back | alcohol_content | not applicable | missing | Real defect |
-| courtyard_rose_back | government_warning | match | mismatch | Model variance |
+| bacardi151_glare_cropped | class_type | unreadable | **missing** | Real defect, open |
+| bacardi151_glare_cropped | alcohol_content | unreadable | **missing** | Real defect, open |
+| bacardi151_glare_cropped | net_contents | unreadable | **missing** | Real defect, open |
+| bacardi151_glare_cropped | brand_name | match | mismatch | By design — see below |
+| courtyard_rose_back | government_warning | match | unreadable | Conservative |
 | courtyard_rose_back | class_type | match | acc. variation | Conservative |
 
-**These rows move between runs.** Tier B calls a live model on real photographs, so the
-exact set is not reproducible the way Tier A is — an earlier run of the same three labels
-scored 12/21 with `government_warning` coming back Unreadable rather than Mismatch, and
-the growler's `net_contents` missing where it now passes. That instability is information
-rather than noise: it is what "57–62% on real photographs" actually means, and it is the
-reason this tier is reported and never gated.
+**Two rows moved out of this table since the last run, and both were real.** The producer
+on the Courtyard label — `PRODUCED AND BOTTLED BY THE COURTYARD WINERIES / NORTH EAST, PA
+16428` — was scored a Mismatch because `compare_producer` joins the application's name and
+address with a comma before looking for them, and the label prints them on two lines with
+no comma. The fixture that was supposed to cover this happened to carry one. Fixed: every
+part must be present, which is the same claim against a value stored in two columns.
+
+The other was **not** a code defect and is recorded because being wrong about it is
+instructive. A wine showing no alcohol content came back Missing and that was reported as
+a false finding, on the assumption that a wine without an ABV is exempt. 27 CFR 4.36(b) is
+narrower: a wine at or below 14% may print "table wine" or "light wine" IN LIEU of the
+alcohol statement. This label is designated "Dry Rosé" and carries neither, so the
+statement is required. The pipeline was right and the expectation was wrong.
+
+**These rows also move between runs.** Tier B calls a live model on real photographs, so
+the exact set is not reproducible the way Tier A is — the warning row has come back
+Unreadable on one run and Mismatch on another. That instability is information rather than
+noise: it is what "roughly 70% on real photographs" means, and it is the reason this tier
+is reported and never gated.
 
 ### Failure analysis
 
-**Three rows: cropped content reported as Missing.** The most serious group, and the only
-one that could hurt an applicant. The Bacardi photograph cuts off the right edge of the
-label, so class type, alcohol content and net contents are not in the frame. The pipeline
-reports them **Missing** — a finding against the label, and grounds to return an
+**Three rows: cropped content reported as Missing.** The one remaining defect, and the
+only one here that could hurt an applicant. The Bacardi photograph cuts off the right edge
+of the label, so class type, alcohol content and net contents are not in the frame. The
+pipeline reports them **Missing** — a finding against the label, and grounds to return an
 application for correction. The truth is **Unreadable** — a statement about the
 photograph. Reporting the second as the first is a false accusation, and it inverts the
 asymmetry the whole design rests on.
 
 Not fixed. Distinguishing "not on the label" from "not in the picture" needs a signal the
-pipeline does not compute: whether the label runs past the frame boundary. Stated here
-rather than left for a reviewer to find, and named in the README's limitations.
+pipeline does not compute: whether the label runs past the frame boundary. Named in the
+README's limitations rather than left for a reviewer to find.
 
 **One row: a brand name printed with its class.** The label reads `BACARDI 151° Rum`
-against an application holding `Bacardi 151`. `compare_brand_name` deliberately does not
+against an application holding `Bacardi 151`. `compare_brand_name` deliberately does NOT
 take the surrounding-text allowance that producer and country of origin do, because a
-brand is the field most likely to be *nearly* right. This is the cost of that choice,
-visible rather than assumed.
+brand buried in a longer string is not the same claim as the brand. This is the cost of
+that choice, visible rather than assumed, and it is the trade this project would defend.
 
-**One row: a producer printed with its lead-in phrase.** `PRODUCED AND BOTTLED BY THE
-COURTYARD WINERIES / NORTH EAST, PA 16428` against `The Courtyard Wineries`. Three earlier
-photographs found this exact shape and the containment allowance was built for it —
-`tc24_producer_with_lead_in_phrase` now pins it in Tier A and passes. It does not fire
-here, most likely because the address falls on a second line. A real gap in a fix that was
-believed complete, and the clearest case for Tier B existing.
-
-**One row: a wine ABV called Missing.** Expected Not applicable. `tc26` was added to Tier
-A precisely because the table-wine exemption had no upper edge; this photograph is the
-same question on a real label, and the two disagree. Worth chasing before the exemption is
-trusted either way.
-
-**Two rows: conservative, or model variance.** `Dry Rosé` against `Dry Rose` scores
-Acceptable variation where the expectation said Match; the accent is a real difference and
-naming it is defensible — Tier A's `tc28` now expects that answer. The warning row moved
-between runs and is the least stable in the set; the image is 337×443, well under the
-1568px high-resolution tier, so no reading of it should be trusted far.
+**Two rows: conservative.** `Dry Rosé` against `Dry Rose` scores Acceptable variation
+where the expectation said Match; the accent is a real difference and naming it rather
+than folding it silently is defensible — Tier A's `tc28` expects the same answer. The
+warning row is the least stable in the set: the image is 337×443, well under the 1568px
+high-resolution tier, so refusing to certify it is honest rather than a failure.
 
 ### What Tier B is not
 
 Three photographs, none hand-verified — ground truth is bootstrapped from a run and
 corrected by eye, which is weaker than transcription. 21 rows is a sample, not a corpus.
-The 61.9% has wide error bars and should be read as "this is the shape of the gap", not as
+The 71.4% has wide error bars and should be read as "this is the shape of the gap", not as
 a measurement precise to a percentage point.
 
 **Warning violations cannot appear here at all.** A commercially approved bottle does not

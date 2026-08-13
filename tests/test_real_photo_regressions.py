@@ -209,3 +209,80 @@ def test_the_estimator_reports_zero_rather_than_the_filter_boundary() -> None:
     for name in sorted(p.name for p in PHOTOS.glob("*")):
         angle = estimate_skew(_photo(name))
         assert abs(abs(angle) - 45.0) > 2.0, f"{name} reported {angle}, at the boundary"
+
+
+def test_a_producer_split_across_lines_is_not_a_mismatch() -> None:
+    """Found on the Courtyard Winery photograph, AFTER this was believed fixed.
+
+    Three earlier photographs produced the surrounding-text allowance, and
+    `tc24_producer_with_lead_in_phrase` pins it in the golden set. Both pass. This one
+    did not, because the application stores the producer as a name and an address in two
+    columns and `compare_producer` joins them with a comma before looking for them:
+
+        expected   "The Courtyard Wineries, North East, PA 16428"
+        label      "PRODUCED AND BOTTLED BY THE COURTYARD WINERIES NORTH EAST, PA 16428"
+
+    The label prints them on separate lines with no comma between, so the joined string
+    is not contained even though both halves plainly are. The fixture that was supposed
+    to cover this happened to carry a comma, which is why it passed while the real label
+    failed — a fixture agreeing with the code about a detail neither had thought about.
+    """
+    from api.models import ExtractedField, FieldName
+    from api.rules import compare
+
+    extracted = ExtractedField(
+        field=FieldName.PRODUCER,
+        value="PRODUCED AND BOTTLED BY THE COURTYARD WINERIES NORTH EAST, PA 16428",
+        legible=True,
+        confidence=0.95,
+    )
+    result = compare.compare_producer(
+        extracted, "The Courtyard Wineries", "North East, PA 16428"
+    )
+
+    assert result.verdict is Verdict.ACCEPTABLE_VARIATION
+
+
+def test_a_genuinely_different_producer_is_still_a_mismatch() -> None:
+    """The allowance must not become "any producer at all".
+
+    Accepting the parts separately is still a containment claim — EVERY part has to be
+    present — not a looser match.
+    """
+    from api.models import ExtractedField, FieldName
+    from api.rules import compare
+
+    extracted = ExtractedField(
+        field=FieldName.PRODUCER,
+        value="Bottled by Somebody Else, Elsewhere, CA 90210",
+        legible=True,
+        confidence=0.95,
+    )
+    result = compare.compare_producer(
+        extracted, "The Courtyard Wineries", "North East, PA 16428"
+    )
+
+    assert result.verdict is Verdict.MISMATCH
+
+
+def test_a_wine_without_a_low_alcohol_designation_must_state_its_abv() -> None:
+    """The Courtyard row I reported as a bug, and was wrong about.
+
+    A wine back label showing no alcohol content came back Missing and I read that as a
+    false finding — the assumption being that a wine without an ABV is exempt. 27 CFR
+    4.36(b) is narrower: a wine at or below 14% may print "table wine" or "light wine"
+    IN LIEU of the alcohol statement. This label is designated "Dry Rosé" and carries
+    neither, so the statement is required and its absence is a real finding.
+
+    The pipeline was right. The Tier B expectation was wrong and is corrected in
+    `golden/tier_b/manifest.json`. Kept as a test because the next person to look at a
+    wine label with no ABV will have the same instinct I did.
+    """
+    from api.rules import commodity as com
+
+    assert not com.is_low_alcohol_wine("Dry Rosé", None)
+    assert not com.is_low_alcohol_wine("Cabernet Sauvignon", 12.0)
+    # Both halves of the exemption, and the designation is the half that was forgotten.
+    assert com.is_low_alcohol_wine("Table Wine", 12.0)
+    assert com.is_low_alcohol_wine("Table Wine", None)
+    assert not com.is_low_alcohol_wine("Table Wine", 15.0)

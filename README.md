@@ -11,7 +11,7 @@ recommendation. **It recommends — the agent decides.**
 | **Regulatory canon** | `PRD.md` Appendix B, verified against GPO CFR XML and Cornell LII, with retrieval dates recorded per item in `api/canon.py` |
 | **Developer log** | [`CHANGES.md`](CHANGES.md) — deploy, roll back, operate |
 | **Execution plan** | [`TICKETS.md`](TICKETS.md) — 330 tickets, each traced to a requirement ID |
-| **Accuracy** | [`docs/accuracy.md`](docs/accuracy.md) — Tier A 100% on 175 rows, Tier B 61.9% on 21, confusion matrices, every miss explained |
+| **Accuracy** | [`docs/accuracy.md`](docs/accuracy.md) — Tier A 100% on 175 rows, Tier B 71.4% on 21, confusion matrices, every miss explained |
 | **Cost** | [`docs/cost.md`](docs/cost.md) — $0.031 a verification, $0.018 in batch, measured |
 | **Latency** | [`docs/perf-deployed.md`](docs/perf-deployed.md) — 20 timed runs on the deployed URL |
 | **Robustness** | [`docs/robustness.md`](docs/robustness.md) — angle, blur, glare, occlusion |
@@ -229,8 +229,8 @@ here.
 - **Tier B is six photographs, three of them scored.** They earned their place — each
   found a real defect the synthetic fixtures could not — but six is a sample, not a
   corpus, none of the ground truth is hand-transcribed, and every image-quality threshold
-  in the system is still calibrated against rendered PNGs. Tier B scores **61.9%** against
-  Tier A's 100%; that 38-point gap is the honest answer to "does this work", and it is
+  in the system is still calibrated against rendered PNGs. Tier B scores **71.4%** against
+  Tier A's 100%; that 28.6-point gap is the honest answer to "does this work", and it is
   published in [`docs/accuracy.md`](docs/accuracy.md) rather than averaged away.
 - **Accessibility has not been audited.** No axe run, no keyboard-only walkthrough, no
   screen-reader pass. The markup was written for it — semantic tables, live regions, a
@@ -268,11 +268,16 @@ here.
 | Found North, back label | "BOTTLED BY X, CAMBRIDGE, WI" did not match an application saying "X, Cambridge, WI" | fixed |
 | Courtyard rosé, back label | The skew estimator reported **-45.0°** on a square-on photograph | fixed |
 | Fireball, back label | The same estimator reported **34°** on a good photograph, and `correct()` acts at 1.5° | fixed |
+| Courtyard rosé, back label | A producer printed across two lines matched nothing, because the application's name and address are joined with a comma the label does not print | fixed |
 | Bacardi 151, back label | Content cropped out of frame reported as **Missing** — a finding against the label — rather than Unreadable | **open** |
 
-The first three were the same shape: **the label prints the value inside a phrase, the
-application holds the bare value, and we called that a mismatch.** All three are fixed and
-pinned in `tests/test_real_photo_regressions.py`. A torn beer label separately confirmed
+Four of these are one shape: **the label prints the value inside a phrase, the
+application holds the bare value, and we called that a mismatch.** The fourth arrived
+after the first three were fixed and the fix was believed complete — the synthetic fixture
+pinning it happened to carry a comma the real label does not, so the fixture and the code
+agreed with each other about a detail neither had considered. That is the argument for
+Tier B in one sentence. All four are fixed and pinned in
+`tests/test_real_photo_regressions.py`. A torn beer label separately confirmed
 the extractor does not recite the warning from memory — occlude a line and it returns
 nothing, `legible=False`, rather than completing it.
 

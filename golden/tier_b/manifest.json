@@ -41,7 +41,7 @@
         "net_contents": "match",
         "producer": "acceptable_variation",
         "government_warning": "match",
-        "alcohol_content": "not_applicable",
+        "alcohol_content": "missing",
         "country_of_origin": "not_applicable"
       },
       "expect_findings": {},
@@ -51,7 +51,7 @@
         "distance": "close"
       },
       "ground_truth": "bootstrapped",
-      "notes": "The first WINE in the corpus; every other photograph is spirits or malt, so the commodity rules had never been exercised against a real label. Warning is present, complete and legible to the eye, with a bold 'GOVERNMENT WARNING:' heading and regular body. Producer prints as 'PRODUCED AND BOTTLED BY THE COURTYARD WINERIES / NORTH EAST, PA 16428' \u2014 the lead-in phrase case that three earlier photographs already found. alcohol_content is the uncertain row and is why this is bootstrapped rather than hand_verified: no ABV appears on the label and the label does not carry a 'table wine' designation either, so whether TTB requires one here is a question for an agent and not for me. Measured at 337x443, well under the 1568px high-resolution tier, which is itself worth keeping in the set: it is what a downloaded product photo looks like."
+      "notes": "The first WINE in the corpus; every other photograph is spirits or malt, so the commodity rules had never been exercised against a real label. Warning is present, complete and legible to the eye, with a bold 'GOVERNMENT WARNING:' heading and regular body. Producer prints as 'PRODUCED AND BOTTLED BY THE COURTYARD WINERIES / NORTH EAST, PA 16428' across two lines with no comma after the name \u2014 which is the case that exposed the containment allowance only matching the joined 'Name, Address' form. Measured at 337x443, well under the 1568px high-resolution tier, which is itself worth keeping: it is what a downloaded product photo looks like. alcohol_content EXPECTS MISSING, and this row was wrong in the first version of this file. It expected Not applicable on the assumption that a wine without an ABV is exempt. 27 CFR 4.36(b) is narrower than that: a wine at or below 14% may print 'table wine' or 'light wine' IN LIEU of the alcohol statement. This label is designated 'Dry Rose' and carries neither, so the statement is required and its absence is a real finding. The pipeline was right and the expectation was wrong."
     },
     {
       "name": "bacardi151_glare_cropped_back",

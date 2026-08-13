@@ -148,6 +148,7 @@ def compare_text(
     findings: list[Finding] | None = None,
     normalizer: Callable[[str], str] | None = None,
     allow_surrounding_text: bool = False,
+    expected_parts: tuple[str, ...] = (),
 ) -> FieldResult:
     """Tier 1/2 comparison for a free-text field.
 
@@ -156,6 +157,18 @@ def compare_text(
     it is right for a producer or a country, whose regulated phrasing wraps the value
     ("Bottled by …", "Distilled in …"), and wrong for a brand name, where the brand
     buried in a longer string is not the same claim as the brand.
+
+    `expected_parts` is for a value assembled from more than one field. The producer is
+    the only one: the application holds a name and an address separately and this joins
+    them with a comma, so containment looks for "Name, Address" as one string. A label
+    prints them on two lines with no comma — `PRODUCED AND BOTTLED BY / THE COURTYARD
+    WINERIES / NORTH EAST, PA 16428` — and containment failed on the joined form while
+    both halves were plainly there. Found on a real photograph AFTER the surrounding-text
+    allowance was believed complete, because the fixture that pinned it happened to carry
+    a comma.
+
+    Every part must be present. This is not a looser match, it is the same claim made
+    against a value the application stores in two columns.
     """
     findings = findings or []
     evidence = (
@@ -196,10 +209,16 @@ def compare_text(
 
     left, right = (normalizer(found), normalizer(expected)) if normalizer else (found, expected)
 
+    parts_present = bool(expected_parts) and all(
+        contains_after_normalization(left, normalizer(part) if normalizer else part)
+        for part in expected_parts
+        if part.strip()
+    )
+
     if (
         allow_surrounding_text
         and not equal_after_normalization(left, right)
-        and contains_after_normalization(left, right)
+        and (contains_after_normalization(left, right) or parts_present)
     ):
         # The label carries the application's value inside a longer statement — "BOTTLED
         # BY …", "DISTILLED IN …". That is how labels are printed, and demanding equality
@@ -294,6 +313,9 @@ def compare_producer(
         label="bottler or producer name and address",
         normalizer=expand_state_abbreviations,
         allow_surrounding_text=True,
+        # Both halves, so a label that prints the name and the address on separate lines
+        # is not reported as a mismatch for lacking the comma this joins them with.
+        expected_parts=(expected_name, expected_address),
     )
 
 

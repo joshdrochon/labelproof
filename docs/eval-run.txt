@@ -34,12 +34,10 @@ LabelProof eval -- Tier B (real bottle photographs -- reported, never gates)
 ==============================================================================
 Fixtures run: 3    Field rows scored: 21    Extractor: live
 
-Field accuracy: 13/21 (61.9%)   floor 95.0%   BELOW FLOOR
+Field accuracy: 15/21 (71.4%)   floor 95.0%   BELOW FLOOR
 
-Mismatched expectations (8):
-  courtyard_rose_back                government_warning   expected match                  got mismatch
-  courtyard_rose_back                alcohol_content      expected not_applicable         got missing
-  courtyard_rose_back                producer             expected acceptable_variation   got mismatch
+Mismatched expectations (6):
+  courtyard_rose_back                government_warning   expected match                  got unreadable
   courtyard_rose_back                class_type           expected match                  got acceptable_variation
   bacardi151_glare_cropped_back      class_type           expected unreadable             got missing
   bacardi151_glare_cropped_back      alcohol_content      expected unreadable             got missing
@@ -48,12 +46,12 @@ Mismatched expectations (8):
 
 Confusion matrix -- rows: expected, columns: actual
                            match  accvar  mismat  missng  unread     n/a  |   total  recall
-! match                        3       1       2       0       0       0  |       6     50%
-! acceptable_variation         0       0       1       0       0       0  |       1      0%
+! match                        3       1       1       0       1       0  |       6     50%
+  acceptable_variation         0       1       0       0       0       0  |       1    100%
   mismatch                     0       0       0       0       0       0  |       0       -
-  missing                      0       0       0       3       0       0  |       3    100%
+  missing                      0       0       0       4       0       0  |       4    100%
 ! unreadable                   0       0       0       3       3       0  |       6     50%
-! not_applicable               0       0       0       1       0       4  |       5     80%
+  not_applicable               0       0       0       0       0       4  |       4    100%
   A '!' marks an expected verdict the pipeline did not always reproduce.
 
 ==============================================================================
@@ -66,7 +64,7 @@ GOVERNMENT WARNING - ZERO-FALSE-PASS GATE (OPS-3, release-blocking)
   Clean: 1 violation(s) checked, none slipped through.
 ------------------------------------------------------------------------------
 
-A-to-B accuracy gap: +38.1 pp   (Tier A 100.0% on 175 rows, Tier B 61.9% on 21 rows)
+A-to-B accuracy gap: +28.6 pp   (Tier A 100.0% on 175 rows, Tier B 71.4% on 21 rows)
   Published, not averaged, and they measure different things. Tier A scores the
   RULES ENGINE against hand-authored ground truth: no pixels and no model are
   involved. Tier B scores the whole pipeline, model included, on photographs.
