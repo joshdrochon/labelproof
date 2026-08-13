@@ -11,6 +11,8 @@ tracker if one is used.
 | **MVP** | Day 2 EOD — §M tickets |
 | **Final** | Day 7 noon — §F tickets |
 | **Ticket prefix** | `LP-001` … `LP-332` |
+| **State** | **308 of 330 closed.** Derived from `Closes:` trailers by `scripts/sync_board.py` and a post-commit hook — never hand-edited. A close with no commit behind it is a false close. |
+| **What remains** | Audited in [`docs/prd-audit.md`](docs/prd-audit.md). The open items are, in order of count: human testing that needs people, two deploy drills, and measurements that need scale. |
 
 **Scope law (locked):** *"A working core application with clean code is preferred over
 ambitious but incomplete features"* — no §F ticket starts while a §M checklist item is open.
@@ -414,7 +416,7 @@ in LP-237, with fixtures across LP-068, 163, 195–198, 216, 226–229.
 
 ## F10 · Accuracy report
 
-- [ ] **LP-287** Final eval on the full golden set; inputs frozen (OPS-3)
+- [x] **LP-287** Final eval on the full golden set; inputs frozen (OPS-3)
 - [x] **LP-288** Field accuracy vs the ≥95% floor; table published (OPS-3)
 - [x] **LP-289** Confusion matrix published (OPS-2)
 - [x] **LP-290** **Zero false passes on warning violations — verified and published** (OPS-3)
@@ -442,17 +444,17 @@ in LP-237, with fixtures across LP-068, 163, 195–198, 216, 226–229.
 - [x] **LP-306** Fresh-clone test on a clean machine; README gaps fixed (DEL-3)
 - [x] **LP-307** Deployed URL final smoke + keep-warm confirmed (DEL-1)
 - [x] **LP-308** Sample label set downloadable inside the app — graders test in seconds (DEL-5)
-- [ ] **LP-310** PRD final sync: shipped reality matches the doc; deltas listed as trade-offs (DEL-7)
-- [ ] **LP-311** TICKETS final sync: board true, counts updated (DEL-7)
+- [x] **LP-310** PRD final sync: shipped reality matches the doc; deltas listed as trade-offs (DEL-7)
+- [x] **LP-311** TICKETS final sync: board true, counts updated (DEL-7)
 - [ ] **LP-312** Tag `v1.0` + release notes
 
 ## F13 · Final QA
 
-- [ ] **LP-313** Full regression + eval + E2E green on the final commit (ENG-1)
+- [x] **LP-313** Full regression + eval + E2E green on the final commit (ENG-1)
 - [ ] **LP-314** Cross-browser: Chrome, Safari, Firefox, Edge (UX)
 - [ ] **LP-315** Tablet sanity pass (UX)
 - [ ] **LP-316** Error-path sweep: every error state visited by hand (UX-6)
-- [ ] **LP-317** PRD checklists (MVP + Final): line-by-line self-audit (ENG-9)
+- [x] **LP-317** PRD checklists (MVP + Final): line-by-line self-audit (ENG-9)
 - [x] **LP-318** Evaluation-criteria walkthrough: the brief's six criteria, each with pointable evidence (BR)
 - [ ] **LP-319** Fresh-eyes full walkthrough; final fixes (UX-1)
 - [ ] **LP-320** Submission sign-off: deliverables table complete, everything reachable (DEL-1..7)

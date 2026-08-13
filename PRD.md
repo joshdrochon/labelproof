@@ -175,6 +175,32 @@ The vendor pilot died of unexplained slowness; LabelProof instruments against ex
 
 ---
 
+## Where the shipped product differs from this document
+
+`PRD.md` is v1.0 and is not edited to match what was built — the rule this project runs on
+is that when the code and this document disagree, the document is right and the code is a
+bug. The exceptions are recorded here instead, as trade-offs (DEL-7, SCOPE-5, LP-310).
+
+Audited line by line in [`docs/prd-audit.md`](docs/prd-audit.md); the checkboxes below are
+left unticked because they describe intent at the time of writing.
+
+| Requirement | Shipped reality | Why |
+|---|---|---|
+| **PERF-1** — p95 ≤ 5s | **9.6s**, measured over 20 runs on the deployed URL | The only model that meets 5s cannot pin US inference and got the government warning's typography wrong 10 times in 20, always toward a false pass. Data residency is a procurement condition; the gate is a stakeholder's quote about adoption |
+| **IMG-1, IMG-2** — perspective and rotation correction | Written, tested, **not in the request path** | The skew estimator was returning -45° on square-on photographs; `correct()` acts at 1.5°, so wiring it would have rotated compliant labels on an invented number. The vision model handles rotation natively — a sideways warning sticker reads at 0.95 with no correction |
+| **MATCH-6** — confidence routing on every field | Wired for the **government warning only** | The warning gets a floor that can refuse to certify. Ordinary fields do not route on confidence yet; `thresholds.CONFIDENCE_FLOOR` is defined and says in the source that it has no call site |
+| **MATCH-4** — Tier 3 adjudication | Built, tested, **not switched on** | `adjudicator=None` in production, so gray cases fall to Mismatch. Turning a judgement tier on without a scored accuracy subset behind it would be trusting an opinion nobody has measured |
+| **BATCH** — proven at 300 | Proven at **22**, on the deployed URL, 42s, 0 failures | 300 has not been run. The extrapolation is ~9.5 minutes against a 10-minute goal, and an extrapolation cannot see rate limiting |
+| **UX-4** — WCAG 2.1 AA / Section 508 | Automated audit clean; **no human pass** | axe over five screens, contrast gated as data, type-size floor gated. The keyboard-only walkthrough and screen-reader pass need a person |
+| **ENG-1** — red CI blocks deploy, auto-rollback | Configured; **never demonstrated** | The deploy workflow triggers on `main` and the work is on a branch, so it has never run. Every deployment was issued by hand |
+
+One correctness defect is open and is not a trade-off: content cropped out of frame is
+reported as **Missing** — a finding against the label — where the truth is **Unreadable**,
+a finding about the photograph. It is named in the README and in
+[`docs/accuracy.md`](docs/accuracy.md).
+
+---
+
 ## MVP Requirements (Due Day 2, EOD)
 
 All items required to pass:
