@@ -14,7 +14,7 @@ type, and between them they show every verdict this tool produces.
 |---|---|
 | Live | <https://labelproof.fly.dev>, always-on, no cold start |
 | Proof it works *now* | `scripts/smoke.sh https://labelproof.fly.dev` — HTTPS, headers, both health endpoints, the SPA, the samples, a real seven-field verification against the live model, and a batch that stays reachable |
-| Accuracy | [`accuracy.md`](accuracy.md) — Tier A 175/175, Tier B 15/21 on real photographs, gap published |
+| Accuracy | [`accuracy.md`](accuracy.md) — Tier A 175/175, Tier B 15/21 (71.4%) on real photographs, gap published |
 | Batch | 22 applications in 42s, 0 failures, measured on the deployed URL |
 
 **The honest limit:** Tier B is six photographs and three scored rows. 71.4% on real
@@ -80,7 +80,7 @@ spinner. `api/errors.py` is the taxonomy; `next_step` drives what the UI offers.
 | [`PRD.md`](../PRD.md) | Requirements, 114 of them, cited by ID throughout the code |
 | [`TICKETS.md`](../TICKETS.md) | 330 tickets; a checkbox is derived from a `Closes:` trailer, never hand-set |
 | [`CHANGES.md`](../CHANGES.md) | Run, test, deploy, roll back |
-| [`mvp-audit.md`](mvp-audit.md) | The MVP checklist, line by line — 14 of 15 |
+| [`prd-audit.md`](prd-audit.md) | Both PRD checklists, line by line — MVP 14/15, Final 6/11 |
 
 ---
 

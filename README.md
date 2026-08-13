@@ -12,7 +12,7 @@ recommendation. **It recommends — the agent decides.**
 | **Developer log** | [`CHANGES.md`](CHANGES.md) — deploy, roll back, operate |
 | **Execution plan** | [`TICKETS.md`](TICKETS.md) — 330 tickets, each traced to a requirement ID |
 | **Start here (reviewers)** | [`docs/evaluation.md`](docs/evaluation.md) — the brief's criteria, each with something to open |
-| **MVP audit** | [`docs/mvp-audit.md`](docs/mvp-audit.md) — the PRD's MVP checklist, line by line, 14 of 15 |
+| **PRD audit** | [`docs/prd-audit.md`](docs/prd-audit.md) — both PRD checklists, line by line — MVP 14/15, Final 6/11 |
 | **Accuracy** | [`docs/accuracy.md`](docs/accuracy.md) — Tier A 100% on 175 rows, Tier B 71.4% on 21, confusion matrices, every miss explained |
 | **Cost** | [`docs/cost.md`](docs/cost.md) — $0.031 a verification, $0.018 in batch, measured |
 | **Latency** | [`docs/perf-deployed.md`](docs/perf-deployed.md) — 20 timed runs on the deployed URL |

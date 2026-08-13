@@ -1,4 +1,8 @@
-# MVP checklist — line-by-line self-audit
+# PRD checklists — line-by-line self-audit
+
+Both lists, MVP and Final (LP-143, LP-317, ENG-9).
+
+## MVP
 
 `PRD.md` §MVP, every item, checked against the code and the deployed URL rather than
 against memory (LP-143, ENG-9). One item fails, and it fails for a reason argued in the
@@ -50,3 +54,41 @@ footnote:
 - **The deploy pipeline has never run.** `.github/workflows/deploy.yml` triggers on push
   to `main` and the work is on a branch, so every deployment so far was issued by hand and
   the release gate has never executed against the artifact. Stated in `CHANGES.md`.
+
+
+---
+
+# Final checklist
+
+`PRD.md` §Final Requirements, every item. **6 of 11 complete, 2 partial, 3 not done** —
+and the three not-done are the three that need people rather than time.
+
+| # | Item | | Evidence |
+|--:|---|---|---|
+| 1 | Batch end-to-end, proven with 300 on the deployed URL | ⚠️ | Everything but the 300. Manifest, progressive results, worst-first triage, per-item retry, CSV export — all live, and **22 applications in 42s with 0 failures** measured on the deployed URL. 300 has not been run; the extrapolation is ~9.5 min against a 10-min goal and an extrapolation cannot see rate limiting |
+| 2 | Image robustness: angled, dim, glare, blur → correct verdicts or honest Unreadable, zero fabrication | ✅ | [`robustness.md`](robustness.md); the fabrication sweep is in `tests/test_robustness.py`. Note the limitation in the README: geometric CORRECTION does not run in production, so these are verdicts on uncorrected images |
+| 3 | Warning deep checks: tokenized diff, caps + bold header, non-bold body, title-case regression, prominence, type-size caveat | ✅ | `api/rules/warning.py` and `api/rules/typography.py`, 548 tests |
+| 4 | Tier 3 live with rationale + confidence routing; fixtures in CI | ⚠️ | Built, wired, 27 tests, 100% coverage, three fakes in CI, and the real adapter written with its prompt. **No adjudicator is passed in production** — `adjudicator=None` is the default, so gray cases still fall to Mismatch, which is the safe direction. The tier exists; it is not switched on |
+| 5 | Golden set ≥25 spanning every TC; accuracy report committed | ✅ | 25 fixtures, 175 rows, [`accuracy.md`](accuracy.md) with the confusion matrix and zero false passes |
+| 6 | Accessibility: WCAG 2.1 AA / 508 — automated audit + keyboard + screen reader | ⚠️ | axe clean on all five screens, contrast gated as data (worst pair 5.41:1), type-size floor gated, no colour-only state. **The keyboard-only walkthrough and screen-reader pass have not been done** |
+| 7 | ≥3 cold users complete a verification with zero instructions | ❌ | Not run. Needs three people |
+| 8 | E2E in CI (single, batch, unreadable, provider-down); red CI blocks deploy | ⚠️ | All four flows are covered by tests that drive the real app through the real HTTP stack, and CI runs them offline. "Red CI blocks deploy" is **configured and never demonstrated** — the deploy workflow triggers on `main` and has never run |
+| 9 | Load: 300-item batch, throttling behaviour, Verify Now p95 during a batch | ⚠️ | The priority lane is measured and holds — verify during a running batch is indistinguishable from idle. The 300-item run and the throttling observation have not been done |
+| 10 | Cost analysis with measured per-label cost and projections | ✅ | [`cost.md`](cost.md) — $0.031 single, $0.0179 batch-amortised, projections at 130/600/1,200 a day with the arithmetic shown |
+| 11 | Submission package: README, deployed URL, downloadable sample set | ✅ | This repository, <https://labelproof.fly.dev>, four one-click samples |
+
+## What the pattern is
+
+Nothing here is unbuilt because it was forgotten. The five incomplete rows are:
+
+- **three measurements that need scale or people** — 300 items, three cold users, a
+  keyboard-and-screen-reader pass;
+- **one feature built but not switched on** — Tier 3, deliberately, because turning it on
+  in production without a live accuracy subset behind it would be trusting a judgement
+  nobody has scored;
+- **one claim that is configured but never demonstrated** — red CI blocking a deploy,
+  which cannot be shown until the deploy pipeline runs at all.
+
+The distinction matters more than the count. A reviewer should be able to tell "we ran out
+of time" from "we decided not to", and these are all the first except Tier 3, which is the
+second and says so.
