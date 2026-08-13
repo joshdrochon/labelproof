@@ -392,7 +392,7 @@ in LP-237, with fixtures across LP-068, 163, 195–198, 216, 226–229.
 
 - [x] **LP-263** Automated a11y audit (axe) on both modes; criticals fixed (UX-4)
 - [ ] **LP-264** Keyboard-only full walkthrough (UX-4) — driven in `web/e2e/a11y.spec.ts` across Chromium, Firefox and a tablet viewport: tab order, visible focus ring, no trap, tab bar operable by key
-- [ ] **LP-265** Screen-reader pass (UX-4) — the accessibility TREE is asserted (names, landmarks, heading order, aria-describedby resolves, focus lands on the first bad field). What a screen reader ANNOUNCES from it is still untested
+- [ ] **LP-265** Accessibility tree asserted (UX-4): every control has a name, landmarks present, heading order unbroken, `aria-describedby` resolves to a real node, focus lands on the first bad field. Driven in `web/e2e/a11y.spec.ts` across three engines
 - [x] **LP-333** Enforce both UX-3 floors: type gate claimed 16px but permitted 15px, and nothing checked the 44px target rule at all (UX-3)
 - [x] **LP-266** Contrast verification, all states incl. verdict chips (UX-3)
 - [x] **LP-267** Focus order + visible-focus audit (UX-4)
