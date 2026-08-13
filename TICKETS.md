@@ -411,7 +411,7 @@ in LP-237, with fixtures across LP-068, 163, 195–198, 216, 226–229.
 - [x] **LP-280** Parallel extraction when >1 image (front/back concurrently) (PERF-1)
 - [x] **LP-281** 300-item batch, live: wall-clock + throttle behavior recorded (PERF-4)
 - [x] **LP-282** Verify-during-batch live check: priority lane holds (PERF-5)
-- [ ] **LP-283** Keep-warm verified across 48h of first-hit samples (PERF-6)
+- [ ] **LP-283** Keep-warm verified: first-hit latency after repeated idle gaps, each gap ≥4× Fly's auto-stop window. Window probed is recorded, not rounded up — was "48h", which was an invented number; the failure it catches fires in minutes (PERF-6)
 - [x] **LP-284** Latency regression gate in CI (fixture ceilings) (OPS-6)
 - [x] **LP-285** UI-time vs server-time honesty check on production (PERF-2)
 - [x] **LP-286** README performance section: numbers, method, trade-offs (DEL-6)

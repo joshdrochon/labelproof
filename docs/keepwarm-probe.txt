@@ -1,0 +1,7 @@
+LP-283 / PERF-6 — keep-warm probe
+target:    https://labelproof.fly.dev
+started:   2026-08-13T15:37:21Z
+plan:      9 probes, 1200s idle before each (4x Fly's ~5 min auto-stop window)
+route:     /healthz — no model call, so latency is transport plus boot
+
+utc                     status    cold_s      warm_s      note

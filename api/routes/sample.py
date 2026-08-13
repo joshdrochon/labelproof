@@ -69,15 +69,32 @@ CASES: Final[tuple[SampleCase, ...]] = (
         slug="abv-mismatch",
         fixture="tc08_abv_mismatch",
         title="The alcohol content disagrees",
-        summary="The application says 45%; the label says 40%. Return for correction.",
+        # NOT "Return for correction", which is what this card claimed until it was run
+        # against production. The ABV row is a flat Mismatch, but the warning on the same
+        # artwork comes back disputed on prominence, and an unsettled warning outranks a
+        # settled mismatch — so the tool asks for eyes rather than issuing a rejection it
+        # cannot fully stand behind. A demo card that names the wrong outcome teaches a
+        # reviewer to distrust the ones that are right.
+        summary=(
+            "The application says 45%; the label says 40%. A flat mismatch — and the "
+            "warning on the same label is disputed, so the tool asks for your eyes "
+            "rather than rejecting on its own."
+        ),
     ),
     SampleCase(
         slug="title-case-warning",
         fixture="tc03_title_case_warning",
         title="The warning heading is not in capitals",
+        # This card used to promise the catch outright. What actually happens is better
+        # and needs saying: the transcription comes back in capitals (models normalise
+        # case) while the typography channel reports lowercase. The two disagree, so the
+        # tool refuses to settle it and names the regulation instead of guessing. That is
+        # the design working — but a card promising a catch, above a row that says "could
+        # not be read", reads as the tool missing it.
         summary=(
-            "“Government Warning:” in title case. 27 CFR 16.22 requires "
-            "capitals, and this is the catch a junior agent found by eye."
+            "“Government Warning:” in title case. The tool's own two readings of the "
+            "heading disagree, so it refuses to settle it and sends you to 27 CFR 16.22 "
+            "— a refusal, not a guess."
         ),
     ),
     SampleCase(
