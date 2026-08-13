@@ -1,0 +1,41 @@
+LP-243 — red CI blocks the deploy
+PR: https://github.com/joshdrochon/labelproof/pull/2  (closed unmerged)
+Date: 2026-08-13T21:45Z
+
+MECHANISM
+  `main` is protected. Required status checks:
+      api · lint, typecheck, tests
+      web · lint, typecheck, tests
+  strict: true (a branch must be current with main before it can merge)
+  allow_force_pushes: false
+  allow_deletions: false
+
+  The deploy workflow triggers on push to `main`. So a merge that cannot happen is a
+  deploy that cannot happen — the gate is the branch policy, not a step inside the
+  pipeline. That distinction matters: a check INSIDE the deploy job can be skipped with
+  workflow_dispatch, which is how the LP-244 drill was run.
+
+METHOD
+  Branch drill/lp-243 (never merged, since deleted): one test asserting False.
+
+RESULT
+  Checks on the PR:
+      api · lint, typecheck, tests    FAILURE
+      web · lint, typecheck, tests    SUCCESS
+  mergeStateStatus: BLOCKED
+
+  Merge attempted anyway:
+      $ gh pr merge 2 --squash
+      X Pull request joshdrochon/labelproof#2 is not mergeable:
+        the base branch policy prohibits the merge.
+
+  No deploy ran. No release was created.
+
+WHAT THIS DOES NOT PROVE
+  `enforce_admins` is FALSE, so an administrator can still merge with `--admin` and
+  deploy a red build. That is deliberate — a two-person team that cannot override its own
+  gate at 2am has a worse problem than an unprotected branch — but it means this gate
+  stops accidents, not decisions.
+
+  Also untested: whether a check that ERRORS (rather than fails) blocks the same way, and
+  what happens if the workflow file itself is deleted in the PR.
