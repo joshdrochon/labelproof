@@ -51,9 +51,11 @@ footnote:
 
 - **Rollback is documented, not drilled** (item 12). The procedure ships with the
   configuration it describes; a deliberately bad deploy has not been forced. LP-244.
-- **The deploy pipeline has never run.** `.github/workflows/deploy.yml` triggers on push
-  to `main` and the work is on a branch, so every deployment so far was issued by hand and
-  the release gate has never executed against the artifact. Stated in `CHANGES.md`.
+- **The deploy pipeline has now run** (2026-08-13). `.github/workflows/deploy.yml`
+  triggers on push to `main`, which did not exist until the work was merged; the first run
+  went green in 10m05s — release gate, then deploy and verify — and produced release v27.
+  The gate has therefore executed against the artifact exactly once, in the success
+  direction. Neither failure direction is drilled: LP-243, LP-244.
 
 
 ---
@@ -70,9 +72,9 @@ and the three not-done are the three that need people rather than time.
 | 3 | Warning deep checks: tokenized diff, caps + bold header, non-bold body, title-case regression, prominence, type-size caveat | ✅ | `api/rules/warning.py` and `api/rules/typography.py`, 560 tests |
 | 4 | Tier 3 live with rationale + confidence routing; fixtures in CI | ⚠️ | Built, wired, 27 tests, 100% coverage, three fakes in CI, and the real adapter written with its prompt. **No adjudicator is passed in production** — `adjudicator=None` is the default, so gray cases still fall to Mismatch, which is the safe direction. The tier exists; it is not switched on |
 | 5 | Golden set ≥25 spanning every TC; accuracy report committed | ✅ | 25 fixtures, 175 rows, [`accuracy.md`](accuracy.md) with the confusion matrix and zero false passes |
-| 6 | Accessibility: WCAG 2.1 AA / 508 — automated audit + keyboard + screen reader | ⚠️ | axe clean on all five screens, contrast gated as data (worst pair 5.41:1), both UX-3 floors gated (16px type, 44px targets), no colour-only state. **The keyboard-only walkthrough and screen-reader pass have not been done** |
+| 6 | Accessibility: WCAG 2.1 AA / 508 — automated audit + keyboard + screen reader | ⚠️ | axe clean on all five screens, contrast gated as data (worst pair 5.41:1), both UX-3 floors gated (16px type, 44px targets), no colour-only state. `web/e2e/a11y.spec.ts` drives keyboard navigation and the accessibility tree in Chromium, Firefox and a tablet viewport — 75/75. **What a screen reader ANNOUNCES is still untested, and so is Safari** |
 | 7 | ≥3 cold users complete a verification with zero instructions | ❌ | Not run. Needs three people |
-| 8 | E2E in CI (single, batch, unreadable, provider-down); red CI blocks deploy | ⚠️ | All four flows are covered by tests that drive the real app through the real HTTP stack, and CI runs them offline. "Red CI blocks deploy" is **configured and never demonstrated** — the deploy workflow triggers on `main` and has never run |
+| 8 | E2E in CI (single, batch, unreadable, provider-down); red CI blocks deploy | ⚠️ | All four flows are covered by tests that drive the real app through the real HTTP stack, and CI runs them offline. "Red CI blocks deploy" is **configured and demonstrated only in the green direction** — the pipeline first ran on 2026-08-13 and deployed v27 from a runner, but no deliberately failing commit has been pushed to watch it refuse (LP-243) |
 | 9 | Load: 300-item batch, throttling behaviour, Verify Now p95 during a batch | ⚠️ | The priority lane is measured and holds — verify during a running batch is indistinguishable from idle. The 300-item run and the throttling observation have not been done |
 | 10 | Cost analysis with measured per-label cost and projections | ✅ | [`cost.md`](cost.md) — $0.031 single, $0.0179 batch-amortised, projections at 130/600/1,200 a day with the arithmetic shown |
 | 11 | Submission package: README, deployed URL, downloadable sample set | ✅ | This repository, <https://labelproof.fly.dev>, four one-click samples |

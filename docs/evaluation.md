@@ -94,8 +94,10 @@ for it:
   A finding against the label where the truth is a finding about the photograph.
 - **Geometric correction does not run in production.** Written, tested, and not wired —
   the skew estimator was inventing angles until this week.
-- **The deploy pipeline has never run.** It triggers on `main`; the work is on a branch.
-  Every deployment was by hand.
+- **The deploy pipeline ran green for the first time on 2026-08-13** — release gate, then
+  deploy and verify, producing release v27 from a GitHub runner. Every deployment before
+  that was by hand. What is still undrilled is the failure direction: a red CI blocking a
+  deploy, and a bad deploy rolling itself back (LP-243, LP-244).
 - **No human testing.** No keyboard-only walkthrough, no screen reader, no cold users, no
   cross-browser pass. The markup was written for all four; written-for is not tested-for.
 - **The destroy-and-redeploy drill and the forced-rollback drill have not been run.**
