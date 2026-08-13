@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from pathlib import Path
 
 from api.models import (
@@ -33,6 +34,7 @@ from api.provider.base import (
     ProviderError,
     ProviderUsage,
 )
+from api.rules import adjudicate as adjudicate_mod
 from fixtures.generator.catalog import by_name
 from fixtures.generator.spec import LabelSpec
 
@@ -234,3 +236,75 @@ def spec_name_for_image(filename: str) -> str | None:
     """Map `tc03_title_case_warning_back.png` back to its fixture name."""
     match = _FIXTURE_KEY.match(Path(filename).stem)
     return match.group(1) if match else None
+
+
+# --------------------------------------------------------------------------------------
+# Tier 3 (LP-232) — adjudicator fakes, so CI can exercise judgement without a model
+# --------------------------------------------------------------------------------------
+
+
+class ScriptedAdjudicator:
+    """Answers from a table, so a test can state the judgement it is testing against.
+
+    Keyed on the pair of values rather than on the field: the question this tier answers
+    is "are these two strings the same thing", and the same pair should get the same
+    answer wherever it appears.
+
+    An unlisted pair returns `same_thing=False`, which leaves the Mismatch standing. That
+    default is the safe direction and it means a test that forgets to script a case fails
+    by NOT adjudicating rather than by silently passing something.
+    """
+
+    name = "fake:scripted-adjudicator"
+
+    def __init__(
+        self,
+        answers: dict[tuple[str, str], tuple[bool, float, str]] | None = None,
+    ) -> None:
+        self._answers = answers or {}
+        self.calls: list[adjudicate_mod.AdjudicationRequest] = []
+
+    def judge(
+        self, request: adjudicate_mod.AdjudicationRequest
+    ) -> adjudicate_mod.Judgement:
+        self.calls.append(request)
+        key = (request.expected, request.extracted)
+        same, confidence, rationale = self._answers.get(
+            key, (False, 1.0, "These do not appear to be the same thing.")
+        )
+        return adjudicate_mod.Judgement(
+            same_thing=same, confidence=confidence, rationale=rationale
+        )
+
+
+class FailingAdjudicator:
+    """Raises on every call. A failed judgement must never become a pass."""
+
+    name = "fake:failing-adjudicator"
+
+    def __init__(self, error: Exception | None = None) -> None:
+        self._error = error or RuntimeError("the adjudicator is unavailable")
+        self.calls = 0
+
+    def judge(
+        self, request: adjudicate_mod.AdjudicationRequest
+    ) -> adjudicate_mod.Judgement:
+        self.calls += 1
+        raise self._error
+
+
+class SlowAdjudicator:
+    """Answers, but only after `delay_s`. For asserting the time budget is respected."""
+
+    name = "fake:slow-adjudicator"
+
+    def __init__(self, delay_s: float = 5.0) -> None:
+        self._delay_s = delay_s
+        self.calls = 0
+
+    def judge(
+        self, request: adjudicate_mod.AdjudicationRequest
+    ) -> adjudicate_mod.Judgement:
+        self.calls += 1
+        time.sleep(self._delay_s)
+        return adjudicate_mod.Judgement(True, 1.0, "Eventually.")

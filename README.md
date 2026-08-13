@@ -437,6 +437,7 @@ lists one nothing emits.
 | `unhandled_thread_exception` | ERROR | A worker thread died uncaught. The batch pool's leak path, and stderr-direct otherwise. |
 | `verification_cost` | INFO | Tokens and dollars for one verification (OPS-4). |
 | `verify_complete` | INFO | A verification produced a recommendation. |
+| `adjudication` | INFO | Tier 3 saw at least one gray row. Carries how many were considered, how many were judged and how many changed, so the trigger rate is a number rather than an impression (LP-221). |
 | `verify_over_budget` | INFO | The request budget expired; partial result returned as Needs review. |
 | `verify_pregated` | INFO | Images too poor to read; returned Unreadable with zero model calls. |
 

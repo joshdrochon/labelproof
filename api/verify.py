@@ -68,6 +68,7 @@ from api.provider.base import (
     ImageInput,
     ProviderError,
 )
+from api.rules import adjudicate as adjudicate_mod
 from api.rules import aggregate as agg
 from api.rules import compare
 from api.rules import warning as warn
@@ -424,8 +425,17 @@ def verify(
     application: Application,
     images: list[ImageInput],
     provider: ExtractionProvider,
+    *,
+    adjudicator: adjudicate_mod.Adjudicator | None = None,
+    config: Config | None = None,
 ) -> VerificationResult:
-    """Run one application through the pipeline."""
+    """Run one application through the pipeline.
+
+    `adjudicator` is Tier 3 and defaults to None, which is what every caller passes today
+    — no adapter implements the protocol. Passing None is a stated skip rather than a
+    silent one: the outcome records `no adjudicator`, so a log can tell "there were no
+    gray cases" apart from "nothing was wired up".
+    """
     request_id = f"req_{uuid.uuid4().hex[:16]}"
     timings = Timings()
     started = time.perf_counter()
@@ -500,6 +510,38 @@ def verify(
         _warning_result(response.extractions, net.ml),
     ]
     _apply_merge(results, label)
+
+    # Tier 3, AFTER the merge and before the aggregate — it needs the final per-field
+    # verdicts to know which rows are gray, and the recommendation has to be computed
+    # from whatever it decided. What it is allowed to decide is narrow: Mismatch to
+    # Acceptable variation on four fields, never the warning, never anything else.
+    #
+    # The budget is what is left of the request, not a fresh allowance. Extraction has
+    # already spent most of the deadline by the time this runs, which is exactly why the
+    # check happens before the call rather than after it.
+    settings = config or Config()
+    spent_ms = int((time.perf_counter() - started) * 1000)
+    judgement = adjudicate_mod.adjudicate(
+        results,
+        adjudicator=adjudicator,
+        budget=adjudicate_mod.Budget(
+            remaining_ms=max(0, settings.request_budget_ms - spent_ms),
+            remaining_usd=max(0.0, settings.max_usd_per_verification),
+        ),
+        commodity=application.commodity.value,
+    )
+    results = judgement.results
+    timings.adjudicate = judgement.elapsed_ms if judgement.judged else None
+
+    if judgement.considered:
+        applog.log(
+            "adjudication",
+            considered=judgement.considered,
+            judged=judgement.judged,
+            changed=judgement.changed,
+            status=judgement.skipped_reason or "ran",
+            duration_ms=judgement.elapsed_ms,
+        )
 
     aggregate = agg.recommend(results)
     timings.compare = int((time.perf_counter() - compare_started) * 1000)

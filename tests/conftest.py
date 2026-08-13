@@ -250,6 +250,11 @@ def _no_network_egress(request: pytest.FixtureRequest) -> Iterator[None]:
 #: Raise a floor when coverage rises. **Never lower one to make a build pass**; if a
 #: line genuinely cannot be reached, say so here in writing, the way `fills.py` does.
 RULES_COVERAGE_FLOORS: dict[str, float] = {
+    # Tier 3 is the one module here whose answer comes from a judgement rather than a
+    # rule, and almost every line of it is a refusal — the allowlist, the verdict filter,
+    # the confidence floor, the two budget checks, the exception path. An unexercised
+    # line in this file is an unexercised way for a model's opinion to reach a verdict.
+    "api/rules/adjudicate.py": 100.0,
     "api/rules/aggregate.py": 100.0,
     "api/rules/abv.py": 100.0,
     "api/rules/commodity.py": 100.0,

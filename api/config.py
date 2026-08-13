@@ -120,6 +120,18 @@ class Config:
     provider_timeout_ms: int = 0
     adjudication_reserve_ms: int = 1200
 
+    #: Ceiling on what ONE verification may cost, in dollars (OPS-4, LP-223).
+    #:
+    #: Only Tier 3 consults it, because Tier 3 is the only optional spend: extraction has
+    #: already happened by the time anything checks, and refusing to compare a label we
+    #: have already paid to read would waste the money rather than save it. A gray case
+    #: that would take the verification past this ceiling keeps its Mismatch, which is
+    #: the safe direction — an unadjudicated row is flagged, not passed.
+    #:
+    #: 0.05 is roughly 1.6x a measured verification ($0.031), so an ordinary label has
+    #: room for several judgements and a pathological one cannot run away.
+    max_usd_per_verification: float = 0.05
+
     #: The p95 the product is held to (PERF-1). Reported, never enforced as a timeout —
     #: enforcing it is what made every live request fail. `exceeds_latency_target` is how
     #: the gap becomes visible instead of silent.
@@ -219,6 +231,7 @@ class Config:
             provider_timeout_ms=timeout,
             latency_target_ms=_int("LABELPROOF_LATENCY_TARGET_MS", 5000),
             adjudication_reserve_ms=_int("LABELPROOF_ADJUDICATION_RESERVE_MS", 1200),
+            max_usd_per_verification=_float("LABELPROOF_MAX_USD_PER_VERIFICATION", 0.05),
             max_image_bytes=_int("LABELPROOF_MAX_IMAGE_BYTES", 10 * 1024 * 1024),
             max_images=_int("LABELPROOF_MAX_IMAGES", 4),
             max_pdf_pages=_int("LABELPROOF_MAX_PDF_PAGES", 5),

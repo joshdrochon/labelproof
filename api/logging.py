@@ -88,6 +88,12 @@ EVENTS: dict[str, tuple[int, str]] = {
         "estimated at the most expensive known tier.",
     ),
     "verify_complete": (logging.INFO, "A verification produced a recommendation."),
+    "adjudication": (
+        logging.INFO,
+        "Tier 3 saw at least one gray row. Carries how many were considered, how many "
+        "were judged and how many changed, so the trigger rate is a number rather than "
+        "an impression (LP-221).",
+    ),
     "verify_pregated": (
         logging.INFO,
         "Images too poor to read; returned Unreadable with zero model calls.",
