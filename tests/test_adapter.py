@@ -16,6 +16,7 @@ import logging
 import threading
 import time
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -971,3 +972,123 @@ def test_the_adapter_logs_nothing_that_could_carry_label_text(capsys: Any) -> No
     assert "OLD TOM DISTILLERY" not in captured
     assert "GOVERNMENT WARNING" not in captured
     assert '"event": "provider_extract"' in captured
+
+
+# --------------------------------------------------------------------------------------
+# The adjudicator's request (LP-220, MATCH-4)
+# --------------------------------------------------------------------------------------
+
+
+class _RecordingClient:
+    """Captures the request without a network. The reply is a valid judgement."""
+
+    def __init__(self, reply: dict[str, object] | None = None) -> None:
+        self.kwargs: dict[str, Any] = {}
+        self._reply = reply or {
+            "same_thing": True,
+            "confidence": 0.93,
+            "rationale": "Both name the same distillery; the label reverses the order.",
+        }
+
+    def with_options(self, **_: object) -> _RecordingClient:
+        return self
+
+    @property
+    def messages(self) -> _RecordingClient:
+        return self
+
+    def create(self, **kwargs: Any) -> Any:
+        self.kwargs = kwargs
+        block = SimpleNamespace(type="text", text=json.dumps(self._reply))
+        return SimpleNamespace(content=[block], stop_reason="end_turn", usage=None)
+
+
+def _judge(reply: dict[str, object] | None = None) -> tuple[Any, _RecordingClient]:
+    from api.provider.anthropic_adapter import AnthropicAdjudicator
+
+    client = _RecordingClient(reply)
+    return AnthropicAdjudicator(Config(anthropic_api_key="sk-test"), client=client), client
+
+
+def _request() -> Any:
+    from api.models import FieldName
+    from api.rules.adjudicate import AdjudicationRequest
+
+    return AdjudicationRequest(
+        field=FieldName.PRODUCER,
+        expected="Old Tom Distillery",
+        extracted="Distillery of Old Tom",
+        commodity="spirits",
+    )
+
+
+def test_the_adjudicator_never_sees_an_image() -> None:
+    """This tier compares two strings. Handing it the artwork would invite it to re-read
+    the label — Tier 0's job, already done — and a second reading that disagreed with the
+    first would be settled by whichever ran last."""
+    judge, client = _judge()
+    judge.judge(_request())
+
+    serialised = json.dumps(client.kwargs["messages"])
+    assert "image" not in serialised
+    assert "base64" not in serialised
+
+
+def test_it_does_not_say_which_value_came_from_the_label() -> None:
+    """The question is symmetric. Telling the model one side is the applicant's filing
+    invites deference to the filing rather than a judgement about the two values."""
+    judge, client = _judge()
+    judge.judge(_request())
+
+    prompt = json.dumps(client.kwargs["messages"]).lower()
+    assert "application says" not in prompt
+    assert "the label reads" not in prompt
+
+
+def test_it_is_not_told_a_mismatch_was_already_found() -> None:
+    """"We found a problem, is it really one" is an invitation to be helpful, and helpful
+    here means clearing things."""
+    judge, client = _judge()
+    judge.judge(_request())
+
+    everything = json.dumps(
+        [client.kwargs["messages"], client.kwargs["system"]]
+    ).lower()
+    assert "mismatch" not in everything
+
+
+def test_the_instructions_bias_toward_refusing() -> None:
+    """The asymmetry has to be in the prompt, not only in the code around it."""
+    from api.provider.anthropic_adapter import ADJUDICATION_SYSTEM
+
+    text = ADJUDICATION_SYSTEM.lower()
+    assert "if you are unsure, say no" in text
+    assert "approval" in text
+
+
+def test_the_schema_is_closed_and_requires_a_confidence() -> None:
+    """The rules engine gates on confidence; a schema that let the model omit it would
+    make that gate depend on a default nobody chose."""
+    from api.provider.anthropic_adapter import ADJUDICATION_SCHEMA
+
+    assert ADJUDICATION_SCHEMA["additionalProperties"] is False
+    assert set(ADJUDICATION_SCHEMA["required"]) == {
+        "same_thing",
+        "confidence",
+        "rationale",
+    }
+
+
+def test_a_malformed_answer_raises_rather_than_being_guessed_at() -> None:
+    """The caller leaves the Mismatch standing on a raise. Coercing a missing boolean to
+    False would work today and become a silent pass the day the shape changes again."""
+    judge, _ = _judge({"confidence": 0.9, "rationale": "no verdict field"})
+    with pytest.raises(ProviderError):
+        judge.judge(_request())
+
+
+def test_confidence_is_clamped_rather_than_trusted() -> None:
+    judge, _ = _judge(
+        {"same_thing": True, "confidence": 4.2, "rationale": "over-confident"}
+    )
+    assert judge.judge(_request()).confidence == 1.0

@@ -61,6 +61,7 @@ from api.provider.resilience import (
     RetryPolicy,
     call_with_retries,
 )
+from api.rules.adjudicate import AdjudicationRequest, Judgement
 from api.rules.commodity import REQUIREMENTS, Requirement
 
 # --------------------------------------------------------------------------------------
@@ -914,3 +915,148 @@ def parse_extraction(payload: Any, image_index: int) -> Extraction:
         warning_text=warning_text,
         warning_typography=typography,
     )
+
+
+# --------------------------------------------------------------------------------------
+# Tier 3 — the adjudicator (LP-220, MATCH-4)
+# --------------------------------------------------------------------------------------
+
+#: Closed schema, same discipline as the extraction one. `additionalProperties: false`
+#: and every key required, so the model cannot answer with a shrug and cannot omit the
+#: confidence the rules engine gates on.
+ADJUDICATION_SCHEMA: Final[dict[str, Any]] = {
+    "type": "object",
+    "properties": {
+        "same_thing": {
+            "type": "boolean",
+            "description": (
+                "True only if these name the same entity or designation and a TTB "
+                "specialist would treat the difference as immaterial."
+            ),
+        },
+        "confidence": {
+            "type": "number",
+            "description": "0 to 1. How sure you are of the judgement above.",
+        },
+        "rationale": {
+            "type": "string",
+            "description": (
+                "One sentence, plain English, naming the specific difference. Written "
+                "for a compliance officer, not for a developer."
+            ),
+        },
+    },
+    "required": ["same_thing", "confidence", "rationale"],
+    "additionalProperties": False,
+}
+
+#: The judge's instructions.
+#:
+#: Three things it is deliberately NOT told, each of which would change the answer:
+#:
+#: **The image.** This tier answers "are these two strings the same thing". Handing it the
+#: artwork would invite it to re-read the label, which is Tier 0's job and is already done
+#: — and a second reading that disagreed with the first would be resolved by whichever
+#: happened to run last.
+#:
+#: **Which one came from the label.** The question is symmetric, and telling it that one
+#: side is "what the applicant filed" invites deference to the filing. What matters is
+#: whether they denote the same thing.
+#:
+#: **That a Mismatch is the current verdict.** Framing it as "we found a problem, is it
+#: really one" is an invitation to be helpful, and helpful here means clearing things.
+ADJUDICATION_SYSTEM: Final[str] = """\
+You are assisting a TTB compliance specialist reviewing an alcohol beverage label \
+application. Two values are given for the same field: one printed on the label, one \
+recorded in the application. An automatic comparison could not resolve them.
+
+Decide whether they name the same thing.
+
+Say YES when the difference is a matter of expression rather than substance:
+  - word order, when the words are the same entity ("Old Tom Distillery" / "Distillery of Old Tom")
+  - a standard abbreviation ("Co." / "Company", "&" / "and", "St." / "Street")
+  - a trading name shown alongside or instead of a registered name
+  - punctuation, spacing, or a legal suffix that does not change who or what is named
+
+Say NO when anything of substance differs. Two entities with similar names are NOT the \
+same entity. A different city, a different state, a different product class, a different \
+brand — all NO, however small the edit distance looks.
+
+If you are unsure, say NO and give a low confidence. A wrongly cleared difference reaches \
+a federal agency as an approval; a wrongly kept one costs a specialist thirty seconds of \
+reading. Those are not comparable errors, and you should be biased accordingly.
+
+Your rationale is shown to the specialist and must name the actual difference in one \
+plain sentence."""
+
+
+class AnthropicAdjudicator:
+    """Tier 3 against the real model (LP-220).
+
+    Text-only and on the cheap model: this compares two short strings and never sees an
+    image, so it is a different workload from extraction and priced like one. The rules
+    engine bounds it before it is ever called — see `api/rules/adjudicate.py` — so there
+    is no timeout negotiation or retry policy here. One call, one answer, and any failure
+    raises so the caller can leave the Mismatch standing.
+    """
+
+    name = "anthropic:adjudicator"
+
+    def __init__(self, config: Config, client: Any | None = None) -> None:
+        self.config = config
+        # Same `Any` and same `max_retries=0` as the extractor, for the same two
+        # reasons: the client is injectable so CI runs with no network, and retries here
+        # would spend a request budget the rules engine already measured.
+        self._client: Any = client or anthropic.Anthropic(
+            api_key=config.anthropic_api_key, max_retries=0
+        )
+
+    def judge(self, request: AdjudicationRequest) -> Judgement:
+        model = self.config.adjudication_model
+        extra: dict[str, Any] = {}
+        if supports_inference_geo(model):
+            extra["inference_geo"] = self.config.inference_geo
+
+        message = self._client.with_options(
+            timeout=_ADJUDICATION_TIMEOUT_S, max_retries=0
+        ).messages.create(
+            model=model,
+            max_tokens=_ADJUDICATION_MAX_TOKENS,
+            output_config={
+                "format": {"type": "json_schema", "schema": ADJUDICATION_SCHEMA}
+            },
+            system=[{"type": "text", "text": ADJUDICATION_SYSTEM}],
+            messages=[
+                {
+                    "role": "user",
+                    "content": (
+                        f"Field: {request.field.value.replace('_', ' ')}\n"
+                        f"Commodity: {request.commodity}\n"
+                        f"Value A: {request.extracted}\n"
+                        f"Value B: {request.expected}\n\n"
+                        "Do these name the same thing?"
+                    ),
+                }
+            ],
+            **extra,
+        )
+
+        payload = json.loads(_first_text(message))
+        same = payload.get("same_thing")
+        confidence = payload.get("confidence")
+        if not isinstance(same, bool) or not isinstance(confidence, int | float):
+            raise ProviderError(
+                "The adjudicating model returned an answer this service could not read."
+            )
+        return Judgement(
+            same_thing=same,
+            confidence=max(0.0, min(1.0, float(confidence))),
+            rationale=str(payload.get("rationale", "")).strip(),
+        )
+
+
+#: Six seconds. Generous for two short strings on the cheap model, and irrelevant most of
+#: the time because the rules engine declines to call at all unless the request budget has
+#: room — this is the backstop for a call that hangs, not the budget.
+_ADJUDICATION_TIMEOUT_S: Final[float] = 6.0
+_ADJUDICATION_MAX_TOKENS: Final[int] = 300
