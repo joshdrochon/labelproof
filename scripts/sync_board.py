@@ -68,10 +68,21 @@ def main() -> int:
         line = re.sub(r"^- \[[ x]\]", f"- [{'x' if now else ' '}]", line, count=1)
         rewritten.append(line)
 
-    BOARD.write_text("".join(rewritten))
-
     total = len(known)
     done = len(known & closed.keys())
+
+    # The header count is written HERE, not typed. It sits next to a sentence claiming
+    # the board is never hand-edited, and it was being hand-edited — which made the one
+    # line asserting the board's integrity the one line violating it. Twice it drifted
+    # from the checkboxes below it.
+    body = "".join(rewritten)
+    body = re.sub(
+        r"(\| \*\*State\*\* \| \*\*)\d+ of \d+( closed\.\*\*)",
+        rf"\g<1>{done} of {total}\g<2>",
+        body,
+        count=1,
+    )
+    BOARD.write_text(body)
     print(f"board: {done}/{total} closed", end="")
     if flipped:
         print("  |  " + ", ".join(f"{t}{'✓' if s else '✗'}" for t, s in flipped), end="")

@@ -297,7 +297,7 @@ would otherwise have to discover.
 > auto-rollback have never executed against the deployed artifact. That is a real gap and
 > it is the reason this section is a plan.
 >
-> Local gates are green: ruff clean, `mypy --strict api/` clean, 3510 tests passing, the
+> Local gates are green: ruff clean, `mypy --strict api/` clean, 3582 tests passing, the
 > eval at 100% on Tier A across 175 rows with zero warning false passes. CI on this branch
 > was red for ten commits on environment differences rather than defects — an SPA build CI
 > does not run, a Linux font rasterizer measuring different pixels than macOS, a timing

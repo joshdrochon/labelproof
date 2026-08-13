@@ -83,10 +83,24 @@ export default function FieldRow({
     (result.expected?.length ?? 0) > LONG_VALUE || (result.extracted?.length ?? 0) > LONG_VALUE;
   const [left, right] = useValueDiff(result.expected, result.extracted, attention && !isLong);
   const detailId = `detail-${result.field}`;
-  // "Not found on the label" would be a finding. On a Not applicable row it is simply
-  // not expected to be there, and saying it the wrong way reads as a problem.
+  // What the empty "The label shows" cell says, and it is not one string.
+  //
+  // "Not found on the label" is a FINDING — a claim that the element is absent. It is
+  // true for Missing and it is false for the other two empty cases, in the direction this
+  // product forbids:
+  //
+  //   not_applicable  the element is not required here, so absence is not a finding
+  //   unreadable      NOBODY LOOKED. `extracted` is always null on an Unreadable row, so
+  //                   every one of them asserted the element was not on the label — a
+  //                   pre-gated upload put that sentence on all seven rows of a label no
+  //                   model had seen. A statement about the photograph, printed as a
+  //                   finding against the artwork.
   const emptyExtracted =
-    result.verdict === 'not_applicable' ? 'Not required here' : 'Not found on the label';
+    result.verdict === 'not_applicable'
+      ? 'Not required here'
+      : result.verdict === 'unreadable'
+        ? 'Could not be read'
+        : 'Not found on the label';
   const citations = referenceCitations(result.field, commodity);
   const hasRegion = Boolean(result.evidence?.bbox);
   const legibility = legibilityNote(result);

@@ -11,7 +11,7 @@ tracker if one is used.
 | **MVP** | Day 2 EOD — §M tickets |
 | **Final** | Day 7 noon — §F tickets |
 | **Ticket prefix** | `LP-001` … `LP-332` |
-| **State** | **308 of 330 closed.** Derived from `Closes:` trailers by `scripts/sync_board.py` and a post-commit hook — never hand-edited. A close with no commit behind it is a false close. |
+| **State** | **317 of 330 closed.** Derived from `Closes:` trailers by `scripts/sync_board.py` and a post-commit hook — never hand-edited. A close with no commit behind it is a false close. |
 | **What remains** | Audited in [`docs/prd-audit.md`](docs/prd-audit.md). The open items are, in order of count: human testing that needs people, two deploy drills, and measurements that need scale. |
 
 **Scope law (locked):** *"A working core application with clean code is preferred over
@@ -338,12 +338,12 @@ in LP-237, with fixtures across LP-068, 163, 195–198, 216, 226–229.
 - [x] **LP-223** Cost cap per verification; over-cap → Needs review (OPS-4)
 - [x] **LP-224** Confidence threshold routing → Needs review, never silent (MATCH-6)
 - [x] **LP-327** All thresholds in one module as named constants; `eval/run.py --sweep-thresholds` reports false passes per level so tightening is evidence-driven (OPS-3, MATCH-6)
-- [ ] **LP-225** Rationale surfaced in UI on every judged field (MATCH-5, HITL-4)
+- [x] **LP-225** Rationale surfaced in UI on every judged field (MATCH-5, HITL-4)
 - [x] **LP-226** Fixtures: abbreviations — `Co.`/`Company`, `&`/`and` (MATCH-4)
 - [x] **LP-227** Fixtures: reordering — `Old Tom Distillery`/`Distillery of Old Tom` (MATCH-4)
 - [x] **LP-228** Fixtures: DBA / producer variants (MATCH-4)
 - [x] **LP-229** Cost-discipline guard: STONE'S THROW still resolves at Tier 2 — adjudicator not invoked (TC-02)
-- [ ] **LP-230** Judgment eval subset: accuracy on judged cases tracked (OPS-2)
+- [x] **LP-230** Judgment eval subset: accuracy on judged cases tracked (OPS-2)
 - [x] **LP-231** Judged verdicts overridable; overrides in the report (HITL-2)
 - [x] **LP-232** Adjudicator fakes for CI (ENG-3)
 - [ ] **LP-325** Confidence-triggered escalation: re-extract cropped evidence region at full resolution when a field returns low confidence (IMG-5, MATCH-6)
@@ -395,7 +395,7 @@ in LP-237, with fixtures across LP-068, 163, 195–198, 216, 226–229.
 - [x] **LP-269** Reduced-motion support (UX-4)
 - [x] **LP-270** Print stylesheet for the report — **Dave prints; the printout must read** (HITL-5)
 - [x] **LP-271** Copy final pass: reading level, zero jargon (UX-6)
-- [ ] **LP-272** Hallway test protocol: tasks + success criteria written first (UX-1)
+- [x] **LP-272** Hallway test protocol: tasks + success criteria written first (UX-1)
 - [ ] **LP-273** **Run the 73-year-old test:** ≥3 cold users reach a verdict, zero instructions; notes committed (UX-1)
 - [ ] **LP-274** Fix rounds from hallway findings (UX-1)
 - [x] **LP-275** Grayscale audit: verdicts distinguishable without color (UX-3)

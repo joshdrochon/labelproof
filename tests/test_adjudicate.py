@@ -267,20 +267,54 @@ def test_it_does_not_start_when_the_cost_cap_is_reached() -> None:
     assert outcome.skipped_reason == "over cost cap"
 
 
-def test_the_budget_runs_down_across_several_rows() -> None:
-    """Two gray rows and room for one. The second is declined, not attempted."""
+def test_the_budget_runs_down_by_what_the_calls_actually_took() -> None:
+    """Two gray rows, a judge that genuinely takes time, and room for one.
+
+    This asserted the ESTIMATE before, and that was the bug: the loop decremented by
+    `estimated_ms` however long the call really took, so a judge slower than the estimate
+    overran the deadline it was meant to respect. With the shipped 6s adapter timeout and
+    four gray rows, Tier 3 could spend 24 seconds inside a budget it believed was 6 — and
+    on `/verify` that discards a successful extraction and tells the agent the label was
+    not verified.
+
+    A fake clock rather than real sleeping: the property is that ELAPSED time is charged,
+    and sleeping to prove it would make the suite slower to say the same thing.
+    """
+    ticks = iter([0.0, 0.0, 1.2, 1.2, 1.2, 1.2, 1.2])
     judge = ScriptedAdjudicator()
-    budget = adj.Budget(remaining_ms=1_600, remaining_usd=1.0)
     outcome = adj.adjudicate(
         [row(), row(field=FieldName.CLASS_TYPE)],
         adjudicator=judge,
-        budget=budget,
+        budget=adj.Budget(remaining_ms=2_000, remaining_usd=1.0),
         commodity="spirits",
+        clock=lambda: next(ticks),
     )
 
+    # One call took 1,200ms of a 2,000ms budget, leaving 800 — under the 1,500 a second
+    # judgement is allowed to need, so the second row is declined rather than attempted.
     assert len(judge.calls) == 1
     assert outcome.considered == 2 and outcome.judged == 1
     assert outcome.skipped_reason == "out of time"
+
+
+def test_a_callers_estimates_survive_the_first_row() -> None:
+    """`Budget` was rebuilt rather than replaced, so any estimate the CALLER set reverted
+    to the class default after one judgement — silently, and only on multi-row inputs."""
+    ticks = iter([0.0] * 12)
+    judge = ScriptedAdjudicator()
+    adj.adjudicate(
+        [row(), row(field=FieldName.CLASS_TYPE), row(field=FieldName.BRAND_NAME)],
+        adjudicator=judge,
+        budget=adj.Budget(
+            remaining_ms=600, remaining_usd=1.0, estimated_ms=150, estimated_usd=0.0001
+        ),
+        commodity="spirits",
+        clock=lambda: next(ticks),
+    )
+
+    # 600ms at 150ms an estimate is room for all three. With the defaults restored after
+    # row one it would have stopped at one.
+    assert len(judge.calls) == 3
 
 
 def test_a_slow_adjudicator_is_still_only_called_within_budget() -> None:

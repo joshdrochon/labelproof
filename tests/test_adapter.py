@@ -1092,3 +1092,123 @@ def test_confidence_is_clamped_rather_than_trusted() -> None:
         {"same_thing": True, "confidence": 4.2, "rationale": "over-confident"}
     )
     assert judge.judge(_request()).confidence == 1.0
+
+
+# --------------------------------------------------------------------------------------
+# The warning re-reader (LP-325, LP-326, IMG-5)
+# --------------------------------------------------------------------------------------
+
+
+def _frame(width: int = 800, height: int = 600) -> Any:
+    import numpy as np
+
+    return np.full((height, width, 3), 220, dtype=np.uint8)
+
+
+def _rereader(reply: dict[str, object] | None = None) -> tuple[Any, _RecordingClient]:
+    from api.provider.anthropic_adapter import AnthropicWarningRereader
+
+    client = _RecordingClient(
+        reply
+        or {
+            "warning_text": "GOVERNMENT WARNING: (1) According to the Surgeon General…",
+            "header_is_all_caps": True,
+            "header_is_bold": True,
+            "body_is_bold": None,
+            "contrast_ok": None,
+        }
+    )
+    adapter = AnthropicWarningRereader(
+        Config(anthropic_api_key="sk-test"), {0: _frame()}, client=client
+    )
+    return adapter, client
+
+
+def test_the_reread_crops_to_the_region_the_first_pass_measured() -> None:
+    """The point of escalating is more pixels on the SAME region.
+
+    Sending the whole frame again would spend a second call to look at the same thing at
+    the same size, which is a cost with no information behind it.
+    """
+    from api.models import BoundingBox
+    from api.rules.typography import WarningRereadRequest
+
+    adapter, client = _rereader()
+    whole = WarningRereadRequest(image_index=0, bbox=None, reason="check")
+    adapter.reread_warning(whole)
+    whole_bytes = len(json.dumps(client.kwargs["messages"]))
+
+    cropped = WarningRereadRequest(
+        image_index=0,
+        bbox=BoundingBox(x0=0.1, y0=0.7, x1=0.5, y1=0.9),
+        reason="check",
+    )
+    adapter.reread_warning(cropped)
+    cropped_bytes = len(json.dumps(client.kwargs["messages"]))
+
+    assert cropped_bytes < whole_bytes, "the crop was not applied"
+
+
+def test_no_bbox_sends_the_whole_frame_rather_than_a_guessed_crop() -> None:
+    """A crop that clips the warning produces a confident reading of half a statement —
+    a false pass with evidence attached (LP-326)."""
+    from api.rules.typography import WarningRereadRequest
+
+    adapter, client = _rereader()
+    adapter.reread_warning(WarningRereadRequest(image_index=0, bbox=None))
+
+    assert client.kwargs["messages"], "nothing was sent"
+
+
+def test_an_unknown_image_index_raises_rather_than_reading_another_image() -> None:
+    from api.rules.typography import WarningRereadRequest
+
+    adapter, _ = _rereader()
+    with pytest.raises(ProviderError):
+        adapter.reread_warning(WarningRereadRequest(image_index=7))
+
+
+def test_the_tri_state_survives_the_round_trip() -> None:
+    """`null` must come back as None, not as False.
+
+    This is the whole contract of the escalation path. An adapter that read "I cannot
+    tell" as "not bold" would manufacture a clean typography verdict out of the model's
+    own uncertainty — the exact failure the second look exists to prevent.
+    """
+    adapter, _ = _rereader(
+        {
+            "warning_text": None,
+            "header_is_all_caps": None,
+            "header_is_bold": None,
+            "body_is_bold": None,
+            "contrast_ok": None,
+        }
+    )
+    from api.rules.typography import WarningRereadRequest
+
+    result = adapter.reread_warning(WarningRereadRequest(image_index=0))
+
+    assert result.warning_text is None
+    assert result.typography is not None
+    assert result.typography.header_is_bold is None
+    assert result.typography.body_is_bold is None
+
+
+@pytest.mark.parametrize("junk", ["true", 1, "yes", {}, []])
+def test_anything_that_is_not_a_boolean_is_treated_as_unknown(junk: object) -> None:
+    """A string "true" is not a reading. Coercing it would turn a malformed response into
+    a confident typography answer."""
+    from api.provider.anthropic_adapter import _tri
+
+    assert _tri(junk) is None
+
+
+def test_the_instructions_forbid_reciting_the_warning_from_memory() -> None:
+    """The government warning is the single most memorised string a vision model could
+    produce. On the escalation path — reached precisely because the first pass could not
+    read it — reciting it is the most dangerous thing the model could do."""
+    from api.provider.anthropic_adapter import REREAD_SYSTEM
+
+    text = REREAD_SYSTEM.lower()
+    assert "never reproduce the statement from memory" in text
+    assert "null" in text

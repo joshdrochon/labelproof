@@ -48,6 +48,7 @@ from api.models import (
     FieldName,
     WarningTypography,
 )
+from api.pipeline import quality as quality_mod
 from api.provider.base import (
     ExtractionRequest,
     ExtractionResponse,
@@ -63,6 +64,7 @@ from api.provider.resilience import (
 )
 from api.rules.adjudicate import AdjudicationRequest, Judgement
 from api.rules.commodity import REQUIREMENTS, Requirement
+from api.rules.typography import WarningReread, WarningRereadRequest
 
 # --------------------------------------------------------------------------------------
 # Call parameters
@@ -1060,3 +1062,174 @@ class AnthropicAdjudicator:
 #: room — this is the backstop for a call that hangs, not the budget.
 _ADJUDICATION_TIMEOUT_S: Final[float] = 6.0
 _ADJUDICATION_MAX_TOKENS: Final[int] = 300
+
+
+# --------------------------------------------------------------------------------------
+# Escalation — the second look at the warning region (LP-325, LP-326, IMG-5)
+# --------------------------------------------------------------------------------------
+
+#: What the second look is asked for. Narrower than the extraction schema on purpose: one
+#: region, one question. Tri-state on every typography signal, because the whole reason to
+#: escalate is that the first pass could not tell — and a second pass that converts its own
+#: uncertainty into a boolean to look useful would defeat the design it was added to serve.
+REREAD_SCHEMA: Final[dict[str, Any]] = {
+    "type": "object",
+    "properties": {
+        "warning_text": {
+            "type": ["string", "null"],
+            "description": (
+                "The statement exactly as printed, or null if it cannot be read. Never "
+                "complete it from memory — a warning you recall is not a warning you saw."
+            ),
+        },
+        "header_is_all_caps": {"type": ["boolean", "null"]},
+        "header_is_bold": {"type": ["boolean", "null"]},
+        "body_is_bold": {"type": ["boolean", "null"]},
+        "contrast_ok": {"type": ["boolean", "null"]},
+    },
+    "required": [
+        "warning_text",
+        "header_is_all_caps",
+        "header_is_bold",
+        "body_is_bold",
+        "contrast_ok",
+    ],
+    "additionalProperties": False,
+}
+
+REREAD_SYSTEM: Final[str] = """\
+You are looking at a cropped region of an alcohol beverage label at full resolution. A \
+first pass could not resolve something about the government warning, so this is a second, \
+closer look at that region alone.
+
+Report only what you can see in THIS image.
+
+Use null for any typography question you cannot answer from these pixels. Null is the \
+correct answer far more often than people expect — bold is hard to judge without a \
+comparison, and contrast is hard to judge at all. A null costs a compliance specialist \
+one glance at the label. A guess that happens to be wrong clears a defective warning on a \
+federal filing.
+
+Never reproduce the statement from memory. If the text is not legible here, warning_text \
+is null. The wording of this warning is fixed by regulation and you almost certainly know \
+it — that is precisely why reciting it would be worthless."""
+
+
+class AnthropicWarningRereader:
+    """The adapter for `typography.WarningRereader` (LP-326).
+
+    Sends ONE crop of ONE image. The crop is taken from the preprocessed frame the first
+    pass measured its bbox against, so the region is the region — cropping the original
+    upload with a box measured after a downscale would move it.
+
+    When there is no bbox the whole image is sent rather than a guessed crop. A crop that
+    clips the warning is worse than no crop: it produces a confident reading of half a
+    statement, which is a false pass with evidence attached.
+    """
+
+    name = "anthropic:warning-rereader"
+
+    def __init__(
+        self,
+        config: Config,
+        frames: dict[int, Any],
+        client: Any | None = None,
+    ) -> None:
+        # The frames are a CONSTRUCTOR argument because they belong to one request. An
+        # adapter built once per process and handed images through a setter would let a
+        # second request read the first one's label — a bug that only appears under
+        # concurrency and is a privacy incident when it does.
+        self.config = config
+        self._frames = frames
+        self._client: Any = client or anthropic.Anthropic(
+            api_key=config.anthropic_api_key, max_retries=0
+        )
+
+    def reread_warning(self, request: WarningRereadRequest) -> WarningReread:
+        frame = self._frames.get(request.image_index)
+        if frame is None:
+            raise ProviderError(
+                "The warning region could not be re-read because that image is not "
+                "available.",
+                retryable=False,
+            )
+
+        # Crop to the region the first pass measured, at the resolution it measured it
+        # against — more pixels on the SAME region is the entire point of escalating.
+        # Sending the whole frame again spends a second call to look at the same thing at
+        # the same size.
+        #
+        # No bbox means send the whole frame rather than guess a crop. A crop that clips
+        # the warning produces a confident reading of half a statement, which is a false
+        # pass with evidence attached (LP-326).
+        region = quality_mod.crop(frame, request.bbox) if request.bbox else frame
+        payload = base64.standard_b64encode(_png_bytes(region)).decode("ascii")
+        model = self.config.extraction_model
+        extra: dict[str, Any] = {}
+        if supports_inference_geo(model):
+            extra["inference_geo"] = self.config.inference_geo
+
+        message = self._client.with_options(
+            timeout=_REREAD_TIMEOUT_S, max_retries=0
+        ).messages.create(
+            model=model,
+            max_tokens=_REREAD_MAX_TOKENS,
+            output_config={"format": {"type": "json_schema", "schema": REREAD_SCHEMA}},
+            system=[{"type": "text", "text": REREAD_SYSTEM}],
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": "image/png",
+                                "data": payload,
+                            },
+                        },
+                        {"type": "text", "text": request.reason or "Read this region."},
+                    ],
+                }
+            ],
+            **extra,
+        )
+
+        body = json.loads(_first_text(message))
+        text = body.get("warning_text")
+        return WarningReread(
+            warning_text=str(text) if isinstance(text, str) and text.strip() else None,
+            typography=WarningTypography(
+                header_is_all_caps=_tri(body.get("header_is_all_caps")),
+                header_is_bold=_tri(body.get("header_is_bold")),
+                body_is_bold=_tri(body.get("body_is_bold")),
+                contrast_ok=_tri(body.get("contrast_ok")),
+            ),
+            model=model,
+        )
+
+def _png_bytes(frame: Any) -> bytes:
+    """Encode a cropped frame.
+
+    PNG rather than WebP. This is the escalation path — reached because the first pass
+    could not resolve 4-point type — and lossy artefacts on exactly that type are what the
+    second look exists to see through. The region is small, so the bytes are cheap.
+    """
+    import cv2
+
+    ok, buffer = cv2.imencode(".png", frame)
+    if not ok:
+        raise ProviderError("The warning region could not be encoded.", retryable=False)
+    return bytes(buffer.tobytes())
+
+
+def _tri(value: Any) -> bool | None:
+    """Anything that is not exactly a bool is None. A string "true" is not a reading."""
+    return value if isinstance(value, bool) else None
+
+
+#: Eight seconds. One crop on the extraction model, and the escalation is only reached
+#: when the first pass already abstained — so the request has spent most of its budget by
+#: then and this is a backstop rather than an allowance.
+_REREAD_TIMEOUT_S: Final[float] = 8.0
+_REREAD_MAX_TOKENS: Final[int] = 1500

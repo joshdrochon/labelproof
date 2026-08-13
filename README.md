@@ -45,7 +45,7 @@ Nothing below needs an API key. The suite and the demo both run offline.
 git clone <this repo> && cd labelproof
 python3.14 -m venv .venv && .venv/bin/pip install -e ".[dev]"
 
-.venv/bin/python -m pytest                        # 3523 tests, offline, ~4 min
+.venv/bin/python -m pytest                        # 3582 tests, offline, ~4 min
 .venv/bin/python -m eval.run                      # the accuracy gate
 LABELPROOF_FAKE_PROVIDER=1 .venv/bin/uvicorn api.main:app --reload
 ```
@@ -248,7 +248,7 @@ single error ran in the false-pass direction, on the one field with a zero-false
 gate.
 
 The 5-second figure is a stakeholder's quote about adoption. Data residency is a
-procurement condition, and those do not negotiate. A tool 1.9s slower still replaces a
+procurement condition, and those do not negotiate. A tool 4.6s slower still replaces a
 30–40 second vendor and a paper checklist; a tool that cannot say where a federal agency's
 label images were processed may not be deployable at all.
 
@@ -261,6 +261,13 @@ Reversible in one line, and the budgets follow the model automatically.
 Stated plainly, because a reviewer will find these anyway and it is better they read them
 here.
 
+- **Dependencies are floors, not pins (SEC-10).** `pyproject.toml` gives every runtime
+  dependency a `>=` and there is no lockfile and no hashes, so two builds a week apart can
+  resolve differently. `pip-audit` and `npm audit` run on every commit and were clean when
+  this was written, but they are advisory — they cannot fail a build, deliberately, because
+  a gate that goes red on someone else's publication schedule gets switched off inside a
+  week. The reasoning is in the `Dockerfile`; the consequence is that reproducibility here
+  is weaker than the rest of this project claims.
 - **The destroy-and-redeploy drill (LP-136) has not been run.** The app *is* deployed and
   `scripts/smoke.sh` passes against it, but the drill that proves the environment rebuilds
   from configuration alone — destroy the app, redeploy from a clean clone, smoke it — has
@@ -283,10 +290,12 @@ here.
   in the system is still calibrated against rendered PNGs. Tier B scores **71.4%** against
   Tier A's 100%; that 28.6-point gap is the honest answer to "does this work", and it is
   published in [`docs/accuracy.md`](docs/accuracy.md) rather than averaged away.
-- **Accessibility has not been audited.** No axe run, no keyboard-only walkthrough, no
-  screen-reader pass. The markup was written for it — semantic tables, live regions, a
-  focus trap in the batch dialog, a print stylesheet, no colour-only state anywhere — but
-  written-for is not tested-for and the difference is the whole point of an audit.
+- **Accessibility is audited automatically and never by a person.** axe runs in CI over
+  all five screens with zero violations and nothing disabled; contrast is gated as data
+  (21 pairs, worst 5.41:1 against a 4.5 floor) and so is the type-size floor. What has NOT
+  happened is the half a tool cannot do: **no keyboard-only walkthrough, no screen-reader
+  pass**. An automated audit covers perhaps half of WCAG, and reading a green run as a
+  pass is the actual risk — see [`docs/prd-audit.md`](docs/prd-audit.md).
 - **The 73-year-old test has not been run.** UX-1 asks for three cold users reaching a
   verdict with no instructions. That needs three people and cannot be simulated. The
   protocol is written and fixed in advance — [`docs/hallway-protocol.md`](docs/hallway-protocol.md)
@@ -635,16 +644,23 @@ by `scripts/spike_latency.py` and pinned in `api.config.MEASURED_EXTRACTION_MS`:
 | `claude-opus-5` | ~9,600 ms | not measured | $5 / $25 | Yes |
 | `claude-haiku-4-5` | ~5,500 ms | ~4,700 ms | $1 / $5 | **No — 400s the parameter** |
 
-Our own non-provider work — ingest, quality scoring, rules, serialization — is about
-**570 ms**, measured on the deployed app over three two-image verifications:
-ingest ~260, quality ~300, preprocess ~560, compare ~1, against an extract of ~7,800.
-That is 7% of the request. The model call is still essentially the whole number, which is
-why `api.config._OVERHEAD_MS` reserves 1,500 ms and no more.
+Our own non-provider work — ingest, quality scoring, preprocessing, rules, serialization
+— is about **1,120 ms**, measured on the deployed app: ingest ~260, quality ~300,
+preprocess ~570, compare ~1, against an extract of ~6,800. That is roughly **14%** of the
+request, and `api.config._OVERHEAD_MS` reserves 1,500 ms against it.
 
-An earlier version of this line said 130 ms, which was a single-image figure; production
-sends two. The conclusion is unchanged — a faster machine could take perhaps 285 ms off a
-9.6 s p95 for 8x the cost — but the number was wrong by 4x and is corrected here rather
-than left to be discovered.
+This number has now been wrong twice, both times too small, and both corrections are
+recorded rather than quietly applied. It first said **130 ms**, which was a single-image
+figure while production sends two. It was then corrected to **570 ms** — which is the
+`preprocess` row alone, mistaken for the total, by someone reading their own table too
+fast. The itemisation was printed correctly beside it both times and sums to ~1,120.
+
+The conclusion does not move: dedicated cores might halve our share, taking perhaps 560 ms
+off a 9.6 s p95 for 8x the machine price, and the model is still 86% of the request. What
+does move is how confidently the figure should be quoted — twice wrong in the same
+direction is a pattern, not an accident, and the per-stage table in
+[`docs/perf-deployed.md`](docs/perf-deployed.md) is the thing to read rather than this
+sentence.
 
 The honest reading:
 
@@ -665,7 +681,7 @@ The honest reading:
   non-compliant label, on the one field carrying a zero-false-pass gate.
 - So the trade is stated rather than hidden. The 5 s figure is a stakeholder quote about
   adoption; data residency is a procurement condition, and procurement conditions do not
-  negotiate. A tool 1.9 s over the gate still replaces a 30–40 s vendor pilot and a paper
+  negotiate. A tool 4.6 s over the gate still replaces a 30–40 s vendor pilot and a paper
   checklist. A tool that cannot say where a federal agency's label images were processed
   may not be deployable at all.
 - **The gate has been measured end-to-end on the deployed URL, and it is missed.**
@@ -1026,6 +1042,11 @@ rendered over the brand name it cites.
 developer convenience page works is the opposite of what NET-1 is for, and an agency firewall
 would block it anyway. `/openapi.json` is unaffected.
 
+**Which HSTS a browser receives.** The edge sets it (`fly.toml`) and Fly's edge REPLACES
+the application's header rather than adding to it — the same mechanism that silently
+overrode the CSP for several deploys. So `api/security.py`'s one-year value never ships;
+what a browser gets is the two-year value in the table above. Both omit `preload`.
+
 `preload` is deliberately absent from HSTS: it is a commitment to browser vendors over an
 entire apex domain, and this prototype rents a subdomain.
 
@@ -1344,7 +1365,7 @@ is mid-restart.
 
 | Header | Value | Why |
 |---|---|---|
-| `Strict-Transport-Security` | `max-age=63072000; includeSubDomains; preload` | Two years, preload-eligible |
+| `Strict-Transport-Security` | `max-age=63072000; includeSubDomains` | Two years, subdomains included. **No `preload`** — see below |
 | `Content-Security-Policy` | same-origin; `data:`/`blob:` images | The SPA loads nothing third-party; upload previews are object URLs |
 | `X-Content-Type-Options` | `nosniff` | An upload echoed back must never be re-interpreted as script |
 | `X-Frame-Options` | `DENY` | Verdicts carry regulatory weight; they must not render inside someone else's chrome |

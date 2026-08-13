@@ -184,7 +184,12 @@ def verify_item(
             per_field="Not checked — the image could not be read.",
         )
 
-    return run_verification(item.application, prepared.usable, provider)
+    return run_verification(
+        item.application,
+        prepared.usable,
+        provider,
+        unseen=prepared.skipped_reasons if prepared.partial else (),
+    )
 
 
 def _failure_for(exc: Exception, attempts: int) -> ItemFailure:

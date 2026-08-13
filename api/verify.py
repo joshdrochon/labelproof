@@ -98,10 +98,38 @@ class PreparedImages:
     quality_ms: int
     reason: str | None
 
+    #: Images the pre-gate refused, by index, when OTHERS survived.
+    #:
+    #: This exists because the all-or-nothing view was wrong in the dangerous direction.
+    #: A two-image application whose back panel is unreadable had that panel silently
+    #: dropped and the remaining front sent to the model — which then, correctly, did not
+    #: find a government warning on it. The verdict came back **Missing**, with the
+    #: rationale "no government warning statement was found on any of the supplied
+    #: images". Both halves false: there were two images, one was never looked at, and
+    #: the label was compliant.
+    #:
+    #: Missing is a finding against the LABEL and grounds to return an application.
+    #: "We did not read one of your photographs" is a finding about the PHOTOGRAPH. The
+    #: whole product turns on not confusing those, and here it did.
+    skipped: tuple[int, ...] = ()
+
+    #: Why each skipped image was refused, in the same order, so the agent is told which
+    #: picture to retake rather than that something was wrong somewhere.
+    skipped_reasons: tuple[str, ...] = ()
+
     @property
     def pregated(self) -> bool:
         """True when nothing survived the pre-gate, so no model call may be made."""
         return not self.usable
+
+    @property
+    def partial(self) -> bool:
+        """True when SOME images were refused and others were read.
+
+        While this is true, no field may be reported Missing: "not on the label" is a
+        claim about the whole label, and part of it was never seen.
+        """
+        return bool(self.skipped) and bool(self.usable)
 
 
 def default_roles(count: int, supplied: Sequence[str] | None = None) -> list[str | None]:
@@ -189,6 +217,17 @@ def prepare_images(
         if not quality_mod.should_skip_extraction(score)
     ]
 
+    skipped = tuple(
+        image.index
+        for image, score in zip(ingested, scores, strict=True)
+        if quality_mod.should_skip_extraction(score)
+    )
+    skipped_reasons = tuple(
+        score.reason or PREGATE_FALLBACK_REASON
+        for score in scores
+        if quality_mod.should_skip_extraction(score)
+    )
+
     reason = (
         None
         if usable
@@ -197,6 +236,8 @@ def prepare_images(
     return PreparedImages(
         reports=reports,
         usable=usable,
+        skipped=skipped,
+        skipped_reasons=skipped_reasons,
         ingest_ms=ingest_ms,
         quality_ms=quality_ms,
         reason=reason,
@@ -411,6 +452,54 @@ def _apply_merge(results: list[FieldResult], label: merge_images.MergedLabel) ->
             ]
 
 
+def _demote_missing_when_unseen(
+    results: list[FieldResult], reasons: tuple[str, ...]
+) -> list[FieldResult]:
+    """Missing becomes Unreadable while any supplied photograph went unread.
+
+    The defect this closes, measured: a two-image application whose back panel was too
+    poor to read had that panel dropped by the pre-gate, the front sent to the model, and
+    the government warning reported **Missing** — with the rationale "no government
+    warning statement was found on any of the supplied images". There were two images.
+    One was never looked at. The label was compliant, and the tool recommended returning
+    it to the applicant.
+
+    Missing is a finding against the LABEL. Unreadable is a statement about the
+    PHOTOGRAPH. Everything in this product turns on not confusing the two, and the
+    all-or-nothing pre-gate quietly did: `pregated` was only true when EVERY image
+    failed, so the mixed case — much the more likely one, since agents send a front and a
+    back and only one of them is usually bad — took the silent path.
+
+    Only Missing moves. A Mismatch found on an image we DID read is still a Mismatch: an
+    unread second photograph does not excuse a defect visible on the first, and demoting
+    it would let a bad upload wash out a real finding.
+    """
+    note = reasons[0] if reasons else PREGATE_FALLBACK_REASON
+    demoted: list[FieldResult] = []
+    for row in results:
+        if row.verdict is not Verdict.MISSING:
+            demoted.append(row)
+            continue
+        demoted.append(
+            FieldResult(
+                field=row.field,
+                verdict=Verdict.UNREADABLE,
+                extracted=None,
+                expected=row.expected,
+                confidence=0.0,
+                rationale=(
+                    f"Not found on the pictures that could be read — but one of the "
+                    f"pictures could not be read at all, so this may simply be on the "
+                    f"part nobody has seen. {note}"
+                ),
+                tier=row.tier,
+                evidence=row.evidence,
+                findings=row.findings,
+            )
+        )
+    return demoted
+
+
 def _priced(cost: Cost, model: str) -> Cost:
     """Fill in `usd` from the tokens and the model that actually served the request.
 
@@ -428,6 +517,7 @@ def verify(
     *,
     adjudicator: adjudicate_mod.Adjudicator | None = None,
     config: Config | None = None,
+    unseen: tuple[str, ...] = (),
 ) -> VerificationResult:
     """Run one application through the pipeline.
 
@@ -435,6 +525,11 @@ def verify(
     — no adapter implements the protocol. Passing None is a stated skip rather than a
     silent one: the outcome records `no adjudicator`, so a log can tell "there were no
     gray cases" apart from "nothing was wired up".
+
+    `unseen` carries the retake reasons for photographs the pre-gate refused while OTHERS
+    were read. It is not cosmetic: while any image went unread, no field may be reported
+    Missing, because "it is not on the label" is a claim about the whole label and part of
+    it was never looked at. See `_demote_missing_when_unseen`.
     """
     request_id = f"req_{uuid.uuid4().hex[:16]}"
     timings = Timings()
@@ -510,6 +605,11 @@ def verify(
         _warning_result(response.extractions, net.ml),
     ]
     _apply_merge(results, label)
+
+    # Before anything else looks at these verdicts. A field the model did not find is
+    # only Missing if the model saw the whole label.
+    if unseen:
+        results = _demote_missing_when_unseen(results, unseen)
 
     # Tier 3, AFTER the merge and before the aggregate — it needs the final per-field
     # verdicts to know which rows are gray, and the recommendation has to be computed

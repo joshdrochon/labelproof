@@ -196,3 +196,47 @@ describe('a row judged by Tier 3 says so', () => {
     expect(screen.queryByText(/a second model judged/i)).not.toBeInTheDocument();
   });
 });
+
+
+describe('the empty "label shows" cell', () => {
+  const render_ = (verdict: Parameters<typeof fieldResult>[1]) =>
+    render(
+      <table>
+        <tbody>
+          <FieldRow
+            result={fieldResult('government_warning', verdict, { extracted: null })}
+            commodity="spirits"
+            variant="attention"
+            number={1}
+            expanded={false}
+            onToggle={() => undefined}
+            onActivate={() => undefined}
+            decision={null}
+            onDecide={() => undefined}
+            isFocused={false}
+          />
+        </tbody>
+      </table>,
+    );
+
+  it('does not claim the element is absent when nobody could read it', () => {
+    // `extracted` is always null on an Unreadable row, so every one of them used to say
+    // "Not found on the label" — a finding against the artwork printed in place of a
+    // statement about the photograph. A pre-gated upload put that sentence on all seven
+    // rows of a label no model had seen.
+    render_('unreadable');
+    expect(screen.getByText('Could not be read')).toBeInTheDocument();
+    expect(screen.queryByText('Not found on the label')).not.toBeInTheDocument();
+  });
+
+  it('still says so when the element genuinely is not there', () => {
+    // Missing IS the finding. The fix must not soften it.
+    render_('missing');
+    expect(screen.getByText('Not found on the label')).toBeInTheDocument();
+  });
+
+  it('does not read as a problem when the field does not apply', () => {
+    render_('not_applicable');
+    expect(screen.getByText('Not required here')).toBeInTheDocument();
+  });
+});

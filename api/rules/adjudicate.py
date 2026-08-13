@@ -38,7 +38,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Final, Protocol
 
 from api.models import FieldName, FieldResult, Verdict
@@ -219,6 +219,15 @@ def adjudicate(
                 usd=spent,
             )
 
+        # MEASURED, not estimated. The first version decremented the budget by
+        # `estimated_ms` however long the call actually took, so a judge slower than the
+        # estimate overran the deadline it was supposed to respect: with the shipped 6s
+        # adapter timeout and four gray rows, Tier 3 could spend 24 seconds inside a
+        # budget it believed was 6. On /verify that trips the request deadline and throws
+        # away a successful extraction — the agent is told the label was not verified,
+        # on a label that read fine.
+        call_started = clock()
+        failed = False
         try:
             judgement = adjudicator.judge(
                 AdjudicationRequest(
@@ -229,20 +238,22 @@ def adjudicate(
                 )
             )
         except Exception:  # noqa: BLE001 - a failed judgement must never become a pass
-            judged += 1
-            spent += remaining.estimated_usd
-            remaining = Budget(
-                remaining_ms=remaining.remaining_ms - remaining.estimated_ms,
-                remaining_usd=remaining.remaining_usd - remaining.estimated_usd,
-            )
-            continue
+            failed = True
 
+        # A failed call still costs time and money, so it is charged either way.
+        actual_ms = max(1, int((clock() - call_started) * 1000))
         judged += 1
         spent += remaining.estimated_usd
-        remaining = Budget(
-            remaining_ms=remaining.remaining_ms - remaining.estimated_ms,
+        # `replace` rather than a fresh Budget: rebuilding it dropped any estimates the
+        # CALLER had set, so a test or an operator override reverted to the class defaults
+        # after the first row.
+        remaining = replace(
+            remaining,
+            remaining_ms=remaining.remaining_ms - actual_ms,
             remaining_usd=remaining.remaining_usd - remaining.estimated_usd,
         )
+        if failed:
+            continue
 
         if judgement.same_thing and judgement.confidence >= JUDGEMENT_FLOOR:
             by_field[row.field] = _promoted(row, judgement)

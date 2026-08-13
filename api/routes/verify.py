@@ -24,6 +24,7 @@ and the message says so without saying "inference".
 from __future__ import annotations
 
 import asyncio
+import functools
 import json
 from typing import Annotated, Any
 
@@ -196,7 +197,14 @@ async def verify_endpoint(
     remaining_ms = timer.remaining_ms(config.request_budget_ms)
 
     result = await _verify_within_budget(
-        parsed, prepared.usable, provider, remaining_ms=remaining_ms
+        parsed,
+        prepared.usable,
+        provider,
+        remaining_ms=remaining_ms,
+        # Retake reasons for photographs the pre-gate refused while others were read.
+        # While any of them exists, no field may come back Missing — see
+        # `api.verify._demote_missing_when_unseen`.
+        unseen=prepared.skipped_reasons if prepared.partial else (),
     )
 
     if result is None:
@@ -255,6 +263,7 @@ async def _verify_within_budget(
     provider: ExtractionProvider,
     *,
     remaining_ms: float,
+    unseen: tuple[str, ...] = (),
 ) -> VerificationResult | None:
     """Run the pipeline off the event loop, bounded by what is left of the budget.
 
@@ -266,7 +275,11 @@ async def _verify_within_budget(
         return None
 
     task = asyncio.create_task(
-        asyncio.to_thread(run_verification, application, images, provider)
+        asyncio.to_thread(
+            functools.partial(
+                run_verification, application, images, provider, unseen=unseen
+            )
+        )
     )
     try:
         return await asyncio.wait_for(task, timeout=remaining_ms / 1000)

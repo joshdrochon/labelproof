@@ -966,3 +966,106 @@ def test_a_traversal_that_survives_url_normalisation_still_gets_nothing(
     like a traversal succeeding and was neither a traversal nor a success.
     """
     assert make_client().get(f"/sample/images/{encoded}").status_code == 404
+
+
+# --------------------------------------------------------------------------------------
+# The mixed-quality upload (LP-321, IMG-4) — found by audit, and it was a false finding
+# --------------------------------------------------------------------------------------
+
+
+def _blurred(name: str, sigma: float = 12.0) -> bytes:
+    import cv2
+
+    image = cv2.imread(str(LABELS / name))
+    ok, buffer = cv2.imencode(".png", cv2.GaussianBlur(image, (0, 0), sigma))
+    assert ok
+    return bytes(buffer.tobytes())
+
+
+def test_an_unreadable_second_image_never_makes_a_field_missing() -> None:
+    """The defect this closes returned a compliant label for correction.
+
+    Measured before the fix: front sharp, back too poor to read. The pre-gate dropped the
+    back — the panel carrying the warning and the producer — sent the front to the model,
+    and reported `government_warning: missing` with the rationale "no government warning
+    statement was found on **any** of the supplied images". There were two images. One was
+    never looked at.
+
+    `pregated` was only true when EVERY image failed, so the mixed case took the silent
+    path — and the mixed case is much the more likely one, because agents send a front and
+    a back and usually only one of them is bad.
+
+    Missing is a finding against the LABEL and grounds to return an application.
+    Unreadable is a statement about the PHOTOGRAPH.
+    """
+    spec = by_name("tc16_front_back")
+    client = make_client(provider=SpecBackedProvider(spec))
+    response = client.post(
+        "/verify",
+        files=[
+            ("images", (FRONT, (LABELS / FRONT).read_bytes(), "image/png")),
+            ("images", (BACK, _blurred(BACK), "image/png")),
+        ],
+        data={"application": json.dumps(spec.application()), "roles": ["front", "back"]},
+    )
+    body = response.json()
+
+    qualities = [image["quality"]["verdict"] for image in body["images"]]
+    assert "hopeless" in qualities, "the fixture stopped being unreadable; re-blur it"
+    assert "ok" in qualities, "both images failed — that is the all-or-nothing case"
+
+    verdicts = {field["field"]: field["verdict"] for field in body["fields"]}
+    assert verdicts["government_warning"] != "missing", (
+        "a panel that was never read cannot make the warning Missing"
+    )
+    assert verdicts["government_warning"] == "unreadable"
+    assert body["aggregate"]["recommendation"] != "return_for_correction"
+
+
+def test_the_agent_is_told_which_picture_went_unread() -> None:
+    """"Something was wrong somewhere" is not actionable. The rationale has to name the
+    retake reason, or the agent cannot tell which photograph to ask for again."""
+    spec = by_name("tc16_front_back")
+    client = make_client(provider=SpecBackedProvider(spec))
+    body = client.post(
+        "/verify",
+        files=[
+            ("images", (FRONT, (LABELS / FRONT).read_bytes(), "image/png")),
+            ("images", (BACK, _blurred(BACK), "image/png")),
+        ],
+        data={"application": json.dumps(spec.application()), "roles": ["front", "back"]},
+    ).json()
+
+    warning = next(f for f in body["fields"] if f["field"] == "government_warning")
+    assert "could not be read" in warning["rationale"]
+
+
+def test_a_defect_on_a_readable_image_survives_an_unreadable_one() -> None:
+    """The demotion must not become an amnesty.
+
+    An unread second photograph does not excuse a defect visible on the first. If a bad
+    upload could wash out a real Mismatch, this fix would have replaced a false finding
+    with a false pass — which is the worse trade by the whole design of this product.
+    """
+    spec = by_name("tc08_abv_mismatch")
+    client = make_client(provider=SpecBackedProvider(spec))
+    body = client.post(
+        "/verify",
+        files=[
+            (
+                "images",
+                (
+                    "tc08_abv_mismatch.png",
+                    (LABELS / "tc08_abv_mismatch.png").read_bytes(),
+                    "image/png",
+                ),
+            ),
+            ("images", (BACK, _blurred(BACK), "image/png")),
+        ],
+        data={"application": json.dumps(spec.application())},
+    ).json()
+
+    verdicts = {field["field"]: field["verdict"] for field in body["fields"]}
+    assert verdicts["alcohol_content"] == "mismatch", (
+        "the ABV mismatch was visible on an image we DID read and must stand"
+    )

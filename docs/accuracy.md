@@ -43,12 +43,12 @@ is the honest answer to "does this work", and it is the number to argue with.
 
 | expected ↓ / actual → | match | acc. var | mismatch | missing | unreadable | n/a | total | recall |
 |---|--:|--:|--:|--:|--:|--:|--:|--:|
-| match | 134 | 0 | 0 | 0 | 0 | 0 | 134 | 100% |
-| acceptable_variation | 0 | 4 | 0 | 0 | 0 | 0 | 4 | 100% |
+| match | 132 | 0 | 0 | 0 | 0 | 0 | 132 | 100% |
+| acceptable_variation | 0 | 5 | 0 | 0 | 0 | 0 | 5 | 100% |
 | mismatch | 0 | 0 | 6 | 0 | 0 | 0 | 6 | 100% |
 | missing | 0 | 0 | 0 | 3 | 0 | 0 | 3 | 100% |
 | unreadable | 0 | 0 | 0 | 0 | 3 | 0 | 3 | 100% |
-| not_applicable | 0 | 0 | 0 | 0 | 0 | 25 | 25 | 100% |
+| not_applicable | 0 | 0 | 0 | 0 | 0 | 26 | 26 | 100% |
 
 Six fixtures were added after the first version of this report, and four of them failed on
 the first run — every failure in the fixture rather than in the engine. Those are recorded

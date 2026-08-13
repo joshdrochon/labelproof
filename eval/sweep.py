@@ -13,7 +13,7 @@ disqualified *by this report*, not excused by it.
 
 The inverse is also deliberate. The p95 here is extraction plus rules, measured from a
 script — it is not the upload-to-verdict number PERF-1 gates on, and presenting it as one
-would silently redefine the adoption gate against a partial measurement. `scripts/timed_p95.py`
+would silently redefine the adoption gate against a partial measurement. `scripts/timed_run.py`
 owns that number.
 
 **Latency is grouped by call shape**, because the adapter issues one concurrent call per
@@ -516,7 +516,7 @@ def render(results: Sequence[ModelResult], specs: Sequence[LabelSpec]) -> str:
         "",
         f"p95 shown against the {P95_BUDGET_S:.0f}s adoption gate as CONTEXT only. This is",
         "extraction plus rules measured from a script, not upload-to-verdict — PERF-1's",
-        "number comes from scripts/timed_p95.py against the deployed URL.",
+        "number comes from scripts/timed_run.py against the deployed URL.",
     ]
 
     repeat = min((r.observed_repeat for r in results), default=0)

@@ -30,7 +30,7 @@ and every ambiguity resolves toward Needs review.
 |---|---|
 | The model reads; it does not decide | Every verdict is computed in `api/rules/`. `compare` costs **1ms** — the whole rules engine, measured |
 | No channel for a guess | `ExtractedField` has no field to put one in. Unreadable and Missing are different findings and never collapsed |
-| The warning is exempt from anything that could excuse a defect | `api/rules/warning.py`; 548 tests, including exhaustive sweeps over every word-drop, word-alteration and truncation of the canonical statement |
+| The warning is exempt from anything that could excuse a defect | `api/rules/warning.py`; 560 tests, including exhaustive sweeps over every word-drop, word-alteration and truncation of the canonical statement |
 | Zero false passes, and the gate is exercised | Release-blocking. 9 violation rows scored, 0 passed. The harness also fails if *fewer than four* violations were scored — a zero-false-pass gate over zero violations is vacuous |
 | Tier 3 can only refuse | `api/rules/adjudicate.py` — Mismatch → Acceptable variation only, never the warning, bounded before it is called, and any failure leaves the Mismatch standing |
 
@@ -49,12 +49,12 @@ toward a false pass, on the one field with a zero-false-pass requirement. We too
 
 | | |
 |---|---|
-| Gates | `ruff`, `mypy --strict` over `api/`, 3,552 tests, the accuracy eval — all in CI |
+| Gates | `ruff`, `mypy --strict` over `api/`, 3582 tests, the accuracy eval — all in CI |
 | Offline | CI runs the suite inside `unshare --net`, so "no network" is demonstrated, not claimed |
 | Determinism | Tier A fixtures are byte-stable and generated from committed specs |
 | Structure | `api/rules/` is the regulated logic and imports nothing from the web layer; `api/provider/` is the only place an AI call happens |
 
-The suite is large (3,552) and the concentration is deliberate: 548 in `test_warning.py`,
+The suite is large (3582) and the concentration is deliberate: 560 in `test_warning.py`,
 mostly four exhaustive sweeps over the canonical statement. That is a safety property
 proved by enumeration rather than by sampling.
 

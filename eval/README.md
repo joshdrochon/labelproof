@@ -234,7 +234,7 @@ The warn-FP column reads `false passes / violation rows checked`, because `0` al
 identically whether it was 0-of-4 or 0-of-1.
 
 The p95 here is extraction plus rules, measured from a script. It is **not** PERF-1's
-upload-to-verdict number — that one comes from `scripts/timed_p95.py` against the deployed
+upload-to-verdict number — that one comes from `scripts/timed_run.py` against the deployed
 URL — and latency is grouped by call shape (one image is one call; two images are two
 concurrent calls) because a blended figure describes no request anyone makes.
 
