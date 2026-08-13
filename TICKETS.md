@@ -10,7 +10,7 @@ tracker if one is used.
 | **Source brief** | Take-home docx, sha `7f50443d68066298…` |
 | **MVP** | Day 2 EOD — §M tickets |
 | **Final** | Day 7 noon — §F tickets |
-| **Ticket prefix** | `LP-001` … `LP-334` |
+| **Ticket prefix** | `LP-001` … `LP-335` |
 | **State** | **319 of 332 closed.** Derived from `Closes:` trailers by `scripts/sync_board.py` and a post-commit hook — never hand-edited. A close with no commit behind it is a false close. |
 | **What remains** | Audited in [`docs/prd-audit.md`](docs/prd-audit.md). The open items are, in order of count: human testing that needs people, two deploy drills, and measurements that need scale. |
 
@@ -256,6 +256,7 @@ in LP-237, with fixtures across LP-068, 163, 195–198, 216, 226–229.
 - [x] **LP-155** Per-item isolation: one bad image fails one item, never the batch — TC-20 (BATCH-6)
 - [x] **LP-156** Per-item bounded retries, then failed-with-reason (BATCH-8)
 - [x] **LP-157** Retry endpoint: failed items only, no reprocessing the finished 290 (BATCH-8)
+- [ ] **LP-335** `verify` logged three Tier-3 counters that were not on the logging allowlist; the logger raised and every low-confidence mismatch on brand/class/producer/origin returned a 500 in production (SEC-4, OPS-5)
 - [x] **LP-334** Batch wiring is check-then-assign and runs in a threadpool: two cold-start requests could each build a store (double `recover()`) and a pool (double the provider ceiling) (BATCH-6)
 - [x] **LP-158** Job survives service restart (state persisted) (BATCH-6)
 - [x] **LP-159** Progressive results: completed items pollable/streamable immediately (BATCH-5)
