@@ -330,7 +330,7 @@ in LP-237, with fixtures across LP-068, 163, 195–198, 216, 226–229.
 ## F5 · Judgment tier (Tier 3)
 
 - [x] **LP-219** Adjudicator interface: (field, expected, extracted, context) → verdict + confidence + rationale (MATCH-4)
-- [ ] **LP-220** Adjudicator prompt: TTB context, judgment framing, strict output schema (MATCH-4)
+- [x] **LP-220** Adjudicator prompt: TTB context, judgment framing, strict output schema (MATCH-4)
 - [x] **LP-221** Invocation policy: gray cases only, past Tier 1/2; trigger rate logged (PRD §Processing Model)
 - [x] **LP-222** Time budget: adjudication fits the request budget or returns Needs review (PERF-1)
 - [x] **LP-223** Cost cap per verification; over-cap → Needs review (OPS-4)

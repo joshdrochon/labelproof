@@ -173,6 +173,19 @@ jobs:
           mypy
           echo "--- pytest ---"
           python -m pytest
+
+          # The accuracy gate, in CI and not only before a deploy (ENG-1, OPS-6).
+          #
+          # It ran in deploy.yml alone, which triggers on `main` — so on a branch, where
+          # all the work happens, an accuracy regression was invisible until release. A
+          # rule change that quietly moved a verdict would have reached the deploy gate
+          # rather than the pull request that caused it.
+          #
+          # Runs with no API key: Tier A is the fixture-backed extractor, deterministic
+          # and offline, so this cannot start depending on the network. Tier B is skipped
+          # here by construction and never gates anything anywhere.
+          echo "--- eval (Tier A, offline) ---"
+          python -m eval.run
           SCRIPT
 
           if sudo -n unshare --net true 2>/dev/null; then

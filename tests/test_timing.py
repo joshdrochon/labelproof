@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import time
 from pathlib import Path
 from typing import Any
@@ -950,3 +951,81 @@ def test_the_documented_example_is_arithmetically_consistent() -> None:
     assert example["total"] >= sum(
         example[name] for name in timing.MEASURED_STAGES
     )
+
+
+# --------------------------------------------------------------------------------------
+# Latency regression gate (OPS-6, LP-284)
+# --------------------------------------------------------------------------------------
+#
+# The model call dominates a real verification and is not in CI, so nothing here can
+# police the deployed p95 — `docs/perf-deployed.md` is the instrument for that. What CI
+# CAN police is the part we wrote: ingest, quality scoring, preprocessing, the rules
+# engine, serialization. A regression there is invisible against a 9-second model call
+# and permanent once shipped.
+#
+# The ceilings are per-stage rather than one total, because a total hides which stage
+# moved and a stage that doubles is a defect even when the total still fits.
+
+
+def _stage_ms(body: dict[str, Any], stage: str) -> int:
+    return int(body["timings_ms"][stage])
+
+
+#: Measured on a developer laptop over 12 warm runs, then doubled and rounded up. The
+#: margin is for a shared CI runner, not for regressions — a stage that has genuinely
+#: doubled is a defect, and this is meant to catch exactly that rather than to be
+#: comfortable. CI multiplies these; see `_ceiling`.
+STAGE_CEILINGS_MS: dict[str, int] = {
+    "ingest": 700,
+    "quality": 700,
+    "compare": 60,
+}
+
+
+def _ceiling(stage: str) -> int:
+    """CI runners are two to three times slower and shared. Scale rather than relax.
+
+    A single number cannot be both tight enough to catch a 2x regression on a laptop and
+    loose enough to survive a noisy runner — the same lesson as the API-overhead ceiling,
+    which sat at a laptop figure and turned CI red for ten commits.
+    """
+    return STAGE_CEILINGS_MS[stage] * (3 if os.environ.get("CI") else 1)
+
+
+@pytest.mark.parametrize("stage", sorted(STAGE_CEILINGS_MS))
+def test_no_stage_we_own_has_doubled(stage: str) -> None:
+    """Per-stage, with the provider stubbed, so this measures only our own code."""
+    from tests.test_api import make_client, post_verify
+
+    client = make_client()
+    post_verify(client, roles=["front", "back"])  # warm
+
+    samples = [
+        _stage_ms(post_verify(client, roles=["front", "back"]).json(), stage)
+        for _ in range(5)
+    ]
+    median = sorted(samples)[len(samples) // 2]
+
+    assert median <= _ceiling(stage), (
+        f"{stage} took {median}ms against a {_ceiling(stage)}ms ceiling (samples: "
+        f"{samples}). Either something got slower or the ceiling is stale — check which "
+        f"before touching the number, and never raise it to make a build pass."
+    )
+
+
+def test_the_gate_would_notice_a_regression() -> None:
+    """Guards the gate. A ceiling nothing could ever exceed is decoration.
+
+    Asserted against the numbers rather than by slowing the pipeline down: every ceiling
+    has to be within one order of magnitude of what the stage actually costs, or it is
+    not measuring anything.
+    """
+    from tests.test_api import make_client, post_verify
+
+    body = post_verify(make_client(), roles=["front", "back"]).json()
+    for stage, ceiling in STAGE_CEILINGS_MS.items():
+        observed = max(1, _stage_ms(body, stage))
+        assert ceiling <= observed * 60, (
+            f"the {stage} ceiling is {ceiling}ms against an observed {observed}ms — so "
+            f"loose that a regression would pass. Tighten it."
+        )
