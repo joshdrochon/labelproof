@@ -22,7 +22,8 @@ import type {
   FieldResult,
   VerificationResult,
 } from '../types';
-import { ApiFailure, loadSample, verify } from '../api';
+import { ApiFailure, listSamples, loadSample, verify } from '../api';
+import type { SampleCase } from '../api';
 import { NEXT_STEP_LABELS, STAGES, fieldLabel } from '../copy';
 import { attentionFields, settledFields } from '../triage';
 import AggregateBanner from '../components/AggregateBanner';
@@ -68,6 +69,10 @@ export default function VerifyNow() {
   // only, and never merged into the result — see the note on `AgentEntry`.
   const [entries, setEntries] = useState<Partial<Record<FieldName, AgentEntry>>>({});
   const [imageIndex, setImageIndex] = useState(0);
+  // The demos on offer, fetched on mount so the setup screen can show what a reviewer
+  // can try before they commit to a click. Empty until it answers, and empty forever if
+  // it fails — manual entry is the rest of the screen and does not depend on this.
+  const [samples, setSamples] = useState<SampleCase[]>([]);
 
   const abortRef = useRef<AbortController | null>(null);
   const localUrlsRef = useRef<string[]>([]);
@@ -166,7 +171,13 @@ export default function VerifyNow() {
     }
   }, [draft, files, localPreviewUrls, settle]);
 
-  const runSample = useCallback(async () => {
+  useEffect(() => {
+    const controller = new AbortController();
+    void listSamples(controller.signal).then(setSamples);
+    return () => controller.abort();
+  }, []);
+
+  const runSample = useCallback(async (slug?: string) => {
     abortRef.current?.abort();
     const controller = new AbortController();
     abortRef.current = controller;
@@ -175,7 +186,7 @@ export default function VerifyNow() {
     setFailure(null);
     setPhase('working');
     try {
-      const outcome = await loadSample(controller.signal);
+      const outcome = await loadSample(slug, controller.signal);
       const application =
         outcome.application ??
         ({
@@ -183,6 +194,7 @@ export default function VerifyNow() {
           brand_name: 'Sample application',
         } as Application);
       if (outcome.application) setDraft(draftFromApplication(outcome.application));
+      if (outcome.cases.length) setSamples(outcome.cases);
       settle(
         outcome.result,
         application,
@@ -280,18 +292,39 @@ export default function VerifyNow() {
           </li>
         </ol>
         <div className="setup__sample">
-          <button
-            type="button"
-            className="btn btn--secondary"
-            onClick={runSample}
-            disabled={phase === 'working'}
-          >
-            Try a sample
-          </button>
-          <span className="setup__sample-note">
-            Loads a real application and its label, and checks it straight away. Nothing to
-            fill in.
-          </span>
+          <p className="setup__sample-note">
+            Or try one of these. Each loads a real application and its label and checks it
+            straight away — nothing to fill in. This is closer to how an agent works: in
+            COLA the application already exists, and they are confirming it against the
+            artwork rather than typing it.
+          </p>
+
+          {samples.length > 0 ? (
+            <ul className="samples">
+              {samples.map((sample, index) => (
+                <li key={sample.slug}>
+                  <button
+                    type="button"
+                    className={index === 0 ? 'btn btn--secondary' : 'btn btn--quiet'}
+                    onClick={() => void runSample(sample.slug)}
+                    disabled={phase === 'working'}
+                  >
+                    {sample.title}
+                  </button>
+                  <span className="samples__summary">{sample.summary}</span>
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <button
+              type="button"
+              className="btn btn--secondary"
+              onClick={() => void runSample()}
+              disabled={phase === 'working'}
+            >
+              Try a sample
+            </button>
+          )}
         </div>
       </div>
 

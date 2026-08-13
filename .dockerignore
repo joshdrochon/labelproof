@@ -42,15 +42,22 @@ web/dist/
 web/.vite/
 
 # --- test and evaluation material ---------------------------------------------------
-# The runtime serves two fixture images (the one-click sample) and imports the fixture
-# catalog; it needs nothing else from these trees. The Dockerfile copies exactly those
-# paths, so excluding the rest here means an over-broad COPY fails loudly at build time
-# instead of quietly shipping the golden set to production.
+# The runtime serves the four demo labels and reads their applications out of
+# `golden/set.json`; it needs nothing else from these trees. The Dockerfile copies exactly
+# those paths, so excluding the rest here means an over-broad COPY fails loudly at build
+# time instead of quietly shipping the evaluation harness to production.
 tests/
 eval/
-golden/
 playwright-report/
 test-results/
+
+# `golden/` is excluded EXCEPT the manifest, which is product surface rather than test
+# material: `GET /sample` reads the demo applications from it, and a build without it
+# answers a reviewer's first click with an error while every health check stays green.
+# The photographs and the Tier B manifest stay out — they are evidence about accuracy,
+# not something the service serves.
+golden/*
+!golden/set.json
 
 # --- runtime artifacts (ephemeral by design — SEC-2) --------------------------------
 uploads/

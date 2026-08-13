@@ -48,7 +48,16 @@ python3.14 -m venv .venv && .venv/bin/pip install -e ".[dev]"
 LABELPROOF_FAKE_PROVIDER=1 .venv/bin/uvicorn api.main:app --reload
 ```
 
-Then open <http://localhost:8000> and click **Try a sample**.
+Then open <http://localhost:8000> and click one of the samples. There are four, and
+between them they show every shape of answer the tool gives: a label that checks out, a
+value that disagrees with the application, a warning heading in the wrong case, and a
+label with no warning at all. Each loads a real application and its artwork and returns a
+verdict in one click.
+
+**Start there rather than with the form.** In COLA the application already exists and the
+agent is confirming it against submitted artwork — they are not typing it in. The manual
+form on that screen stands in for a record this prototype does not fetch (see Assumptions),
+so filling it by hand is the least representative way to see the product.
 
 To run it against the real model, put a key in `.env` (gitignored, see `.env.example`):
 

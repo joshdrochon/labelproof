@@ -40,7 +40,7 @@ from typing import Any
 
 import pytest
 
-from api.routes.sample import _IMAGES, _LABELS, _SAMPLE_JSON
+from api.routes.sample import _GOLDEN, _LABELS, servable_images
 
 ROOT = Path(__file__).resolve().parents[1]
 DOCKERFILE = ROOT / "Dockerfile"
@@ -99,8 +99,12 @@ def test_the_runtime_image_carries_the_one_click_sample() -> None:
     """
     copied = _copied_paths()
 
-    required = [_SAMPLE_JSON.relative_to(ROOT)]
-    required += [(_LABELS / name).relative_to(ROOT) for name, _ in _IMAGES]
+    # The manifest the samples are READ from, plus every image they declare. Both are
+    # derived from `api.routes.sample`, so a fifth demo fails here rather than in front
+    # of a reviewer — which is what this caught when the picker went from one sample to
+    # four while the Dockerfile still named two images and no manifest at all.
+    required = [_GOLDEN.relative_to(ROOT)]
+    required += [(_LABELS / name).relative_to(ROOT) for name in sorted(servable_images())]
 
     missing = [str(path) for path in required if not _is_copied(path, copied)]
     assert not missing, (
@@ -162,7 +166,14 @@ def excluded_from_build_context(path: str) -> bool:
         # Test and evaluation material has no business in a production image.
         ("tests/test_api.py", True),
         ("eval/run.py", True),
-        ("golden/set.json", True),
+        # ...with one deliberate exception. `golden/set.json` is PRODUCT SURFACE: the
+        # four demos on the landing screen read their applications out of it, so a build
+        # without it answers a reviewer's first click with an error while every health
+        # check stays green. The photographs and the Tier B manifest beside it are
+        # evidence about accuracy and stay out.
+        ("golden/set.json", False),
+        ("golden/tier_b/manifest.json", True),
+        ("golden/tier_b/photos/fireball_back.webp", True),
         (".git/config", True),
         ("web/node_modules/react/index.js", True),
         # ...and everything the service actually runs on must get through.

@@ -97,10 +97,17 @@ COPY --chown=labelproof:labelproof api/ ./api/
 COPY --chown=labelproof:labelproof scripts/keepwarm.py ./scripts/keepwarm.py
 
 # --- the one-click demo (UX-1, LP-088) -------------------------------------------------
-# `GET /sample` serves the Old Tom application and its front/back label pair. Those three
-# files are product surface, not test material: without them the grader's first click
-# returns an error. Everything else under fixtures/ stays out.
+# `GET /sample` serves four demos, and reads their applications out of `golden/set.json`
+# rather than restating them. These files are PRODUCT SURFACE, not test material: without
+# any one of them a reviewer's first click returns an error while every health check stays
+# green. Everything else under fixtures/ and golden/ stays out.
+#
+# `tests/test_deploy_config.py` derives this list from `api.routes.sample`, so adding a
+# fifth demo fails a test here instead of failing in front of a reviewer — which is what
+# happened when the picker went from one sample to four and this block still named two
+# images and no manifest.
 COPY --chown=labelproof:labelproof assets/samples/ ./assets/samples/
+COPY --chown=labelproof:labelproof golden/set.json ./golden/set.json
 COPY --chown=labelproof:labelproof fixtures/__init__.py ./fixtures/__init__.py
 COPY --chown=labelproof:labelproof fixtures/generator/__init__.py \
                                    fixtures/generator/spec.py \
@@ -108,6 +115,9 @@ COPY --chown=labelproof:labelproof fixtures/generator/__init__.py \
                                    ./fixtures/generator/
 COPY --chown=labelproof:labelproof fixtures/labels/tc16_front_back_front.png \
                                    fixtures/labels/tc16_front_back_back.png \
+                                   fixtures/labels/tc08_abv_mismatch.png \
+                                   fixtures/labels/tc03_title_case_warning.png \
+                                   fixtures/labels/tc07_missing_warning.png \
                                    ./fixtures/labels/
 
 # --- the built SPA ---------------------------------------------------------------------

@@ -367,11 +367,55 @@ export interface SampleImage {
   filename: string;
 }
 
+/** One demo the server offers, described by what a reviewer will see. */
+export interface SampleCase {
+  slug: string;
+  title: string;
+  summary: string;
+}
+
 export interface SampleOutcome {
   result: VerificationResult;
   /** The filed application behind the sample, when the server sends it back. */
   application: Application | null;
   images: SampleImage[];
+  /** Every sample on offer, so the page can show the rest after running one. */
+  cases: SampleCase[];
+  /** Which one just ran. */
+  slug: string;
+}
+
+function sampleCases(raw: unknown): SampleCase[] {
+  if (!Array.isArray(raw)) return [];
+  return (raw as unknown[]).flatMap((entry) => {
+    const rec = asRecord(entry);
+    if (!rec || typeof rec['slug'] !== 'string') return [];
+    return [
+      {
+        slug: rec['slug'],
+        title: String(rec['title'] ?? rec['slug']),
+        summary: String(rec['summary'] ?? ''),
+      },
+    ];
+  });
+}
+
+/**
+ * The samples on offer, without running one.
+ *
+ * Asked for on mount so the setup screen can show what is available before a reviewer
+ * commits to a click. A failure here is silent by design: the buttons simply do not
+ * appear, and manual entry — which is the rest of the screen — still works.
+ */
+export async function listSamples(signal?: AbortSignal): Promise<SampleCase[]> {
+  try {
+    const response = await fetch('/sample', { signal });
+    if (!response.ok) return [];
+    const obj = asRecord(await response.json());
+    return obj ? sampleCases(obj['cases']) : [];
+  } catch {
+    return [];
+  }
 }
 
 function sampleImages(raw: unknown): SampleImage[] {
@@ -403,10 +447,14 @@ function sampleImages(raw: unknown): SampleImage[] {
  * A finished result coming back from `/sample` is also accepted, so a future server that
  * pre-verifies the demo needs no change here.
  */
-export async function loadSample(signal?: AbortSignal): Promise<SampleOutcome> {
+export async function loadSample(
+  slug?: string,
+  signal?: AbortSignal,
+): Promise<SampleOutcome> {
   let response: Response;
   try {
-    response = await fetch('/sample', { signal });
+    const query = slug ? `?case=${encodeURIComponent(slug)}` : '';
+    response = await fetch(`/sample${query}`, { signal });
   } catch (err) {
     if ((err as Error)?.name === 'AbortError') throw err;
     throw networkFailure();
@@ -419,10 +467,12 @@ export async function loadSample(signal?: AbortSignal): Promise<SampleOutcome> {
 
   const application = asRecord(obj['application']) as Application | null;
   const images = sampleImages(obj['images'] ?? obj['image_urls']);
+  const cases = sampleCases(obj['cases']);
+  const ran = typeof obj['slug'] === 'string' ? obj['slug'] : (slug ?? '');
 
   // Already verified — render it as it stands.
   if (asRecord(obj['aggregate']) && Array.isArray(obj['fields'])) {
-    return { result: normalizeResult(obj), application, images };
+    return { result: normalizeResult(obj), application, images, cases, slug: ran };
   }
 
   // The usual case: an application plus its pictures. Run them through /verify.
@@ -440,7 +490,7 @@ export async function loadSample(signal?: AbortSignal): Promise<SampleOutcome> {
       { application, files, roles: images.map((image) => image.role) },
       signal,
     );
-    return { result, application, images };
+    return { result, application, images, cases, slug: ran };
   }
 
   throw failure(

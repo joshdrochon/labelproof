@@ -878,3 +878,91 @@ def test_sample_to_verdict_smoke(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
         f"sample to verdict took {elapsed:.2f}s in fixture mode, against a "
         f"{E2E_CEILING_SECONDS:g}s ceiling — this is a floor on our own work, not PERF-1"
     )
+
+
+# --------------------------------------------------------------------------------------
+# The sample picker (LP-088, LP-308, UX-1)
+# --------------------------------------------------------------------------------------
+
+
+def test_the_demo_offers_every_verdict_shape_rather_than_one_clean_pass() -> None:
+    """A single passing sample demonstrates one verdict of six.
+
+    The demo is the first thing a reviewer touches, and until now it opened on manual
+    entry — nine fields of the exact drudgery this tool exists to remove — with one clean
+    sample beside it. Four samples put a pass, a value disagreement, a typography defect
+    and an absent warning within one click each.
+    """
+    body = make_client().get("/sample").json()
+    slugs = [case["slug"] for case in body["cases"]]
+
+    assert len(slugs) >= 4, slugs
+    assert slugs[0] == "clean", "the first click must be a pass, not a rejection"
+    assert body["slug"] == "clean", "a bare GET /sample must still run a working demo"
+
+
+@pytest.mark.parametrize(
+    "slug", ["clean", "abv-mismatch", "title-case-warning", "missing-warning"]
+)
+def test_every_offered_sample_loads_with_its_images(slug: str) -> None:
+    client = make_client()
+    body = client.get(f"/sample?case={slug}").json()
+
+    assert body["application"]["brand_name"]
+    assert body["images"], f"{slug} offers no image"
+    for image in body["images"]:
+        assert client.get(image["url"]).status_code == 200
+
+
+def test_the_samples_are_read_from_the_golden_set_not_restated() -> None:
+    """A demo that drifted from the set would show behaviour nothing tests.
+
+    Asserted by comparing the served application against `golden/set.json` rather than
+    against a copy in the test, so regenerating the fixtures cannot leave the demo behind.
+    """
+    golden = {
+        entry["name"]: entry
+        for entry in json.loads((ROOT / "golden" / "set.json").read_text())["fixtures"]
+    }
+    body = make_client().get("/sample?case=abv-mismatch").json()
+
+    assert body["application"] == golden["tc08_abv_mismatch"]["application"]
+
+
+def test_an_unknown_sample_is_refused_rather_than_silently_defaulted() -> None:
+    """Falling back to the clean sample would show a pass for a case nobody asked for."""
+    response = make_client().get("/sample?case=../../etc/passwd")
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "unknown_sample"
+
+
+def test_only_images_the_samples_declare_are_servable() -> None:
+    """The allowlist is derived from the manifest, never assembled from the request.
+
+    `tc01_old_tom_clean.png` is a real fixture that exists on disk and is NOT one of the
+    four the samples declare — which is the case worth testing, because a route that
+    joined the name onto a directory would happily serve it.
+    """
+    client = make_client()
+    assert (ROOT / "fixtures" / "labels" / "tc01_old_tom_clean.png").is_file()
+
+    refused = client.get("/sample/images/tc01_old_tom_clean.png")
+    assert refused.status_code == 400
+    assert refused.json()["error"]["code"] == "unknown_sample_image"
+
+
+@pytest.mark.parametrize(
+    "encoded",
+    ["%2e%2e%2f%2e%2e%2fetc%2fpasswd", "..%2F..%2Fetc%2Fpasswd"],
+)
+def test_a_traversal_that_survives_url_normalisation_still_gets_nothing(
+    encoded: str,
+) -> None:
+    """Percent-encoded, so it actually arrives at the route.
+
+    The obvious version of this test — `GET /sample/images/../../../etc/passwd` — proves
+    nothing: the HTTP client resolves the dots before the request is sent, the path
+    becomes `/etc/passwd`, and the SPA catch-all answers 200 with the app shell. It looked
+    like a traversal succeeding and was neither a traversal nor a success.
+    """
+    assert make_client().get(f"/sample/images/{encoded}").status_code == 404

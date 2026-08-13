@@ -441,7 +441,7 @@ in LP-237, with fixtures across LP-068, 163, 195–198, 216, 226–229.
 - [ ] **LP-305** Repo hygiene: history scanned for secrets, structure clean (SEC-6)
 - [ ] **LP-306** Fresh-clone test on a clean machine; README gaps fixed (DEL-3)
 - [ ] **LP-307** Deployed URL final smoke + keep-warm confirmed (DEL-1)
-- [ ] **LP-308** Sample label set downloadable inside the app — graders test in seconds (DEL-5)
+- [x] **LP-308** Sample label set downloadable inside the app — graders test in seconds (DEL-5)
 - [ ] **LP-310** PRD final sync: shipped reality matches the doc; deltas listed as trade-offs (DEL-7)
 - [ ] **LP-311** TICKETS final sync: board true, counts updated (DEL-7)
 - [ ] **LP-312** Tag `v1.0` + release notes

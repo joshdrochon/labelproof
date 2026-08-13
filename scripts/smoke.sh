@@ -371,6 +371,16 @@ json "$sample" "json.dumps(d['application'])" > "$WORK_DIR/application.json"
 image_count="$(json "$sample" "len(d['images'])")"
 if [[ -n "$image_count" && "$image_count" -ge 1 ]]; then
   pass "sample offers ${image_count} label image(s)"
+
+  # The demo is the first thing a reviewer touches, and one clean pass shows one verdict
+  # of six. If the picker ever collapses back to a single case, the deployed app has
+  # quietly lost the thing that makes the first click representative.
+  case_count="$(json "$sample" "len(d.get('cases', []))" 2>/dev/null || echo 0)"
+  if [ "${case_count:-0}" -ge 4 ]; then
+    pass "demo offers ${case_count} samples, covering pass / mismatch / typography / missing"
+  else
+    fail "demo offers ${case_count:-0} sample(s); the picker should offer at least 4"
+  fi
 else
   fail "sample offers no images"
 fi
