@@ -415,29 +415,29 @@ in LP-237, with fixtures across LP-068, 163, 195–198, 216, 226–229.
 ## F10 · Accuracy report
 
 - [ ] **LP-287** Final eval on the full golden set; inputs frozen (OPS-3)
-- [ ] **LP-288** Field accuracy vs the ≥95% floor; table published (OPS-3)
-- [ ] **LP-289** Confusion matrix published (OPS-2)
+- [x] **LP-288** Field accuracy vs the ≥95% floor; table published (OPS-3)
+- [x] **LP-289** Confusion matrix published (OPS-2)
 - [x] **LP-290** **Zero false passes on warning violations — verified and published** (OPS-3)
-- [ ] **LP-291** Failure analysis: every miss explained; fixed or documented as a limitation (DEL-6)
-- [ ] **LP-292** Final thresholds recorded with rationale (OPS-2)
-- [ ] **LP-293** Known-limitations list, evidence-backed (DEL-6)
-- [ ] **LP-294** Accuracy report committed + linked from README (OPS-3)
+- [x] **LP-291** Failure analysis: every miss explained; fixed or documented as a limitation (DEL-6)
+- [x] **LP-292** Final thresholds recorded with rationale (OPS-2)
+- [x] **LP-293** Known-limitations list, evidence-backed (DEL-6)
+- [x] **LP-294** Accuracy report committed + linked from README (OPS-3)
 
 ## F11 · Cost analysis
 
-- [ ] **LP-295** Dev spend tally from logs: tokens in/out, invocations, total (Cost Analysis)
-- [ ] **LP-296** Measured cost per verification: single + batch-amortized (OPS-4)
-- [ ] **LP-297** Projections filled: 130 / 600 / 1,200 per day, arithmetic shown (Cost Analysis)
-- [ ] **LP-298** Assumptions documented: images/app, tokens/call, Tier-3 rate, retry overhead (Cost Analysis)
-- [ ] **LP-299** Cost cliffs documented: resolution↔tokens; concurrency↔throttling (Cost Analysis)
-- [ ] **LP-300** ROI stated plainly: cents per label vs 5–10 minutes of agent time (PERF-3, Background)
+- [x] **LP-295** Dev spend tally from logs: tokens in/out, invocations, total (Cost Analysis)
+- [x] **LP-296** Measured cost per verification: single + batch-amortized (OPS-4)
+- [x] **LP-297** Projections filled: 130 / 600 / 1,200 per day, arithmetic shown (Cost Analysis)
+- [x] **LP-298** Assumptions documented: images/app, tokens/call, Tier-3 rate, retry overhead (Cost Analysis)
+- [x] **LP-299** Cost cliffs documented: resolution↔tokens; concurrency↔throttling (Cost Analysis)
+- [x] **LP-300** ROI stated plainly: cents per label vs 5–10 minutes of agent time (PERF-3, Background)
 
 ## F12 · Submission package
 
-- [ ] **LP-301** README final: approach, tools, assumptions, trade-offs, limitations (DEL-4, DEL-6)
-- [ ] **LP-302** README: final egress table (NET-1)
-- [ ] **LP-303** README: production-path section final (SEC-8)
-- [ ] **LP-304** `CHANGES.md` final: complete build log, run/test/rollback current (ENG-5)
+- [x] **LP-301** README final: approach, tools, assumptions, trade-offs, limitations (DEL-4, DEL-6)
+- [x] **LP-302** README: final egress table (NET-1)
+- [x] **LP-303** README: production-path section final (SEC-8)
+- [x] **LP-304** `CHANGES.md` final: complete build log, run/test/rollback current (ENG-5)
 - [ ] **LP-305** Repo hygiene: history scanned for secrets, structure clean (SEC-6)
 - [ ] **LP-306** Fresh-clone test on a clean machine; README gaps fixed (DEL-3)
 - [ ] **LP-307** Deployed URL final smoke + keep-warm confirmed (DEL-1)
