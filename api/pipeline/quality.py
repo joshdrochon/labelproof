@@ -192,7 +192,30 @@ def assess(image: np.ndarray) -> ImageQuality:
 
     worst = min(blur, exposure, glare)
 
-    if worst < T.HOPELESS:
+    # GLARE ALONE MAY NOT REFUSE AN IMAGE (LP-338).
+    #
+    # `glare_score` counts near-saturated pixels as a fraction of the frame. The fixture
+    # generator paints paper at about 245 and BLOWN_LEVEL is 250, so on generated labels
+    # that fraction is zero and the metric looks perfect. Real scans clip to 255 across
+    # ordinary white stock, so real paper crosses a line synthetic paper never reaches:
+    # across 23 real labels, two white ones scored glare EXACTLY 0.000 with blur 1.000 —
+    # sharp, evenly lit, and refused before any model call. One was the only label in the
+    # set with no government warning at all.
+    #
+    # No signal we have separates the two cases. Synthetic total glare measures
+    # glare 0.017 / blur 0.983; a real white label measures 0.000 / 1.000. In these terms
+    # they are the same image. The difference is that glare destroyed the text and white
+    # paper did not, and that is a question only the reader can answer.
+    #
+    # So glare is still scored, still reported, and still condemns individual REGIONS —
+    # `assess_region` is where a washed-out warning is caught, and it is unchanged. What
+    # it no longer does is refuse the whole image on its own. The cost is one model call
+    # on a genuinely glared photograph, which then comes back Unreadable instead of
+    # pre-gated. The alternative was refusing labels we can read, and refusing to look is
+    # the only failure mode in this system that can hide a real defect.
+    condemning = min(blur, exposure)
+
+    if condemning < T.HOPELESS:
         verdict, reason = "hopeless", _retake_reason(blur, exposure, glare)
     elif worst < T.DEGRADED or not resolution_ok:
         verdict, reason = "degraded", _degraded_reason(blur, exposure, glare, resolution_ok)

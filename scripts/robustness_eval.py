@@ -105,6 +105,11 @@ class Outcome:
                 return not self.pregated
             case "warning_illegible":
                 return FieldName.GOVERNMENT_WARNING not in self.illegible
+            case "unreadable":
+                # The warning is the row that must never be claimed as verified through
+                # a wash. Other fields coming back illegible on the same image is the
+                # tool being honest about the whole photograph, not a failure.
+                return FieldName.GOVERNMENT_WARNING not in self.illegible
             case _:
                 return False
 
@@ -118,6 +123,11 @@ class Outcome:
                 return self.pregated or bool(self.illegible)
             case "warning_illegible":
                 return bool(self.illegible - {FieldName.GOVERNMENT_WARNING})
+            case "unreadable":
+                # No false flag is possible here: the image IS unreadable, so every row
+                # the tool declines to verify is a row it was right to decline. What this
+                # obligation forbids is the opposite — see `false_pass`.
+                return False
             case _:
                 return False
 
