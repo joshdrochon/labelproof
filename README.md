@@ -12,7 +12,7 @@ recommendation. **It recommends — the agent decides.**
 | **Developer log** | [`CHANGES.md`](CHANGES.md) — deploy, roll back, operate |
 | **Execution plan** | [`TICKETS.md`](TICKETS.md) — 332 tickets, each traced to a requirement ID |
 | **Start here (reviewers)** | [`docs/evaluation.md`](docs/evaluation.md) — the brief's criteria, each with something to open |
-| **PRD audit** | [`docs/prd-audit.md`](docs/prd-audit.md) — both PRD checklists, line by line — MVP 14/15, Final 6/11 |
+| **PRD audit** | [`docs/prd-audit.md`](docs/prd-audit.md) — both PRD checklists, line by line — MVP 14/15, Final 7/11 |
 | **Accuracy** | [`docs/accuracy.md`](docs/accuracy.md) — Tier A 100% on 175 rows, Tier B 71.4% on 21, confusion matrices, every miss explained |
 | **Cost** | [`docs/cost.md`](docs/cost.md) — $0.031 a verification, $0.018 in batch, measured |
 | **Latency** | [`docs/perf-deployed.md`](docs/perf-deployed.md) — 20 timed runs on the deployed URL |
@@ -290,19 +290,31 @@ here.
   in the system is still calibrated against rendered PNGs. Tier B scores **71.4%** against
   Tier A's 100%; that 28.6-point gap is the honest answer to "does this work", and it is
   published in [`docs/accuracy.md`](docs/accuracy.md) rather than averaged away.
-- **Accessibility is audited automatically and never by a person.** axe runs in CI over
-  all five screens with zero violations and nothing disabled; contrast is gated as data
-  (21 pairs, worst 5.41:1 against a 4.5 floor), and so are both of UX-3's floors — 16px
-  of type and 44px of click target. Those two gates are newer than the claim they check:
-  the type gate shipped enforcing 15px while its own docstring said 16, and nothing
-  checked the 44px rule at all until the evidence chips were found at 27px. What has NOT
-  happened is the half a tool cannot do: **no keyboard-only walkthrough, no screen-reader
-  pass**. An automated audit covers perhaps half of WCAG, and reading a green run as a
-  pass is the actual risk — see [`docs/prd-audit.md`](docs/prd-audit.md).
+- **Accessibility is gated as data, in three browser engines.** axe runs in CI over all
+  five screens with zero violations and nothing disabled; contrast is computed for all 21
+  ink-and-ground pairs (worst 5.41:1 against a 4.5 floor), and both of UX-3's floors —
+  16px of type, 44px of click target — are enforced by tests over the stylesheet.
+  `web/e2e/a11y.spec.ts` drives the rest in Chromium, Firefox and a tablet viewport:
+  keyboard navigation, a focus ring that is visibly painted rather than merely present,
+  no keyboard trap, and the accessibility tree — accessible names, landmarks, heading
+  order, `aria-describedby` resolving to a real node, focus landing on the first invalid
+  field. 75 checks. Those gates are newer than the claims they check: the type gate
+  shipped enforcing 15px while its own docstring said 16, and nothing checked the 44px
+  rule at all until the evidence chips were found at 27px — see
+  [`docs/prd-audit.md`](docs/prd-audit.md).
 - **The 73-year-old test has not been run.** UX-1 asks for three cold users reaching a
   verdict with no instructions. That needs three people and cannot be simulated. The
   protocol is written and fixed in advance — [`docs/hallway-protocol.md`](docs/hallway-protocol.md)
   — so the success criteria cannot be adjusted to whatever happens on the day.
+- **The second-look re-reader is built and switched off.** `api/reread.py` re-reads a
+  low-confidence field from a crop of its own region, so text that was a few dozen pixels
+  inside a downscaled frame becomes the whole image. It is bounded, it can only replace a
+  reading with a strictly better one, and it has 20 tests. `reread_enabled` defaults to
+  **False** for the same reason Tier 3 runs with no adjudicator: there is no measurement
+  showing it helps. Tier A fixtures render cleanly and read at high confidence, so the
+  trigger never fires and the eval cannot score it; Tier B is three bottles. Turning it on
+  without that evidence would be trusting a second reading nobody scored, which is the
+  move this product argues against everywhere else.
 - **Geometric correction does not run on a real verification.** `api/pipeline/preprocess.py`
   and `api/pipeline/deskew.py` — deskew, perspective correction, contrast lifting — have
   **no caller in the request path**. What does run is ingest (magic-byte sniffing, EXIF and
@@ -454,6 +466,8 @@ lists one nothing emits.
 | `verify_complete` | INFO | A verification produced a recommendation. |
 | `adjudication` | INFO | Tier 3 saw at least one gray row. Carries how many were considered, how many were judged and how many changed, so the trigger rate is a number rather than an impression (LP-221). |
 | `verify_over_budget` | INFO | The request budget expired; partial result returned as Needs review. |
+| `reread` | INFO | One or more fields were read again from a crop of their own region (LP-325). Carries how many were eligible, how many were re-read and how many improved. |
+| `reread_failed` | WARNING | A re-read call failed. The first reading stands and the verification is unaffected — failing to improve is not failing to verify. |
 | `verify_pregated` | INFO | Images too poor to read; returned Unreadable with zero model calls. |
 
 <!-- LOG-EVENTS:END -->

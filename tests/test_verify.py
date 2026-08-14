@@ -361,13 +361,22 @@ def test_both_paths_explain_a_pre_gated_label_in_the_same_words(tmp_path: Path) 
 
 
 def test_a_readable_image_does_reach_the_model_on_both_paths(tmp_path: Path) -> None:
-    """The control. Without it, "zero calls" would also pass on a pipeline that is broken."""
+    """The control. Without it, "zero calls" would also pass on a pipeline that is broken.
+
+    `>= 1`, not `== 1`. The claim is that a readable image REACHES the model, and the
+    exact call count stopped being one when the re-reader landed (LP-325): a field the
+    first pass was unsure about earns a second look at its own region. Pinning the count
+    here would make this test fail on a change that improves accuracy without touching
+    what it is actually about. The cost discipline lives where it belongs — `reread` is
+    capped at `MAX_REGIONS` and bounded by what remains of the request budget, both
+    asserted in `tests/test_reread.py`.
+    """
     interactive_calls, body = verify_now_calls(readable_png(), READABLE_LABEL, tmp_path)
-    assert interactive_calls == 1
+    assert interactive_calls >= 1
     assert body["aggregate"]["recommendation"] == Recommendation.READY_TO_APPROVE.value
 
     queued_calls, result = batch_calls(readable_png(), READABLE_LABEL, tmp_path)
-    assert queued_calls == 1
+    assert queued_calls >= 1
     assert result["aggregate"]["recommendation"] == Recommendation.READY_TO_APPROVE.value
 
 

@@ -79,7 +79,11 @@ _STATE_ABBREVIATIONS: dict[str, str] = {
 #: producer ending in "Co" or "Co." was becoming "colorado" (FIELD-5, and the asymmetry
 #: law: a false flag costs seconds, a false pass costs a compliance failure).
 _ZIP = r"\d{5}(?:-\d{4})?"
-_STATE_AFTER_COMMA = re.compile(rf",(\s*)([a-z]{{2}})\b(?=\s*(?:{_ZIP})?\s*(?:,|$))")
+# The trailing `[.,]` matters. A label prints "PORTLAND, ME." with a full stop, and the
+# lookahead used to demand a comma or the end of the string — so the label's "me." was
+# left alone while the application's bare "ME" expanded to "maine", and a producer that
+# matched exactly came back Mismatch over a printer's full stop. Found on a real label.
+_STATE_AFTER_COMMA = re.compile(rf",(\s*)([a-z]{{2}})\b(?=\s*(?:{_ZIP})?\s*(?:[,.]|$))")
 _STATE_BEFORE_ZIP = re.compile(rf"\b([a-z]{{2}})\b(?=\s+{_ZIP}\b)")
 
 

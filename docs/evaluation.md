@@ -80,7 +80,7 @@ spinner. `api/errors.py` is the taxonomy; `next_step` drives what the UI offers.
 | [`PRD.md`](../PRD.md) | Requirements, 114 of them, cited by ID throughout the code |
 | [`TICKETS.md`](../TICKETS.md) | 332 tickets; a checkbox is derived from a `Closes:` trailer, never hand-set |
 | [`CHANGES.md`](../CHANGES.md) | Run, test, deploy, roll back |
-| [`prd-audit.md`](prd-audit.md) | Both PRD checklists, line by line — MVP 14/15, Final 6/11 |
+| [`prd-audit.md`](prd-audit.md) | Both PRD checklists, line by line — MVP 14/15, Final 7/11 |
 
 ---
 
@@ -89,15 +89,31 @@ spinner. `api/errors.py` is the taxonomy; `next_step` drives what the UI offers.
 Named in full in the README, and repeated here because a reviewer should not have to hunt
 for it:
 
+- **PERF-3 is unmeasured, and it is the headline claim.** The requirement is that
+  tool + human beats the 5–10 minute manual baseline. The TOOL is measured — 9.6s p95,
+  20 runs. Tool + human never was: that needs cold users timed on the real screen, and
+  none were available. The argument is that triage means an agent reads two flagged rows
+  rather than seven fields, and every Tier B miss ran toward over-flagging rather than
+  under-flagging. That is an argument. It is not a measurement, and it should not be read
+  as one.
 - **p95 is 9.6s against a 5s target.** Measured, recorded, and traded deliberately.
 - **Cropped content reads as Missing, not Unreadable.** The one open correctness defect.
   A finding against the label where the truth is a finding about the photograph.
 - **Geometric correction does not run in production.** Written, tested, and not wired —
   the skew estimator was inventing angles until this week.
-- **The deploy pipeline has never run.** It triggers on `main`; the work is on a branch.
-  Every deployment was by hand.
-- **No human testing.** No keyboard-only walkthrough, no screen reader, no cold users, no
-  cross-browser pass. The markup was written for all four; written-for is not tested-for.
-- **The destroy-and-redeploy drill and the forced-rollback drill have not been run.**
+- **The deploy pipeline ran green for the first time on 2026-08-13** — release gate, then
+  deploy and verify, producing release v27 from a GitHub runner. Every deployment before
+  that was by hand. **Both failure directions are now drilled too:** a red check refuses
+  the merge and therefore the deploy ([`ci-gate-drill.txt`](ci-gate-drill.txt)), and a
+  forced bad deploy was caught by smoke and rolled back to the previous image by digest in
+  about 90 seconds ([`rollback-drill.txt`](rollback-drill.txt)).
+- **The 73-year-old test has not been run.** UX-1 asks for three cold users reaching a
+  verdict with no instructions. None were available, so it is descoped rather than
+  deferred — and the consequence is that PERF-3 above is unmeasured. Keyboard navigation,
+  the accessibility tree, error paths and two browser engines are driven by `web/e2e/`,
+  75 checks.
+- **The destroy-and-redeploy drill has not been run.** The forced-rollback drill has —
+  see above. Destroying the app and rebuilding it from the repository alone is still
+  the one that proves the configuration is complete rather than merely accepted.
 
 Each of these is a thing a reviewer would find. Finding them here first is the point.

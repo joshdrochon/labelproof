@@ -1,0 +1,50 @@
+LP-244 — forced-bad-deploy rollback drill
+Run: https://github.com/joshdrochon/labelproof/actions/runs/31745629843
+Date: 2026-08-13T21:26Z
+
+METHOD
+  A deliberate break on branch drill/lp-244 (never merged): one of the four demo
+  samples commented out. Chosen because the app still BOOTS and still passes
+  /healthz and /ready, so Fly's own health checks are satisfied and the deploy
+  succeeds — a release that looks healthy to the platform and is broken to a
+  user. A crash-on-boot would be caught by Fly and never reach the smoke step,
+  which would drill the platform rather than our pipeline.
+
+  Dispatched with skip_gate=true so a red gate could not be mistaken for the
+  thing being tested. That is LP-243, and it is separate.
+
+RESULT — every step, in order
+  success   Validate the deployment configuration
+  success   Record the currently-deployed image and config   <- rollback target: v27
+  success   Deploy                                            <- v28, the bad release, went live
+  failure   Smoke test the release                            <- caught it
+  failure   Roll back                                         <- see below
+  Run conclusion: failure
+
+  Fly releases after the run:
+    v29  rollback     <- previous image redeployed by digest
+    v28  bad release
+    v27  known good
+
+  From the rollback step's own log:
+    ##[notice] Rollback verified — the previous release is serving again.
+    ##[error]  Process completed with exit code 1
+
+WHAT "failure" MEANS HERE
+  The rollback step exits 1 deliberately, after verifying service is restored.
+  The source says why: "The release failed. Say so, even though the recovery
+  worked." A rolled-back release must not present as a green run — the change
+  did not ship, and a pipeline that reported success would be lying about that.
+  So "Roll back: failure" is the pass condition of this drill, not its result.
+
+  Time on the broken release: roughly 90 seconds, 21:26:05 to 21:27:52.
+
+VERIFIED AFTER
+  https://labelproof.fly.dev/sample returns four samples again.
+
+WHAT THIS DOES NOT PROVE
+  One failure mode: a healthy release that fails smoke. Untested: a deploy that
+  never boots, a rollback when the FAILURE ITSELF was configuration-caused (the
+  workflow captures the live fly.toml for exactly this and that path did not
+  execute), and a rollback when Fly is degraded. LP-243 — red CI blocking a
+  deploy — is also still not drilled.

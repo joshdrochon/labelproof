@@ -486,6 +486,10 @@ def test_the_sweep_covers_every_kind_of_expectation() -> None:
     assert {c.expectation for c in degrade.CONDITIONS} == {
         "readable",
         "warning_illegible",
+        # Added when glare stopped being able to refuse a whole image (LP-338): an image
+        # past recovery must SAY it could not be read, which is not the same claim as
+        # declining to look at it.
+        "unreadable",
         "pregated",
     }
 

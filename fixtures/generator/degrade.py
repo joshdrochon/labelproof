@@ -380,11 +380,28 @@ CONDITIONS: list[Condition] = [
         name="tc12_glare_total",
         tc="TC-12",
         description="flash across most of the label",
-        expectation="pregated",
+        # WAS "pregated", and the obligation changed on evidence (LP-338).
+        #
+        # Refusing this image cost nothing here and cost real labels everything. Glare is
+        # counted as the fraction of near-saturated pixels; this generator paints paper at
+        # about 245 against a BLOWN_LEVEL of 250, so a synthetic label scores a perfect
+        # zero and the metric looks sound. Real scans clip to 255 across ordinary white
+        # stock. Across 23 real labels, two white ones scored glare EXACTLY 0.000 with
+        # blur 1.000 and were refused unread — one of them the only label in the set with
+        # no government warning at all.
+        #
+        # Nothing available separates the cases: this fixture measures glare 0.017 / blur
+        # 0.983, a real white label 0.000 / 1.000. So glare no longer refuses a whole
+        # image by itself, and the obligation this fixture carries is the one that
+        # actually protects an agent — the warning must not be readable, and nothing may
+        # be invented under the wash. It costs one model call it used to save.
+        expectation="unreadable",
         why=(
-            "Past recovery. The obligation here is a retake reason and zero model calls "
-            "— spending a token on this image buys nothing, and inpainting it would buy "
-            "something worse than nothing."
+            "Past recovery, and the obligation is that the tool SAYS so rather than that "
+            "it declines to look. A refusal is free and an Unreadable verdict is not, but "
+            "a refusal is also the only outcome that can hide a defect — it reports on "
+            "the photograph while saying nothing about the label. Glare still condemns "
+            "individual regions, which is where a washed-out warning is caught."
         ),
     ),
     Condition(

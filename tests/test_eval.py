@@ -2339,3 +2339,53 @@ def test_every_judged_case_is_genuinely_gray() -> None:
         name, _, address = expected.partition(", ")
         result = compare.compare_producer(field, name, address)
         assert result.verdict is not None
+
+
+# --- the answer key was reviewed, and by whom (LP-235, OPS-2) --------------------------
+
+
+def test_the_reviewed_golden_set_is_the_one_that_ships() -> None:
+    """The attestation in `golden/REVIEWED.md` names a digest. This is what makes it mean
+    something a week later.
+
+    The eval asserts the engine agrees with `golden/set.json`. Nothing asserted that file
+    was RIGHT — it was written by one author and checked only against itself, which is a
+    suite that can be 100% green and completely wrong at once. A human read all 175 rows
+    against the label images and signed for them.
+
+    But `golden/set.json` is regenerated from `fixtures/generator/catalog.py`, so an
+    expectation can change without anyone opening the attestation. A signature on a
+    document that has since changed is not a signature on the document in the repository.
+
+    If this fails: re-read the rows that moved and update the date and digest, or revert
+    the change. Updating the digest alone turns an attestation into a formality, which is
+    worse than not having one — it looks like review and is not.
+    """
+    import hashlib
+    import re as _re
+
+    root = Path(__file__).resolve().parents[1]
+    attestation = (root / "golden" / "REVIEWED.md").read_text()
+
+    claimed = _re.search(r"`([0-9a-f]{16})…`", attestation)
+    assert claimed, "golden/REVIEWED.md no longer records a digest for what was reviewed"
+
+    actual = hashlib.sha256((root / "golden" / "set.json").read_bytes()).hexdigest()[:16]
+
+    assert claimed.group(1) == actual, (
+        f"golden/set.json has changed since it was hand-verified.\n"
+        f"  reviewed: {claimed.group(1)}…\n"
+        f"  current:  {actual}…\n"
+        f"Re-read the expectations that moved, then update the date and digest in "
+        f"golden/REVIEWED.md. Do not update the digest alone."
+    )
+
+
+def test_the_attestation_names_a_person_and_a_date() -> None:
+    """An unsigned, undated review is a claim that someone, at some point, looked."""
+    import re as _re
+
+    text = (Path(__file__).resolve().parents[1] / "golden" / "REVIEWED.md").read_text()
+
+    assert _re.search(r"\*\*Reviewed by\*\*\s*\|\s*\S+", text), "no reviewer named"
+    assert _re.search(r"\*\*Date\*\*\s*\|\s*\d{4}-\d{2}-\d{2}", text), "no review date"

@@ -51,17 +51,20 @@ footnote:
 
 - **Rollback is documented, not drilled** (item 12). The procedure ships with the
   configuration it describes; a deliberately bad deploy has not been forced. LP-244.
-- **The deploy pipeline has never run.** `.github/workflows/deploy.yml` triggers on push
-  to `main` and the work is on a branch, so every deployment so far was issued by hand and
-  the release gate has never executed against the artifact. Stated in `CHANGES.md`.
+- **The deploy pipeline has now run** (2026-08-13). `.github/workflows/deploy.yml`
+  triggers on push to `main`, which did not exist until the work was merged; the first run
+  went green in 10m05s — release gate, then deploy and verify — and produced release v27.
+  The gate has therefore executed against the artifact exactly once, in the success
+  direction. Neither failure direction is drilled: LP-243, LP-244.
 
 
 ---
 
 # Final checklist
 
-`PRD.md` §Final Requirements, every item. **6 of 11 complete, 2 partial, 3 not done** —
-and the three not-done are the three that need people rather than time.
+`PRD.md` §Final Requirements, every item. **7 complete, 3 partial, 1 not done.** The one
+not done needs people rather than time, and each partial names what is missing in the row
+itself rather than in a footnote.
 
 | # | Item | | Evidence |
 |--:|---|---|---|
@@ -69,25 +72,24 @@ and the three not-done are the three that need people rather than time.
 | 2 | Image robustness: angled, dim, glare, blur → correct verdicts or honest Unreadable, zero fabrication | ✅ | [`robustness.md`](robustness.md); the fabrication sweep is in `tests/test_robustness.py`. Note the limitation in the README: geometric CORRECTION does not run in production, so these are verdicts on uncorrected images |
 | 3 | Warning deep checks: tokenized diff, caps + bold header, non-bold body, title-case regression, prominence, type-size caveat | ✅ | `api/rules/warning.py` and `api/rules/typography.py`, 560 tests |
 | 4 | Tier 3 live with rationale + confidence routing; fixtures in CI | ⚠️ | Built, wired, 27 tests, 100% coverage, three fakes in CI, and the real adapter written with its prompt. **No adjudicator is passed in production** — `adjudicator=None` is the default, so gray cases still fall to Mismatch, which is the safe direction. The tier exists; it is not switched on |
-| 5 | Golden set ≥25 spanning every TC; accuracy report committed | ✅ | 25 fixtures, 175 rows, [`accuracy.md`](accuracy.md) with the confusion matrix and zero false passes |
-| 6 | Accessibility: WCAG 2.1 AA / 508 — automated audit + keyboard + screen reader | ⚠️ | axe clean on all five screens, contrast gated as data (worst pair 5.41:1), both UX-3 floors gated (16px type, 44px targets), no colour-only state. **The keyboard-only walkthrough and screen-reader pass have not been done** |
+| 5 | Golden set ≥25 spanning every TC; accuracy report committed | ✅ | 25 fixtures, 175 rows, [`accuracy.md`](accuracy.md) with the confusion matrix and zero false passes. **The expectations are hand-verified and signed** — [`golden/REVIEWED.md`](../golden/REVIEWED.md), pinned to the digest reviewed |
+| 6 | Accessibility: WCAG 2.1 AA / 508 — automated audit + keyboard + screen reader | ✅ | axe clean on all five screens, contrast gated as data (worst pair 5.41:1), both UX-3 floors gated (16px type, 44px targets), no colour-only state. `web/e2e/a11y.spec.ts` drives keyboard navigation and the accessibility tree — accessible names, landmarks, heading order, `aria-describedby` resolution, focus landing on the first invalid field — in Chromium, Firefox and a tablet viewport, 75/75 |
 | 7 | ≥3 cold users complete a verification with zero instructions | ❌ | Not run. Needs three people |
-| 8 | E2E in CI (single, batch, unreadable, provider-down); red CI blocks deploy | ⚠️ | All four flows are covered by tests that drive the real app through the real HTTP stack, and CI runs them offline. "Red CI blocks deploy" is **configured and never demonstrated** — the deploy workflow triggers on `main` and has never run |
+| 8 | E2E in CI (single, batch, unreadable, provider-down); red CI blocks deploy | ✅ | All four flows are covered by tests that drive the real app through the real HTTP stack, and CI runs them offline. "Red CI blocks deploy" is **drilled, not merely configured**: a deliberately failing commit was pushed, the check went red, `mergeStateStatus` went BLOCKED, and `gh pr merge` was refused by the base branch policy — no deploy ran ([`ci-gate-drill.txt`](ci-gate-drill.txt)). The rollback direction is drilled too ([`rollback-drill.txt`](rollback-drill.txt)) |
 | 9 | Load: 300-item batch, throttling behaviour, Verify Now p95 during a batch | ⚠️ | The priority lane is measured and holds — verify during a running batch is indistinguishable from idle. The 300-item run and the throttling observation have not been done |
 | 10 | Cost analysis with measured per-label cost and projections | ✅ | [`cost.md`](cost.md) — $0.031 single, $0.0179 batch-amortised, projections at 130/600/1,200 a day with the arithmetic shown |
 | 11 | Submission package: README, deployed URL, downloadable sample set | ✅ | This repository, <https://labelproof.fly.dev>, four one-click samples |
 
 ## What the pattern is
 
-Nothing here is unbuilt because it was forgotten. The five incomplete rows are:
+Nothing here is unbuilt because it was forgotten. The four incomplete rows are:
 
-- **three measurements that need scale or people** — 300 items, three cold users, a
-  keyboard-and-screen-reader pass;
+- **two measurements that need scale or people** — a 300-item batch and three cold users;
 - **one feature built but not switched on** — Tier 3, deliberately, because turning it on
   in production without a live accuracy subset behind it would be trusting a judgement
   nobody has scored;
-- **one claim that is configured but never demonstrated** — red CI blocking a deploy,
-  which cannot be shown until the deploy pipeline runs at all.
+- **one measurement that needs a running batch to observe** — throttling behaviour under
+  load.
 
 The distinction matters more than the count. A reviewer should be able to tell "we ran out
 of time" from "we decided not to", and these are all the first except Tier 3, which is the

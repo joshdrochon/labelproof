@@ -311,7 +311,9 @@ would otherwise have to discover.
 
 ### Deploying by hand
 
-Every deployment so far has been this, because the pipeline has never run:
+The pipeline deploys on a push to `main` and first ran green on 2026-08-13, producing
+release v27. Deploy by hand when you are working on a branch, or when the runner is not
+the fastest way to get a fix out:
 
 ```bash
 fly deploy --app labelproof --ha=false
