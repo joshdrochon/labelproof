@@ -11,7 +11,7 @@ tracker if one is used.
 | **MVP** | Day 2 EOD — §M tickets |
 | **Final** | Day 7 noon — §F tickets |
 | **Ticket prefix** | `LP-001` … `LP-338` |
-| **State** | **333 of 336 closed.** Derived from `Closes:` trailers by `scripts/sync_board.py` and a post-commit hook — never hand-edited. A close with no commit behind it is a false close. |
+| **State** | **334 of 336 closed.** Derived from `Closes:` trailers by `scripts/sync_board.py` and a post-commit hook — never hand-edited. A close with no commit behind it is a false close. |
 | **What remains** | Audited in [`docs/prd-audit.md`](docs/prd-audit.md). The open items are, in order of count: human testing that needs people, two deploy drills, and measurements that need scale. |
 
 **Scope law (locked):** *"A working core application with clean code is preferred over
@@ -462,7 +462,7 @@ in LP-237, with fixtures across LP-068, 163, 195–198, 216, 226–229.
 - [x] **LP-316** Error-path sweep: every error state visited (UX-6). Automated in `web/e2e/errors.spec.ts` rather than done by hand — it asserts each message is actionable BY SHAPE (no trace, no jargon, a way forward), which is a weaker claim than a person reading it and is stated as such
 - [x] **LP-317** PRD checklists (MVP + Final): line-by-line self-audit (ENG-9)
 - [x] **LP-318** Evaluation-criteria walkthrough: the brief's six criteria, each with pointable evidence (BR)
-- [ ] **LP-319** Fresh-eyes full walkthrough; final fixes (UX-1) — walked by Josh Rochon on 2026-08-14 against the deployed build. The findings became the producer punctuation fix, the keyboard-shortcut mnemonics, the masthead layout, the form alignment and the sample-card copy
+- [x] **LP-319** Fresh-eyes full walkthrough; final fixes (UX-1) — walked by Josh Rochon on 2026-08-14 against the deployed build. The findings became the producer punctuation fix, the keyboard-shortcut mnemonics, the masthead layout, the form alignment and the sample-card copy
 - [x] **LP-320** Submission sign-off: deliverables table complete, everything reachable (DEL-1..7)
 
 ---

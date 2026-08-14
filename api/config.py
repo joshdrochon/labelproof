@@ -155,21 +155,6 @@ class Config:
     #: else. The switch is here so the evidence can be gathered.
     reread_enabled: bool = False
 
-    #: Read the six ordinary elements and the government warning as TWO CONCURRENT calls
-    #: rather than one (LP-339). Structured output carries a large fixed cost per call
-    #: that does not scale with how much is asked for, so splitting and overlapping is
-    #: worth roughly two seconds on a measured label. Same model, same pixels, same
-    #: fidelity. Off means one call, which is the shape everything was measured against
-    #: before this — and the reason it is a switch rather than a rewrite.
-    #:
-    #: OFF BY DEFAULT. Measured at a 2,037 ms median saving over 7 runs (7,839 -> 5,802),
-    #: which is real, and it is still not enough to reach the 5s gate — so it buys a
-    #: better number rather than a met requirement. Turning it on also changes the shape
-    #: the provider contract tests stub, and rewriting those the night before a
-    #: submission to bank two seconds that do not cross the line is the wrong trade.
-    #: `LABELPROOF_SPLIT_EXTRACTION=1` turns it on for a measurement.
-    split_extraction: bool = False
-
     #: How the extraction is divided across calls (LP-339, LP-341). Measured on the same
     #: two-image payload, 20 runs each, locally:
     #:
@@ -278,9 +263,6 @@ class Config:
         use_fake = os.environ.get("LABELPROOF_FAKE_PROVIDER", "").lower() in (
             "1", "true", "yes",
         )
-        split = os.environ.get("LABELPROOF_SPLIT_EXTRACTION", "").lower() in (
-            "1", "true", "yes",
-        )
         key = os.environ.get("ANTHROPIC_API_KEY", "")
 
         warnings: list[str] = []
@@ -314,7 +296,6 @@ class Config:
             max_images=_int("LABELPROOF_MAX_IMAGES", 4),
             max_pdf_pages=_int("LABELPROOF_MAX_PDF_PAGES", 5),
             target_long_edge_px=_int("LABELPROOF_TARGET_LONG_EDGE_PX", 2576),
-            split_extraction=split,
             extraction_mode=os.environ.get("LABELPROOF_EXTRACTION_MODE", "single"),
             fast_extraction_model=os.environ.get(
                 "LABELPROOF_FAST_MODEL", "claude-haiku-4-5"
