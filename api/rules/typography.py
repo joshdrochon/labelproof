@@ -118,6 +118,29 @@ ASSERTED_SEVERITIES: Final[frozenset[str]] = frozenset(
 #: violation into a pass, which is why it is not a threshold.
 PROMINENCE_CONCERN_RATIO: Final[float] = 0.80
 
+#: Below THIS, the finding asserts non-compliance and changes the verdict. Between the
+#: two it is reported and decides nothing.
+#:
+#: Two bands, because `relative_size` is a MODEL'S ESTIMATE and not a measurement, and 23
+#: real labels made that impossible to ignore. The same photograph scored 0.5 on one run
+#: and 0.6 on the next; a compliant label moved 0.6 to 0.8. Across the set, warnings
+#: confirmed by eye as genuinely buried — one rotated ninety degrees in tiny type —
+#: landed in the same range as warnings that were perfectly legible and simply smaller
+#: than the brand name, which is true of every label ever printed.
+#:
+#: A single cut therefore cannot separate them, and moving it would be fitting a
+#: compliance verdict to noise. So the band where the estimate is unreliable now informs
+#: the agent without demoting the row, and only an unambiguous reading still asserts.
+#: 16.22's real rule is in millimetres, WARN-9 already concedes those cannot be measured
+#: from an unscaled photograph, and `warning_type_size_not_verified` has always been
+#: context for exactly that reason. This is the same admission applied to the same
+#: regulation.
+#:
+#: Neither band can turn a violation into a pass: below the floor the finding asserts as
+#: it always did, and above it the row keeps whatever verdict its WORDING and TYPOGRAPHY
+#: earned — caps, bold and text are bright lines and are untouched by this.
+PROMINENCE_ASSERTS_RATIO: Final[float] = 0.50
+
 
 # --------------------------------------------------------------------------------------
 # Assessment
@@ -232,6 +255,7 @@ def check_prominence(signals: WarningTypography) -> list[Finding]:
     if ratio > PROMINENCE_CONCERN_RATIO:
         return []
     percent = round((1.0 - ratio) * 100)
+    asserts = ratio <= PROMINENCE_ASSERTS_RATIO
     return [
         Finding(
             code="warning_less_prominent",
@@ -245,7 +269,7 @@ def check_prominence(signals: WarningTypography) -> list[Finding]:
                 f"surrounding text yourself."
             ),
             citation=canon.CITATIONS["warning_format"],
-            severity=SEVERITY_VIOLATION,
+            severity=SEVERITY_VIOLATION if asserts else SEVERITY_CONTEXT,
         )
     ]
 
