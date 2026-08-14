@@ -245,6 +245,71 @@ def _field_schema() -> dict[str, Any]:
     }
 
 
+#: The six elements that are not the government warning. Split out so they can be read
+#: CONCURRENTLY with the warning (LP-339): structured output carries a large fixed cost
+#: per call, and a single call producing ~700 output tokens measured ~7.3s against ~5.5s
+#: for two calls of ~400 and ~190 tokens running at the same time. Same pixels, same
+#: model, same fidelity — the saving is only that the two halves stop queueing behind
+#: each other.
+NON_WARNING_FIELDS: Final[tuple[FieldName, ...]] = tuple(
+    name for name in FieldName if name is not FieldName.GOVERNMENT_WARNING
+)
+
+
+def build_fields_schema() -> dict[str, Any]:
+    """Everything except the warning."""
+    return {
+        "type": "object",
+        "properties": {
+            "is_label": {"type": "boolean"},
+            "fields": {
+                "type": "object",
+                "properties": {name.value: _field_schema() for name in NON_WARNING_FIELDS},
+                "required": [name.value for name in NON_WARNING_FIELDS],
+                "additionalProperties": False,
+            },
+        },
+        "required": ["is_label", "fields"],
+        "additionalProperties": False,
+    }
+
+
+def build_warning_schema() -> dict[str, Any]:
+    """The warning statement and its typography, alone.
+
+    Kept whole rather than split further: the text and the type styling are read off the
+    same block of print, and a verdict assembled from two separate readings of it would
+    be two opinions about one paragraph.
+    """
+    return {
+        "type": "object",
+        "properties": {
+            "government_warning": _field_schema(),
+            "warning_text": _NULLABLE_STRING,
+            "warning_typography": {
+                "type": "object",
+                "properties": {
+                    "header_is_all_caps": _TRISTATE,
+                    "header_is_bold": _TRISTATE,
+                    "body_is_bold": _TRISTATE,
+                    "relative_size": _NULLABLE_NUMBER,
+                    "contrast_ok": _TRISTATE,
+                },
+                "required": [
+                    "header_is_all_caps",
+                    "header_is_bold",
+                    "body_is_bold",
+                    "relative_size",
+                    "contrast_ok",
+                ],
+                "additionalProperties": False,
+            },
+        },
+        "required": ["government_warning", "warning_text", "warning_typography"],
+        "additionalProperties": False,
+    }
+
+
 def build_extraction_schema() -> dict[str, Any]:
     """The JSON schema every extraction must satisfy.
 
@@ -289,6 +354,8 @@ def build_extraction_schema() -> dict[str, Any]:
 
 
 EXTRACTION_SCHEMA: Final[dict[str, Any]] = build_extraction_schema()
+FIELDS_SCHEMA: Final[dict[str, Any]] = build_fields_schema()
+WARNING_SCHEMA: Final[dict[str, Any]] = build_warning_schema()
 
 
 # --------------------------------------------------------------------------------------
@@ -580,8 +647,9 @@ class AnthropicVisionProvider:
     def _extract_image(
         self, image: ImageInput, commodity: Commodity, deadline: Deadline
     ) -> tuple[Extraction, ProviderUsage]:
+        run = self._split_call if self.config.split_extraction else self._one_call
         return call_with_retries(
-            lambda remaining: self._one_call(image, commodity, remaining),
+            lambda remaining: run(image, commodity, remaining),
             policy=self.policy,
             deadline=deadline,
             breaker=self.breaker,
@@ -589,6 +657,123 @@ class AnthropicVisionProvider:
             rand=self._rand,
             provider=self.name,
         )
+
+    def _call(
+        self,
+        image: ImageInput,
+        commodity: Commodity,
+        timeout_seconds: float,
+        schema: dict[str, Any],
+        half: str,
+    ) -> tuple[Any, ProviderUsage]:
+        """One request. Shared by both halves of a split so nothing can diverge between
+        them — residency, effort, timeout and retries are settings a compliance claim
+        rests on, and two code paths would eventually disagree about one of them.
+        """
+        if image.media_type not in SUPPORTED_MEDIA_TYPES:
+            raise ProviderError(
+                f"Images must be PNG, JPEG, WebP or GIF by the time they reach the "
+                f"label reading service; this one is {image.media_type}.",
+                retryable=False,
+            )
+
+        payload = base64.standard_b64encode(image.data).decode("ascii")
+        started = self._clock()
+        model = self.config.extraction_model
+
+        output_config: dict[str, Any] = {"format": {"type": "json_schema", "schema": schema}}
+        extra_body: dict[str, Any] = {}
+        if supports_inference_geo(model):
+            extra_body["inference_geo"] = self.config.inference_geo
+        extra: dict[str, Any] = {}
+        if supports_thinking_and_effort(model):
+            output_config["effort"] = self.config.effort
+            extra["thinking"] = {"type": "adaptive"}
+
+        try:
+            message = self._client.with_options(
+                timeout=timeout_seconds, max_retries=0
+            ).messages.create(
+                model=model,
+                max_tokens=MAX_TOKENS,
+                output_config=output_config,
+                **extra_body,
+                **extra,
+                system=SYSTEM_BLOCKS,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "image",
+                                "source": {
+                                    "type": "base64",
+                                    "media_type": image.media_type,
+                                    "data": payload,
+                                },
+                            },
+                            {"type": "text", "text": build_user_text(commodity, image.role)},
+                        ],
+                    }
+                ],
+            )
+        except Exception as exc:
+            raise _translate(exc) from exc
+
+        usage = _usage_from(message, model)
+        lp_logging.log(
+            "provider_call",
+            provider=self.name,
+            model=model,
+            image_index=image.index,
+            stage=half,
+            duration_ms=int((self._clock() - started) * 1000),
+            input_tokens=usage.input_tokens,
+            output_tokens=usage.output_tokens,
+            cache_read_tokens=usage.cache_read_tokens,
+            usd=estimated_usd(usage, model),
+        )
+        return message, usage
+
+    def _split_call(
+        self, image: ImageInput, commodity: Commodity, timeout_seconds: float
+    ) -> tuple[Extraction, ProviderUsage]:
+        """The same reading, as two concurrent calls (LP-339).
+
+        Structured output carries a large fixed cost per call that does not scale with
+        how much is asked for: measured on one label, ~700 output tokens took ~7.3s while
+        the same work as ~400 and ~190 tokens took ~5.5s when the two ran at once. The
+        halves are chosen so neither can answer for the other — the six ordinary elements
+        in one, the warning statement and its typography in the other, because those two
+        are read off the same block of print and a verdict assembled from two separate
+        readings of one paragraph would be two opinions rather than one reading.
+
+        Both halves must succeed. A partial merge would produce an Extraction missing a
+        field, and a missing field is reported as Missing — a finding against the label
+        manufactured by our own concurrency.
+        """
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            fields_future = pool.submit(
+                self._call, image, commodity, timeout_seconds, FIELDS_SCHEMA, "fields"
+            )
+            warning_future = pool.submit(
+                self._call, image, commodity, timeout_seconds, WARNING_SCHEMA, "warning"
+            )
+            fields_message, fields_usage = fields_future.result()
+            warning_message, warning_usage = warning_future.result()
+
+        payload = _payload_of(fields_message)
+        warning_payload = _payload_of(warning_message)
+        payload["fields"][FieldName.GOVERNMENT_WARNING.value] = warning_payload[
+            "government_warning"
+        ]
+        payload["warning_text"] = warning_payload["warning_text"]
+        payload["warning_typography"] = warning_payload["warning_typography"]
+
+        usage = ProviderUsage(model=self.config.extraction_model)
+        usage.merge(fields_usage)
+        usage.merge(warning_usage)
+        return parse_extraction(payload, image.index), usage
 
     def _one_call(
         self, image: ImageInput, commodity: Commodity, timeout_seconds: float
@@ -725,6 +910,35 @@ def _first_text(message: Any) -> str:
     raise ProviderError(
         "The label reading service returned no readable answer.", retryable=True
     )
+
+
+def _payload_of(message: Any) -> dict[str, Any]:
+    """The JSON body of one response, with the same refusals `_parse_message` enforces.
+
+    Split out so both halves of a split call are checked identically — a refusal or a
+    truncated answer on the warning half must fail the extraction exactly as it would
+    have when the two were one request.
+    """
+    stop_reason = getattr(message, "stop_reason", None)
+    if stop_reason == "refusal":
+        raise ProviderError(
+            "The label reading service declined to process this image. Nothing has "
+            "been checked — check this label by eye.",
+            retryable=False,
+        )
+    if stop_reason == "max_tokens":
+        raise ProviderError(
+            "The label reading service's answer was cut off before it finished.",
+            retryable=True,
+        )
+    try:
+        body: dict[str, Any] = json.loads(_first_text(message))
+    except json.JSONDecodeError as exc:
+        raise ProviderError(
+            "The label reading service returned an answer that could not be read.",
+            retryable=True,
+        ) from exc
+    return body
 
 
 def _parse_message(message: Any, image_index: int) -> Extraction:
