@@ -623,6 +623,14 @@ kbd {
   margin-top: 0.5rem;
 }
 
+/* The head start, said quietly. Full-size type per the floor rule; it is calmed with
+   colour and weight, never by shrinking it under someone who is over 50. */
+.reading-ahead {
+  margin-top: 0.5rem;
+  color: var(--ink-soft);
+  font-size: 1rem;
+}
+
 .dropzone__problem {
   margin-top: 0.75rem;
   border-left: 5px solid var(--serious);

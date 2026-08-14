@@ -466,6 +466,9 @@ lists one nothing emits.
 | `verify_complete` | INFO | A verification produced a recommendation. |
 | `adjudication` | INFO | Tier 3 saw at least one gray row. Carries how many were considered, how many were judged and how many changed, so the trigger rate is a number rather than an impression (LP-221). |
 | `verify_over_budget` | INFO | The request budget expired; partial result returned as Needs review. |
+| `prepare_complete` | INFO | A label was read ahead of its application, while the agent was still typing. No verdict was reached. |
+| `prepare_unavailable` | WARNING | The provider was down when a label was read ahead. Nothing is shown to the agent. |
+| `prepared_reading` | INFO | Whether a verification used a reading taken earlier, or declined it and read the label again. |
 | `reread` | INFO | One or more fields were read again from a crop of their own region (LP-325). Carries how many were eligible, how many were re-read and how many improved. |
 | `reread_failed` | WARNING | A re-read call failed. The first reading stands and the verification is unaffected — failing to improve is not failing to verify. |
 | `verify_pregated` | INFO | Images too poor to read; returned Unreadable with zero model calls. |

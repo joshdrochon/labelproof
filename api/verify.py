@@ -66,6 +66,7 @@ from api.pipeline import quality as quality_mod
 from api.provider.base import (
     ExtractionProvider,
     ExtractionRequest,
+    ExtractionResponse,
     ImageInput,
     ProviderError,
     ProviderUsage,
@@ -83,6 +84,20 @@ PREGATE_FALLBACK_REASON = "The images are too poor to read the label."
 
 
 # --- the shared pre-model path ----------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class AlreadyRead:
+    """A reading taken before this request, and what it cost when it was taken.
+
+    `extract_ms` is carried rather than recomputed because the whole point is that the
+    reading happened elsewhere. Reporting the elapsed time of THIS request as the extract
+    stage would show a six-second model call as two milliseconds of work, which is the
+    one thing a timing display must never do.
+    """
+
+    response: ExtractionResponse
+    extract_ms: int
 
 
 @dataclass(frozen=True)
@@ -520,6 +535,7 @@ def verify(
     adjudicator: adjudicate_mod.Adjudicator | None = None,
     config: Config | None = None,
     unseen: tuple[str, ...] = (),
+    already_read: AlreadyRead | None = None,
 ) -> VerificationResult:
     """Run one application through the pipeline.
 
@@ -532,17 +548,31 @@ def verify(
     were read. It is not cosmetic: while any image went unread, no field may be reported
     Missing, because "it is not on the label" is a claim about the whole label and part of
     it was never looked at. See `_demote_missing_when_unseen`.
+
+    `already_read` is a reading of these same images, taken earlier while the agent was
+    still filling the form (LP-346). Extraction takes only `commodity` from the
+    application, so it can run before the rest of it exists; supplying it here skips the
+    model call and nothing else. The route is responsible for proving the reading belongs
+    to THIS artwork before passing it — see `api/prepared.Prepared.matches`. Everything
+    downstream of this point runs identically either way, which is the property that makes
+    the optimisation safe to have.
     """
     request_id = f"req_{uuid.uuid4().hex[:16]}"
     timings = Timings()
     started = time.perf_counter()
 
     try:
-        extract_started = time.perf_counter()
-        response = provider.extract(
-            ExtractionRequest(commodity=application.commodity, images=images)
-        )
-        timings.extract = int((time.perf_counter() - extract_started) * 1000)
+        if already_read is not None:
+            response = already_read.response
+            # The time the READING cost, not the time this request waited. A result card
+            # that reported the wait would say the label was read in two milliseconds.
+            timings.extract = already_read.extract_ms
+        else:
+            extract_started = time.perf_counter()
+            response = provider.extract(
+                ExtractionRequest(commodity=application.commodity, images=images)
+            )
+            timings.extract = int((time.perf_counter() - extract_started) * 1000)
     except ProviderError as exc:
         raise exc
 

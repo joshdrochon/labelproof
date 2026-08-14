@@ -124,6 +124,22 @@ EVENTS: dict[str, tuple[int, str]] = {
         logging.INFO,
         "The request budget expired; partial result returned as Needs review.",
     ),
+    "prepare_complete": (
+        logging.INFO,
+        "A label was read ahead of its application, while the agent was still typing. "
+        "No verdict was reached and none can be until the comparison runs.",
+    ),
+    "prepare_unavailable": (
+        logging.WARNING,
+        "The provider was down when a label was read ahead. Nothing is shown to the "
+        "agent; submitting will try again and report properly if it is still down.",
+    ),
+    "prepared_reading": (
+        logging.INFO,
+        "Whether a verification used a reading taken earlier. 'declined' means the token "
+        "did not name a reading of THIS artwork under THIS commodity, so the label was "
+        "read again — the fail-safe direction, and worth being able to count.",
+    ),
     # provider
     "provider_call": (logging.INFO, "One model call, with its usage."),
     "provider_extract": (logging.INFO, "The whole extraction across every image."),
