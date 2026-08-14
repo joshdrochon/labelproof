@@ -96,9 +96,45 @@ class FakeClient:
         return self
 
 
+def project(payload: dict[str, Any], schema: dict[str, Any] | None) -> dict[str, Any]:
+    """The part of a whole-label payload that answers `schema`.
+
+    Every test here writes ONE combined payload and expects the adapter to parse it. The
+    adapter now has three modes and asks for three different shapes, so a fake that
+    replied with the whole thing regardless made every split-mode call fail on a key it
+    had not asked for. Projecting keeps each test in charge of its own content while
+    letting the double behave the way the API does — you get back what you asked for.
+    """
+    if schema is None:
+        return payload
+    props = schema.get("properties", {})
+    out: dict[str, Any] = {}
+    if "is_label" in props and "is_label" in payload:
+        out["is_label"] = payload["is_label"]
+    if "fields" in props:
+        wanted = props["fields"].get("properties", {})
+        out["fields"] = {k: v for k, v in payload.get("fields", {}).items() if k in wanted}
+    if "government_warning" in props:
+        out["government_warning"] = payload.get("fields", {}).get("government_warning")
+    for key in ("warning_text", "warning_typography"):
+        if key in props and key in payload:
+            out[key] = payload[key]
+    return out
+
+
 def responds_with(payload: dict[str, Any] | str, **message_kwargs: Any) -> Any:
-    text = payload if isinstance(payload, str) else json.dumps(payload)
-    return lambda _kwargs, _index: StubMessage(content=[StubBlock(text=text)], **message_kwargs)
+    if isinstance(payload, str):
+        return lambda _kwargs, _index: StubMessage(
+            content=[StubBlock(text=payload)], **message_kwargs
+        )
+
+    def respond(kwargs: dict[str, Any], _index: int) -> Any:
+        schema = (kwargs.get("output_config") or {}).get("format", {}).get("schema")
+        return StubMessage(
+            content=[StubBlock(text=json.dumps(project(payload, schema)))], **message_kwargs
+        )
+
+    return respond
 
 
 # --------------------------------------------------------------------------------------

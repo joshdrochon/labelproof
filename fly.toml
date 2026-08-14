@@ -296,10 +296,26 @@ kill_timeout = "15s"
 # memory decision with evidence behind it, unlike the CPU one it replaces. A 22-item batch
 # ran clean at this size; 300 has not been tried.
 #
-# To revisit properly: run the 20-sample p95 against both sizes and compare
-# `timings_ms.total - timings_ms.extract`. Record the numbers in CHANGES.md either way.
+# REVISITED, with the measurement this comment asked for. Five samples on each size,
+# against the deployed URL, comparing `timings_ms.total - timings_ms.extract`:
+#
+#     shared-cpu-2x    preprocess 801-868 ms   (median 809)
+#     performance-1x   preprocess 571-610 ms   (median 593)
+#
+# ~215 ms, and that is the whole of it: `extract` is identical on both because it is the
+# model rather than this machine, and `compare` is 1 ms either way. Anthropic's own
+# latency swings more between consecutive calls (4,846-5,988 ms) than the CPU tier moves
+# the total.
+#
+# GOING HIGHER BUYS NOTHING. On one dedicated core, preprocess already matches a 10-core
+# laptop - the work is decode, resize and re-encode, mostly single-threaded per image,
+# and images already run concurrently. `performance-16x` is ~$522/month for a workload
+# that is not waiting on parallelism.
+#
+# Chosen deliberately for a high-stakes review window rather than as a permanent shape.
+# Dropping back is one line here plus a deploy, and costs 215 ms.
 [[vm]]
-  size = "shared-cpu-2x"
+  size = "performance-1x"
   memory = "2gb"
 
 # --------------------------------------------------------------------------------------

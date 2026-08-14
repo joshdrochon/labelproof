@@ -934,9 +934,14 @@ def test_only_one_typography_combination_can_reach_match(
     # exhaustive check of those. What actually pins -1.0, 0.0 and 1000.0 is
     # `test_an_impossible_size_ratio_is_treated_as_a_reading_that_did_not_happen`. It
     # looks redundant beside this grid and is not.
+    # PROMINENCE_ASSERTS_RATIO, not PROMINENCE_CONCERN_RATIO. Between the two the ratio
+    # raises a note and decides nothing, because `relative_size` is a model's estimate
+    # that moved 0.5 to 0.6 on the same photograph between two runs — so the band where
+    # it is unreliable reports without demoting, and only an unambiguous reading blocks
+    # Match. The concern ratio still governs whether a finding appears at all.
     size_ok = (
         not typography.size_was_measured(signals)
-        or signals.relative_size > typography.PROMINENCE_CONCERN_RATIO  # type: ignore[operator]
+        or signals.relative_size > typography.PROMINENCE_ASSERTS_RATIO  # type: ignore[operator]
     )
     can_match = (
         signals.header_is_bold is True

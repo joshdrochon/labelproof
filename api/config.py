@@ -92,6 +92,15 @@ def _float(name: str, default: float) -> float:
         raise ConfigError(f"{name} must be a number, got {raw!r}") from exc
 
 
+#: How the extraction is divided across provider calls.
+#:
+#:   single  one call carrying every field. What everything before LP-339 measured.
+#:   split   two concurrent calls to the extraction model — the six ordinary elements,
+#:           and the warning with its typography.
+#:   hybrid  `split`, with the three fields in `HYBRID_FAST_FIELDS` moved to a faster
+#:           model. Fastest, and the only mode that lets a second model near the reading.
+EXTRACTION_MODES: Final[frozenset[str]] = frozenset({"single", "split", "hybrid"})
+
 @dataclass(frozen=True)
 class Config:
     # --- provider ---------------------------------------------------------------
@@ -146,6 +155,38 @@ class Config:
     #: else. The switch is here so the evidence can be gathered.
     reread_enabled: bool = False
 
+    #: How the extraction is divided across calls (LP-339, LP-341). Measured on the same
+    #: two-image payload, 20 runs each, locally:
+    #:
+    #:     single   p50 6,852   p95 7,321   one call, everything
+    #:     split    p50 5,182   p95 6,289   Sonnet twice, concurrent
+    #:     hybrid   p50 4,992   p95 5,601   Haiku on three fields, Sonnet on four
+    #:
+    #: Falling back is this one value. Measured again through the full pipeline, 12 runs,
+    #: `split` beat `hybrid` — p95 5,444 against 6,206 — because hybrid moves work ONTO
+    #: the critical path: split's slow half is the warning alone, hybrid's is the warning
+    #: plus four fields, so the fast model finishes early and waits. All three modes
+    #: produced identical verdicts.
+    #:
+    #: DEFAULT IS `single`, and not because it is better. Ten tests in `test_adapter.py`
+    #: encode "one call per image" in their control flow — a retry test counts attempts,
+    #: a token test sums usage across images — and under any split mode the second call
+    #: is a second HALF rather than a second image. Rewriting retry and cost-accounting
+    #: semantics to bank a second is how a guarantee gets weakened without anyone
+    #: noticing. The modes are built, measured and switchable; making one the default is
+    #: a morning's work, not a night's.
+    #: The deployed URL adds roughly 2.3s to any of them — local single-call measures
+    #: 7,321 against a recorded deployed 9,614 — so none of these meets the 5s gate in
+    #: production, and the numbers above are a comparison, not a claim about PERF-1.
+    extraction_mode: str = "single"
+
+    #: The model trusted with `HYBRID_FAST_FIELDS` in hybrid mode, and nothing else.
+    #: It is a separate setting from `extraction_model` because the partition is the
+    #: safety mechanism: this model was clean on those three fields across 23 real
+    #: labels and wrong on four others, including a producer name it misread and a
+    #: misspelling it silently corrected.
+    fast_extraction_model: str = "claude-haiku-4-5"
+
     #: The p95 the product is held to (PERF-1). Reported, never enforced as a timeout —
     #: enforcing it is what made every live request fail. `exceeds_latency_target` is how
     #: the gap becomes visible instead of silent.
@@ -188,6 +229,11 @@ class Config:
         derivable — and so a test that constructs a Config for some unrelated reason does
         not silently get a deadline of zero. Frozen dataclass, hence `object.__setattr__`.
         """
+        if self.extraction_mode not in EXTRACTION_MODES:
+            raise ConfigError(
+                f"LABELPROOF_EXTRACTION_MODE is {self.extraction_mode!r}. It must be one "
+                f"of {sorted(EXTRACTION_MODES)}."
+            )
         if self.provider_timeout_ms <= 0:
             object.__setattr__(
                 self, "provider_timeout_ms", default_provider_timeout_ms(self.extraction_model)
@@ -250,6 +296,10 @@ class Config:
             max_images=_int("LABELPROOF_MAX_IMAGES", 4),
             max_pdf_pages=_int("LABELPROOF_MAX_PDF_PAGES", 5),
             target_long_edge_px=_int("LABELPROOF_TARGET_LONG_EDGE_PX", 2576),
+            extraction_mode=os.environ.get("LABELPROOF_EXTRACTION_MODE", "single"),
+            fast_extraction_model=os.environ.get(
+                "LABELPROOF_FAST_MODEL", "claude-haiku-4-5"
+            ),
             retention_hours=_int("LABELPROOF_RETENTION_HOURS", 24),
             rate_limit_per_minute=_int("LABELPROOF_RATE_LIMIT_PER_MINUTE", 30),
             batch_workers=_int("LABELPROOF_BATCH_WORKERS", 6),

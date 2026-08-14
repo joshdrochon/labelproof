@@ -1354,13 +1354,24 @@ def evaluate(
     # 3. Prominence. WARN-5 puts these in front of a human rather than returning the
     #    application: "smaller than the rest of the label" is a judgement about a
     #    photograph, and the regulation's own line is in millimetres we cannot measure.
-    if look.prominence_concerns:
-        prominence = next(
-            f for f in findings if f.code in look.prominence_concerns
-        )
+    # Only a prominence finding that ASSERTS may demote. This used to fire on the mere
+    # PRESENCE of a prominence code, which quietly outranked its own severity — so when
+    # `check_prominence` gained a band that reports without accusing, the band changed
+    # nothing and every label carrying the note was still returned Unreadable.
+    #
+    # The severity is the claim. A note that says "this may be small, look at it" is not
+    # the same statement as "this is too small", and only the second is grounds to stop
+    # the row.
+    asserted_prominence = [
+        f
+        for f in findings
+        if f.code in look.prominence_concerns
+        and f.severity in typography.ASSERTED_SEVERITIES
+    ]
+    if asserted_prominence:
         return WarningResult(
             verdict=Verdict.UNREADABLE,
-            rationale=prominence.message,
+            rationale=asserted_prominence[0].message,
             diff=diff,
             findings=findings,
             comparison=comparison,
