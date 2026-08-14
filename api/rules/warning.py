@@ -1273,11 +1273,24 @@ def evaluate(
     carried = list(extra_findings)
 
     if not legible:
+        # TWO SENTENCES, because there are two situations and one of them was being
+        # described by the other. When the extractor marks the warning illegible it may
+        # still return a transcription — small or awkwardly set text often reads, just
+        # not dependably. The row then printed "could not be read on this image" directly
+        # above a complete, word-perfect statement, and an agent reading that cannot
+        # trust either half of the screen. Saying a reading exists and is not dependable
+        # is the honest version, and it is also the version that tells them what to do
+        # with the text they can see.
+        transcribed = bool(found_text and found_text.strip())
         return WarningResult(
             verdict=Verdict.UNREADABLE,
             rationale=(
-                "The warning statement could not be read on this image. It has not been "
-                "checked — request a clearer image."
+                "A reading came back, but not clearly enough to rely on — so the wording "
+                "below is shown for your eyes rather than checked against the statute. "
+                "Compare it yourself, or request a clearer image."
+                if transcribed
+                else "The warning statement could not be read on this image. It has not "
+                "been checked — request a clearer image."
             ),
             findings=honesty + carried,
         )
