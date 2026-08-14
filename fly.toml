@@ -56,6 +56,19 @@ kill_timeout = "15s"
   LABELPROOF_STORAGE_DIR = "/data"
   LABELPROOF_LOG_LEVEL = "INFO"
 
+  # HERE, not on the deploy command. This was set with `fly deploy --env` and the very
+  # next deploy - from CI, with no such flag - reset the machine environment and put
+  # production silently back on one call per image. The measured two seconds vanished and
+  # nothing failed, which is the whole hazard: a latency win that lives in a shell
+  # invocation is a win until the next person deploys.
+  #
+  # `split` reads the six ordinary elements and the government warning as two concurrent
+  # calls. Measured on the deployed URL: ~7.4s single against ~5.7s split, identical
+  # verdicts. The code default stays `single` because ten adapter tests count calls per
+  # image and encode that assumption in their control flow; this line is what production
+  # actually runs, and that difference is deliberate rather than accidental.
+  LABELPROOF_EXTRACTION_MODE = "split"
+
   # Set explicitly, not left to the default. Sample mode replays built-in fixtures and
   # cannot read an uploaded photo; a production instance in that state serves
   # demonstrations that look exactly like findings. Pinning it to "0" here means it
