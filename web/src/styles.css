@@ -1517,13 +1517,23 @@ kbd {
   font-size: 1rem;
 }
 
+/* `display: inline-flex` on a summary REMOVES the disclosure triangle in every engine,
+   so this rendered as a bare heading with nothing under it and nothing saying it opens.
+   `list-item` keeps the marker; the marker is then restyled rather than replaced. */
 .checklist__shortcuts summary {
   cursor: pointer;
-  display: inline-flex;
-  align-items: center;
+  display: list-item;
+  list-style-position: inside;
+  padding: 0.5rem 0;
   min-height: 2.75rem;
   font-weight: 600;
   color: var(--navy);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.checklist__shortcuts summary::marker {
+  color: var(--ink-soft);
 }
 
 .checklist__shortcuts p {

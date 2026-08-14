@@ -156,13 +156,41 @@ def contains_after_normalization(haystack: str, needle: str) -> bool:
     string is not the same claim as a brand name — see `compare_brand_name`, which does
     not use it.
     """
-    hay = normalize(haystack).split()
-    need = normalize(needle).split()
+    hay = _bare_tokens(haystack)
+    need = _bare_tokens(needle)
     if not need or len(need) > len(hay):
         return False
     return any(
         hay[start : start + len(need)] == need for start in range(len(hay) - len(need) + 1)
     )
+
+
+#: Punctuation that attaches to a word and is not part of it. Kept deliberately short:
+#: an apostrophe is never stripped (STONE'S THROW is one token and the apostrophe is the
+#: whole point of TC-02), and neither is a hyphen.
+_EDGE_PUNCTUATION = ',.;:!?()[]"“”'
+
+
+def _bare_tokens(text: str) -> list[str]:
+    """Normalized tokens with edge punctuation removed.
+
+    A label prints `TIDEWAY DISTILLING, PORTLAND, ME.` and an application stores the
+    producer name and the address in separate columns. Matching the name alone failed,
+    because the label's token is `distilling,` and the application's is `distilling` —
+    so a compliant label came back Mismatch over a comma the printer put between two
+    fields the applicant filed apart.
+
+    This is the same defect as the Courtyard one, mirrored. That was a comma the
+    application's JOINED form inserted and the label did not print; this is a comma the
+    label prints and the application's individual parts do not. Both were found on real
+    artwork, both after the surrounding-text allowance was believed finished, and both
+    because a fixture happened to carry punctuation that made the code look right.
+    """
+    return [
+        stripped
+        for token in normalize(text).split()
+        if (stripped := token.strip(_EDGE_PUNCTUATION))
+    ]
 
 
 def surrounding_words(
