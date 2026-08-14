@@ -31,7 +31,7 @@ import base64
 import json
 import random
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Final
 
@@ -255,17 +255,43 @@ NON_WARNING_FIELDS: Final[tuple[FieldName, ...]] = tuple(
     name for name in FieldName if name is not FieldName.GOVERNMENT_WARNING
 )
 
+#: The only fields a faster model is trusted with in `hybrid` mode (LP-341).
+#:
+#: This list is the safety mechanism, not a performance tuning knob. Across 23 real
+#: labels the fast model was clean on these three and wrong on every other field it was
+#: given: it dropped an ABV entirely, read `SUMMER WINERY` as `SUMMER WINE`, silently
+#: corrected the misspelling `CELLEIRED` to `CELLERED`, and twice returned the statute's
+#: own wording where the label printed something broken — which is a false pass on the
+#: one field with a zero-false-pass requirement.
+#:
+#: The failure is silent. It arrives as a confident, well-formed answer that happens to
+#: be what we were about to compare against, so nothing downstream can catch it. That is
+#: why the partition is a hard list rather than a confidence threshold.
+#:
+#: Adding a field here needs evidence about THAT field, not about the model.
+HYBRID_FAST_FIELDS: Final[tuple[FieldName, ...]] = (
+    FieldName.BRAND_NAME,
+    FieldName.CLASS_TYPE,
+    FieldName.NET_CONTENTS,
+)
 
-def build_fields_schema() -> dict[str, Any]:
-    """Everything except the warning."""
+#: Everything the careful model keeps in `hybrid` mode: the four remaining ordinary
+#: fields plus the warning, which is never delegated.
+HYBRID_CAREFUL_FIELDS: Final[tuple[FieldName, ...]] = tuple(
+    name for name in NON_WARNING_FIELDS if name not in HYBRID_FAST_FIELDS
+)
+
+
+def build_fields_schema(names: Sequence[FieldName] = NON_WARNING_FIELDS) -> dict[str, Any]:
+    """A schema over some subset of the non-warning fields."""
     return {
         "type": "object",
         "properties": {
             "is_label": {"type": "boolean"},
             "fields": {
                 "type": "object",
-                "properties": {name.value: _field_schema() for name in NON_WARNING_FIELDS},
-                "required": [name.value for name in NON_WARNING_FIELDS],
+                "properties": {name.value: _field_schema() for name in names},
+                "required": [name.value for name in names],
                 "additionalProperties": False,
             },
         },
@@ -274,18 +300,33 @@ def build_fields_schema() -> dict[str, Any]:
     }
 
 
-def build_warning_schema() -> dict[str, Any]:
-    """The warning statement and its typography, alone.
+def build_warning_schema(also: Sequence[FieldName] = ()) -> dict[str, Any]:
+    """The warning statement and its typography, plus any ordinary fields kept with it.
+
+    `also` is how `hybrid` mode keeps the four fields a faster model got wrong on the
+    careful model, in the same call as the warning — one request rather than three.
 
     Kept whole rather than split further: the text and the type styling are read off the
     same block of print, and a verdict assembled from two separate readings of it would
     be two opinions about one paragraph.
     """
+    properties: dict[str, Any] = {
+        "government_warning": _field_schema(),
+        "warning_text": _NULLABLE_STRING,
+    }
+    required = ["government_warning", "warning_text", "warning_typography"]
+    if also:
+        properties["fields"] = {
+            "type": "object",
+            "properties": {name.value: _field_schema() for name in also},
+            "required": [name.value for name in also],
+            "additionalProperties": False,
+        }
+        required.append("fields")
     return {
         "type": "object",
         "properties": {
-            "government_warning": _field_schema(),
-            "warning_text": _NULLABLE_STRING,
+            **properties,
             "warning_typography": {
                 "type": "object",
                 "properties": {
@@ -305,7 +346,7 @@ def build_warning_schema() -> dict[str, Any]:
                 "additionalProperties": False,
             },
         },
-        "required": ["government_warning", "warning_text", "warning_typography"],
+        "required": required,
         "additionalProperties": False,
     }
 
@@ -356,6 +397,8 @@ def build_extraction_schema() -> dict[str, Any]:
 EXTRACTION_SCHEMA: Final[dict[str, Any]] = build_extraction_schema()
 FIELDS_SCHEMA: Final[dict[str, Any]] = build_fields_schema()
 WARNING_SCHEMA: Final[dict[str, Any]] = build_warning_schema()
+FAST_FIELDS_SCHEMA: Final[dict[str, Any]] = build_fields_schema(HYBRID_FAST_FIELDS)
+CAREFUL_SCHEMA: Final[dict[str, Any]] = build_warning_schema(HYBRID_CAREFUL_FIELDS)
 
 
 # --------------------------------------------------------------------------------------
@@ -647,7 +690,11 @@ class AnthropicVisionProvider:
     def _extract_image(
         self, image: ImageInput, commodity: Commodity, deadline: Deadline
     ) -> tuple[Extraction, ProviderUsage]:
-        run = self._split_call if self.config.split_extraction else self._one_call
+        run = {
+            "single": self._one_call,
+            "split": self._split_call,
+            "hybrid": self._hybrid_call,
+        }[self.config.extraction_mode]
         return call_with_retries(
             lambda remaining: run(image, commodity, remaining),
             policy=self.policy,
@@ -665,6 +712,7 @@ class AnthropicVisionProvider:
         timeout_seconds: float,
         schema: dict[str, Any],
         half: str,
+        model_override: str | None = None,
     ) -> tuple[Any, ProviderUsage]:
         """One request. Shared by both halves of a split so nothing can diverge between
         them — residency, effort, timeout and retries are settings a compliance claim
@@ -679,7 +727,7 @@ class AnthropicVisionProvider:
 
         payload = base64.standard_b64encode(image.data).decode("ascii")
         started = self._clock()
-        model = self.config.extraction_model
+        model = model_override or self.config.extraction_model
 
         output_config: dict[str, Any] = {"format": {"type": "json_schema", "schema": schema}}
         extra_body: dict[str, Any] = {}
@@ -734,6 +782,49 @@ class AnthropicVisionProvider:
             usd=estimated_usd(usage, model),
         )
         return message, usage
+
+    def _hybrid_call(
+        self, image: ImageInput, commodity: Commodity, timeout_seconds: float
+    ) -> tuple[Extraction, ProviderUsage]:
+        """`_split_call`, with `HYBRID_FAST_FIELDS` moved to a faster model (LP-341).
+
+        The two halves are chosen by EVIDENCE ABOUT EACH FIELD, not by how expensive the
+        field looks — see `HYBRID_FAST_FIELDS`. The warning never moves.
+
+        Both halves must succeed, for the same reason as `_split_call`: a partial merge
+        leaves a field absent, and an absent field is reported Missing, which would be a
+        finding against the label manufactured by our own concurrency.
+        """
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            fast_future = pool.submit(
+                self._call,
+                image,
+                commodity,
+                timeout_seconds,
+                FAST_FIELDS_SCHEMA,
+                "fast",
+                self.config.fast_extraction_model,
+            )
+            careful_future = pool.submit(
+                self._call, image, commodity, timeout_seconds, CAREFUL_SCHEMA, "careful"
+            )
+            fast_message, fast_usage = fast_future.result()
+            careful_message, careful_usage = careful_future.result()
+
+        payload = _payload_of(fast_message)
+        careful = _payload_of(careful_message)
+        payload["fields"].update(careful["fields"])
+        payload["fields"][FieldName.GOVERNMENT_WARNING.value] = careful["government_warning"]
+        payload["warning_text"] = careful["warning_text"]
+        payload["warning_typography"] = careful["warning_typography"]
+
+        # Priced against the careful model. The fast half's tokens are counted, but a
+        # cost line that averaged two price tiers into one number would be a number
+        # nobody could check against a bill.
+        usage = ProviderUsage(model=self.config.extraction_model)
+        usage.merge(fast_usage)
+        usage.merge(careful_usage)
+        return parse_extraction(payload, image.index), usage
 
     def _split_call(
         self, image: ImageInput, commodity: Commodity, timeout_seconds: float

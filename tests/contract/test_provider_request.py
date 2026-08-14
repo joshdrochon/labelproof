@@ -50,6 +50,13 @@ class _Messages:
 
     def create(self, **kwargs: Any) -> Any:
         self._recorder.kwargs = kwargs
+        # ANSWER THE SCHEMA YOU WERE ASKED FOR, which is what the real API does. A stub
+        # that returns one fixed shape regardless made every split-mode call fail to
+        # parse — and it failed in the tests rather than in production only because the
+        # tests are the only place a canned response exists.
+        schema = (kwargs.get("output_config") or {}).get("format", {}).get("schema")
+        if schema is not None:
+            return _Response(_payload_for(schema))
         return self._response
 
 
@@ -93,6 +100,46 @@ class _Response:
         self.stop_reason = "end_turn"
 
 
+def _payload_for(schema: dict[str, Any]) -> dict[str, Any]:
+    """A response satisfying whichever half of the extraction this schema asks for.
+
+    The adapter has three modes and they request three different shapes. Building the
+    answer from the schema keeps this double honest for all of them without the test
+    having to know which mode is under test.
+    """
+    props = schema.get("properties", {})
+    payload: dict[str, Any] = {}
+    if "is_label" in props:
+        payload["is_label"] = True
+    if "fields" in props:
+        payload["fields"] = {
+            name: _field_value() for name in props["fields"].get("properties", {})
+        }
+    if "government_warning" in props:
+        payload["government_warning"] = _field_value()
+    if "warning_text" in props:
+        payload["warning_text"] = "GOVERNMENT WARNING: ..."
+    if "warning_typography" in props:
+        payload["warning_typography"] = {
+            "header_is_all_caps": True,
+            "header_is_bold": True,
+            "body_is_bold": False,
+            "relative_size": 1.0,
+            "contrast_ok": True,
+        }
+    return payload
+
+
+def _field_value() -> dict[str, Any]:
+    return {
+        "value": "OLD TOM DISTILLERY",
+        "on_this_image": True,
+        "legible": True,
+        "confidence": 0.9,
+        "bbox": "0.1,0.2,0.9,0.3",
+    }
+
+
 def _valid_payload() -> dict[str, Any]:
     """A response that satisfies `EXTRACTION_SCHEMA`, so parsing does not mask the test."""
     from api.models import FieldName
@@ -124,8 +171,16 @@ def _valid_payload() -> dict[str, Any]:
 def captured() -> _RecordedCall:
     """Run one real extraction against the recording client and return what it sent."""
     client = _RecordingClient(_Response(_valid_payload()))
+    # `single`, explicitly. These tests measure the COMBINED schema against the two API
+    # ceilings, and in any split mode the last recorded call is a half — which carries
+    # no `fields` block and would make the ceiling assertions pass by being small.
     provider = adapter.AnthropicVisionProvider(
-        Config(anthropic_api_key="", extraction_model="claude-opus-5", effort="low"),
+        Config(
+            anthropic_api_key="",
+            extraction_model="claude-opus-5",
+            effort="low",
+            extraction_mode="single",
+        ),
         client=client,
     )
     provider.extract(
@@ -231,13 +286,27 @@ def test_the_schema_that_is_sent_is_the_schema_that_is_tested(
 ) -> None:
     """Closes the gap between the constant and the wire.
 
-    `tests/regression/test_extraction_schema_overflow.py` checks `EXTRACTION_SCHEMA`
-    against the ceilings. That is only worth anything if the request actually carries
-    it — a second, hand-built schema in `_one_call` would sail past every one of those
-    checks.
+    `tests/regression/test_extraction_schema_overflow.py` checks the compiled schemas
+    against the ceilings. That is only worth anything if the request actually carries one
+    of them — a second, hand-built schema inside the adapter would sail past every one of
+    those checks.
+
+    `is`, not `==`, and against the SET rather than one constant: there are three
+    extraction modes now and they send three different shapes. Identity is what proves
+    the outgoing object was the one measured, rather than an equal-looking copy built
+    somewhere the ceiling tests never see.
     """
-    assert (
-        captured.kwargs["output_config"]["format"]["schema"] is adapter.EXTRACTION_SCHEMA
+    sent = captured.kwargs["output_config"]["format"]["schema"]
+    compiled = (
+        adapter.EXTRACTION_SCHEMA,
+        adapter.FIELDS_SCHEMA,
+        adapter.WARNING_SCHEMA,
+        adapter.FAST_FIELDS_SCHEMA,
+        adapter.CAREFUL_SCHEMA,
+    )
+    assert any(sent is one for one in compiled), (
+        "the request carried a schema that is not one of the compiled constants, so "
+        "nothing has checked it against the union-count or grammar-size ceilings"
     )
 
 
@@ -539,11 +608,19 @@ def test_every_valid_effort_level_builds_a_request() -> None:
         assert client.recorder.kwargs["output_config"]["effort"] == effort
 
 
-def test_one_request_is_built_per_image() -> None:
-    """LP-280: images go concurrently, one call each, so wall clock is max() not sum().
+@pytest.mark.parametrize(
+    ("mode", "calls_per_image"),
+    [("single", 1), ("split", 2), ("hybrid", 2)],
+)
+def test_one_request_is_built_per_image(mode: str, calls_per_image: int) -> None:
+    """LP-280: images go concurrently, so wall clock is max() not sum().
 
     Batching several images into one message would change the token profile and the
     failure mode — one bad image would take the whole label with it.
+
+    The count per image is now the mode's business: `split` and `hybrid` each send two
+    concurrent halves. What must hold in every mode is that the count scales with the
+    number of IMAGES and nothing batches them together.
     """
     calls: list[dict[str, Any]] = []
 
@@ -555,13 +632,18 @@ def test_one_request_is_built_per_image() -> None:
             class _M:
                 def create(self, **kwargs: Any) -> Any:
                     calls.append(kwargs)
+                    schema = (kwargs.get("output_config") or {}).get("format", {}).get(
+                        "schema"
+                    )
+                    if schema is not None:
+                        return _Response(_payload_for(schema))
                     return outer._response
 
             return _M()
 
     client = _Counting(_Response(_valid_payload()))
     provider = adapter.AnthropicVisionProvider(
-        Config(anthropic_api_key=""), client=client
+        Config(anthropic_api_key="", extraction_mode=mode), client=client
     )
     provider.extract(
         ExtractionRequest(
@@ -572,7 +654,7 @@ def test_one_request_is_built_per_image() -> None:
             ],
         )
     )
-    assert len(calls) == 2
+    assert len(calls) == 2 * calls_per_image
     for kwargs in calls:
         images = [b for b in kwargs["messages"][0]["content"] if b["type"] == "image"]
         assert len(images) == 1
