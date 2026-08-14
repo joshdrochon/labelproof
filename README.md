@@ -303,6 +303,15 @@ here.
   verdict with no instructions. That needs three people and cannot be simulated. The
   protocol is written and fixed in advance — [`docs/hallway-protocol.md`](docs/hallway-protocol.md)
   — so the success criteria cannot be adjusted to whatever happens on the day.
+- **The second-look re-reader is built and switched off.** `api/reread.py` re-reads a
+  low-confidence field from a crop of its own region, so text that was a few dozen pixels
+  inside a downscaled frame becomes the whole image. It is bounded, it can only replace a
+  reading with a strictly better one, and it has 20 tests. `reread_enabled` defaults to
+  **False** for the same reason Tier 3 runs with no adjudicator: there is no measurement
+  showing it helps. Tier A fixtures render cleanly and read at high confidence, so the
+  trigger never fires and the eval cannot score it; Tier B is three bottles. Turning it on
+  without that evidence would be trusting a second reading nobody scored, which is the
+  move this product argues against everywhere else.
 - **Geometric correction does not run on a real verification.** `api/pipeline/preprocess.py`
   and `api/pipeline/deskew.py` — deskew, perspective correction, contrast lifting — have
   **no caller in the request path**. What does run is ingest (magic-byte sniffing, EXIF and
@@ -454,6 +463,8 @@ lists one nothing emits.
 | `verify_complete` | INFO | A verification produced a recommendation. |
 | `adjudication` | INFO | Tier 3 saw at least one gray row. Carries how many were considered, how many were judged and how many changed, so the trigger rate is a number rather than an impression (LP-221). |
 | `verify_over_budget` | INFO | The request budget expired; partial result returned as Needs review. |
+| `reread` | INFO | One or more fields were read again from a crop of their own region (LP-325). Carries how many were eligible, how many were re-read and how many improved. |
+| `reread_failed` | WARNING | A re-read call failed. The first reading stands and the verification is unaffected — failing to improve is not failing to verify. |
 | `verify_pregated` | INFO | Images too poor to read; returned Unreadable with zero model calls. |
 
 <!-- LOG-EVENTS:END -->

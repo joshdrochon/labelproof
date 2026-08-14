@@ -106,6 +106,16 @@ EVENTS: dict[str, tuple[int, str]] = {
         "were judged and how many changed, so the trigger rate is a number rather than "
         "an impression (LP-221).",
     ),
+    "reread": (
+        logging.INFO,
+        "One or more fields were read again from a crop of their own region (LP-325). "
+        "Carries how many were eligible, how many were re-read and how many improved.",
+    ),
+    "reread_failed": (
+        logging.WARNING,
+        "A re-read call failed. The first reading stands and the verification is "
+        "unaffected — failing to improve is not failing to verify.",
+    ),
     "verify_pregated": (
         logging.INFO,
         "Images too poor to read; returned Unreadable with zero model calls.",

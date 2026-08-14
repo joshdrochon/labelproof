@@ -37,10 +37,11 @@ from __future__ import annotations
 import time
 import uuid
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from api import canon, timing
 from api import logging as applog
+from api import reread as reread_mod
 from api.config import Config
 from api.models import (
     Aggregate,
@@ -67,6 +68,7 @@ from api.provider.base import (
     ExtractionRequest,
     ImageInput,
     ProviderError,
+    ProviderUsage,
 )
 from api.rules import adjudicate as adjudicate_mod
 from api.rules import aggregate as agg
@@ -543,6 +545,47 @@ def verify(
         timings.extract = int((time.perf_counter() - extract_started) * 1000)
     except ProviderError as exc:
         raise exc
+
+    # LP-325. A second look at the fields that were read badly, from a crop of the region
+    # they were found in — before the merge, so the comparison runs once on the best
+    # reading available rather than being redone against a patched result.
+    #
+    # It sits HERE, not after compare, for the same reason the pre-gate sits before
+    # extraction: the cheapest place to fix a reading is before anything has reasoned
+    # about it. And it can only improve a row — see `api/reread.py` for every path that
+    # discards a second reading rather than trusting it.
+    settings_for_reread = config or Config()
+    if settings_for_reread.reread_enabled:
+        spent = int((time.perf_counter() - started) * 1000)
+        second = reread_mod.reread(
+            response.extractions,
+            images,
+            provider,
+            commodity=application.commodity,
+            budget=reread_mod.Budget(
+                remaining_ms=max(0, settings_for_reread.request_budget_ms - spent)
+            ),
+        )
+        if second.considered:
+            applog.log(
+                "reread",
+                considered=second.considered,
+                judged=second.reread,
+                changed=second.improved,
+                status=second.skipped_reason or "ran",
+                duration_ms=second.elapsed_ms,
+            )
+        response = replace(
+            response,
+            extractions=second.extractions,
+            usage=ProviderUsage(
+                input_tokens=response.usage.input_tokens + second.usage.input_tokens,
+                output_tokens=response.usage.output_tokens + second.usage.output_tokens,
+                cache_read_tokens=response.usage.cache_read_tokens,
+                cache_creation_tokens=response.usage.cache_creation_tokens,
+                model=response.usage.model,
+            ),
+        )
 
     # TC-15 — nobody uploaded a label.
     if response.extractions and not any(e.is_label for e in response.extractions):

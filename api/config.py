@@ -132,6 +132,20 @@ class Config:
     #: room for several judgements and a pathological one cannot run away.
     max_usd_per_verification: float = 0.05
 
+    #: Re-read low-confidence fields from a crop of their own region (LP-325).
+    #:
+    #: OFF BY DEFAULT, and the reason is the same one that keeps Tier 3 switched off:
+    #: it is built, bounded and tested, and there is no measurement showing it helps.
+    #: Tier A fixtures are rendered cleanly and read at high confidence, so the trigger
+    #: never fires there and the eval cannot score it. Tier B could, on three real
+    #: bottles — too small a sample to turn on a behaviour that changes what the
+    #: extractor returns for every label.
+    #:
+    #: Turning it on without that evidence would be trusting a second reading nobody
+    #: has scored, which is exactly the move this product argues against everywhere
+    #: else. The switch is here so the evidence can be gathered.
+    reread_enabled: bool = False
+
     #: The p95 the product is held to (PERF-1). Reported, never enforced as a timeout —
     #: enforcing it is what made every live request fail. `exceeds_latency_target` is how
     #: the gap becomes visible instead of silent.
