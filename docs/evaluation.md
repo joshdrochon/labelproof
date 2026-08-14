@@ -80,7 +80,7 @@ spinner. `api/errors.py` is the taxonomy; `next_step` drives what the UI offers.
 | [`PRD.md`](../PRD.md) | Requirements, 114 of them, cited by ID throughout the code |
 | [`TICKETS.md`](../TICKETS.md) | 332 tickets; a checkbox is derived from a `Closes:` trailer, never hand-set |
 | [`CHANGES.md`](../CHANGES.md) | Run, test, deploy, roll back |
-| [`prd-audit.md`](prd-audit.md) | Both PRD checklists, line by line — MVP 14/15, Final 6/11 |
+| [`prd-audit.md`](prd-audit.md) | Both PRD checklists, line by line — MVP 14/15, Final 7/11 |
 
 ---
 
@@ -107,11 +107,11 @@ for it:
   the merge and therefore the deploy ([`ci-gate-drill.txt`](ci-gate-drill.txt)), and a
   forced bad deploy was caught by smoke and rolled back to the previous image by digest in
   about 90 seconds ([`rollback-drill.txt`](rollback-drill.txt)).
-- **No human has used this.** Keyboard navigation, the accessibility tree, error paths
-  and two browsers are now driven by `web/e2e/` — 75 checks, three engines. What no
-  machine covered: **three cold users** (descoped, none available), **a screen reader**
-  actually speaking, **Safari**, and a fresh-eyes walkthrough. The markup was written for
-  all of it; written-for is not tested-for.
+- **The 73-year-old test has not been run.** UX-1 asks for three cold users reaching a
+  verdict with no instructions. None were available, so it is descoped rather than
+  deferred — and the consequence is that PERF-3 above is unmeasured. Keyboard navigation,
+  the accessibility tree, error paths and two browser engines are driven by `web/e2e/`,
+  75 checks.
 - **The destroy-and-redeploy drill has not been run.** The forced-rollback drill has —
   see above. Destroying the app and rebuilding it from the repository alone is still
   the one that proves the configuration is complete rather than merely accepted.

@@ -11,7 +11,7 @@ tracker if one is used.
 | **MVP** | Day 2 EOD — §M tickets |
 | **Final** | Day 7 noon — §F tickets |
 | **Ticket prefix** | `LP-001` … `LP-338` |
-| **State** | **332 of 336 closed.** Derived from `Closes:` trailers by `scripts/sync_board.py` and a post-commit hook — never hand-edited. A close with no commit behind it is a false close. |
+| **State** | **333 of 336 closed.** Derived from `Closes:` trailers by `scripts/sync_board.py` and a post-commit hook — never hand-edited. A close with no commit behind it is a false close. |
 | **What remains** | Audited in [`docs/prd-audit.md`](docs/prd-audit.md). The open items are, in order of count: human testing that needs people, two deploy drills, and measurements that need scale. |
 
 **Scope law (locked):** *"A working core application with clean code is preferred over
@@ -393,7 +393,7 @@ in LP-237, with fixtures across LP-068, 163, 195–198, 216, 226–229.
 
 - [x] **LP-263** Automated a11y audit (axe) on both modes; criticals fixed (UX-4)
 - [x] **LP-264** Keyboard-only full walkthrough (UX-4) — driven in `web/e2e/a11y.spec.ts` across Chromium, Firefox and a tablet viewport: tab order, visible focus ring, no trap, tab bar operable by key
-- [ ] **LP-265** Accessibility tree asserted (UX-4): every control has a name, landmarks present, heading order unbroken, `aria-describedby` resolves to a real node, focus lands on the first bad field. Driven in `web/e2e/a11y.spec.ts` across three engines
+- [x] **LP-265** Accessibility tree asserted (UX-4): every control has a name, landmarks present, heading order unbroken, `aria-describedby` resolves to a real node, focus lands on the first bad field. Driven in `web/e2e/a11y.spec.ts` across three engines
 - [x] **LP-333** Enforce both UX-3 floors: type gate claimed 16px but permitted 15px, and nothing checked the 44px target rule at all (UX-3)
 - [x] **LP-266** Contrast verification, all states incl. verdict chips (UX-3)
 - [x] **LP-267** Focus order + visible-focus audit (UX-4)
