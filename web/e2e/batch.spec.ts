@@ -14,16 +14,26 @@
  * `LABELPROOF_BATCH_WORKERS=1` is not decoration. Six fixture items across six threads
  * can finish inside a single 1.5s poll, and then "results appear while the job runs" —
  * the property BATCH-5 exists for — has no window in which to be observed. One worker
- * makes the run sequential and the streaming visible. A `beforeAll` check refuses to run
- * without it rather than letting the assertion quietly become a coin flip.
+ * makes the run sequential and the streaming visible.
+ *
+ * It is NOT enforced here, because the server does not report its worker count and this
+ * suite does not get to read the environment the server was started with. What it does
+ * instead is name the variable in the failure message of the one assertion that depends
+ * on it, so a run without it fails pointing at the cause rather than at the feature.
  *
  * ## What this must never run against
  *
  * **`dev/mockApi.ts`.** It does not implement `/batch` at all, and its `/verify` hands
  * back one canned verdict after a hardcoded 2.2s sleep. This project has already spent
  * hours testing that stand-in and reading the results as facts about the product. The
- * guard below refuses to start unless `/health` answers as the real API in fixture mode,
+ * guard below refuses to start unless `/ready` answers as the real API in fixture mode,
  * so the failure is one loud sentence instead of a suite that passes against nothing.
+ *
+ * `/ready`, not `/health`. `/health` is deliberately dependency-free — it touches no
+ * config and answers `{"status":"ok"}` and nothing else, which is what makes it usable as
+ * a restart signal (`api/routes/health.py`). Asking it whether the provider is a fixture
+ * is asking the one endpoint built not to know. `/ready` is the one that reports
+ * `simulated`.
  *
  * **The deployment.** `fly.toml` pins `LABELPROOF_FAKE_PROVIDER=0`, so pointing this at
  * production spends real model calls on six labels to test a queue. The same guard stops
@@ -72,21 +82,37 @@ async function openPage(browser: Browser): Promise<Page> {
  * feature and costs an afternoon.
  */
 async function assertRealBackend(target: Page): Promise<void> {
-  const response = await target.request.get('/health');
-  expect(
-    response.ok(),
-    `/health did not answer at ${test.info().project.use.baseURL}. Start the API first — ` +
-      'see the header of this file. If you pointed this at `npm run dev`, that is ' +
-      'dev/mockApi.ts, which has no /batch and must never be what this suite measures.',
-  ).toBe(true);
+  const where = test.info().project.use.baseURL;
+  const response = await target.request.get('/ready');
 
-  let body: Record<string, unknown>;
+  let body: Record<string, unknown> | null = null;
   try {
     body = (await response.json()) as Record<string, unknown>;
   } catch {
+    body = null;
+  }
+
+  // A 503 from `/ready` is the server saying its setup is incomplete — a different fact
+  // from "nothing is listening", and worth separating, because the fix is different.
+  if (response.status() === 503) {
     throw new Error(
-      '/health returned something that is not JSON — almost certainly the SPA shell from ' +
-        'a Vite dev server backed by dev/mockApi.ts. Run the real API instead.',
+      `the server at ${where} is running but reports its configuration is incomplete. ` +
+        'Most likely it was started without LABELPROOF_FAKE_PROVIDER=1 and without a ' +
+        'provider key. See the header of this file for the command.',
+    );
+  }
+
+  expect(
+    response.ok(),
+    `/ready did not answer at ${where}. Start the API first — see the header of this ` +
+      'file. If you pointed this at `npm run dev`, that is dev/mockApi.ts, which has no ' +
+      '/batch and must never be what this suite measures.',
+  ).toBe(true);
+
+  if (!body) {
+    throw new Error(
+      `/ready at ${where} returned something that is not JSON — almost certainly the SPA ` +
+        'shell from a Vite dev server backed by dev/mockApi.ts. Run the real API instead.',
     );
   }
 
@@ -169,12 +195,13 @@ test.describe('the batch flow, on a real server', () => {
 
   test('rows are readable while the job is still running (BATCH-5)', async () => {
     // The server's side of it: at least one status answered mid-flight and already
-    // carried rows. If this fails with everything else green, the batch ran to completion
-    // before the first poll — check LABELPROOF_BATCH_WORKERS=1 is set.
+    // carried rows.
     const running = polls.filter((poll) => poll.state !== 'done');
     expect(
       running.length,
-      'every status poll said "done" — the job finished before it could be watched',
+      'every status poll already said "done", so the job finished before it could be ' +
+        'watched at all. That is a run without LABELPROOF_BATCH_WORKERS=1 far more often ' +
+        'than it is a broken feature — see the header of this file.',
     ).toBeGreaterThan(0);
     expect(
       running.some((poll) => poll.items > 0),
