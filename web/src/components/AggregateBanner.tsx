@@ -28,7 +28,10 @@ interface AggregateBannerProps {
   aggregate: Aggregate;
   fields: FieldResult[];
   /** Wall-clock from submit to answer, measured in the browser. */
+  /** How long the agent waited, from pressing the button to this screen. */
   elapsedMs: number;
+  /** How long the CHECK took, server-side, including a reading taken before the click. */
+  workMs?: number;
   onJumpToField?: (field: FieldName) => void;
 }
 
@@ -36,11 +39,18 @@ export default function AggregateBanner({
   aggregate,
   fields,
   elapsedMs,
+  workMs,
   onJumpToField,
 }: AggregateBannerProps) {
   const meta = RECOMMENDATIONS[aggregate.recommendation];
   const attention = attentionFields(fields);
-  const elapsed = formatElapsed(elapsedMs);
+  // The headline is the WORK, not the wait. When the label was read while the form was
+  // being filled, the wait is a fraction of a second and reporting that as "checked in
+  // under a second" would describe a six-second model call as instant — the one thing a
+  // timing display must never do. The saving is real and is stated as what it is: time
+  // that was already being spent on typing.
+  const readAhead = typeof workMs === 'number' && workMs - elapsedMs > 500;
+  const elapsed = formatElapsed(readAhead ? workMs : elapsedMs);
 
   return (
     <section
@@ -98,6 +108,14 @@ export default function AggregateBanner({
       {elapsed ? (
         <p className="banner__elapsed" data-testid="elapsed">
           Checked {elapsed}
+          {readAhead ? (
+            <>
+              {' · '}
+              <span className="banner__elapsed-note">
+                most of it before you pressed the button
+              </span>
+            </>
+          ) : null}
         </p>
       ) : null}
     </section>

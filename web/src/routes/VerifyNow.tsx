@@ -693,6 +693,7 @@ function ChecklistScreen({
         aggregate={result.aggregate}
         fields={result.fields}
         elapsedMs={elapsedMs}
+        workMs={result.timings_ms.total ?? undefined}
         onJumpToField={jumpToField}
       />
 
