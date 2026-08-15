@@ -356,13 +356,13 @@ function BatchUpload({
               out of the way. It runs the real queue on a real manifest; the only thing it
               saves the reviewer is assembling one. */}
           <div className="batch__sample">
-            {/* Says six, because six get checked. The manifest has seven rows and one of
-                them is deliberately broken — calling that "seven applications checked" is a
-                small lie on the one screen whose entire argument is that it never claims
-                more than it knows, and the reviewer meets the contradiction about four
-                seconds later when the row-errors notice appears. */}
+            {/* Says seven, because seven get checked. The manifest has eight rows and one
+                of them is deliberately broken — calling that "eight applications checked"
+                is a small lie on the one screen whose entire argument is that it never
+                claims more than it knows, and the reviewer meets the contradiction about
+                four seconds later when the row-errors notice appears. */}
             <p className="batch__sample-note">
-              Or try a sample batch. Six applications with their labels — different
+              Or try a sample batch. Seven applications with their labels — different
               products, spirits and wine — checked right away, plus one deliberately broken
               row so you can see how that is reported. Nothing to upload.
             </p>

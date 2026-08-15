@@ -433,11 +433,11 @@ describe('the sample batch', () => {
     const { fetchMock } = await startSample(
       status({
         state: 'processing',
-        counts: { total: 6, queued: 5, processing: 1, done: 0, failed: 0 },
+        counts: { total: 7, queued: 6, processing: 1, done: 0, failed: 0 },
         items: [item({ item_id: 'a', row: 2, result: result('return_for_correction') })],
         summary: { by_recommendation: {}, by_verdict: {}, worst_first: ['a'], headline: '' },
       }),
-      { accepted: 6 },
+      { accepted: 7 },
     );
 
     // The running screen, its progress bar, and a poll — not a canned table.
@@ -458,10 +458,10 @@ describe('the sample batch', () => {
     await startSample(
       status({
         state: 'processing',
-        counts: { total: 6, queued: 6, processing: 0, done: 0, failed: 0 },
-        row_errors: [{ row: 8, column: 'commodity', message: 'Not a commodity.' }],
+        counts: { total: 7, queued: 7, processing: 0, done: 0, failed: 0 },
+        row_errors: [{ row: 9, column: 'commodity', message: 'Not a commodity.' }],
       }),
-      { accepted: 6, row_errors: [{ row: 8, column: 'commodity', message: 'Not a commodity.' }] },
+      { accepted: 7, row_errors: [{ row: 9, column: 'commodity', message: 'Not a commodity.' }] },
     );
 
     await waitFor(() =>
@@ -470,7 +470,7 @@ describe('the sample batch', () => {
     expect(screen.getByText(/nothing here is your mistake/i)).toBeInTheDocument();
     expect(screen.queryByText(/fix these rows/i)).not.toBeInTheDocument();
     // Still reported by row number — the demonstration is worthless if it hides the fact.
-    expect(screen.getByText('8')).toBeInTheDocument();
+    expect(screen.getByText('9')).toBeInTheDocument();
   });
 });
 

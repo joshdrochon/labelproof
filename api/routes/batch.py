@@ -712,11 +712,11 @@ class _SampleRow:
 
 _ROBUSTNESS = Path(__file__).resolve().parents[2] / "fixtures" / "robustness"
 
-#: The sample batch: six rows that queue, covering the outcomes a reviewer needs to see,
-#: and a seventh that does not.
+#: The sample batch: seven rows that queue, covering the outcomes a reviewer needs to see,
+#: and an eighth that does not.
 #:
 #: Every expected outcome below is the fixture's own committed one — the golden set for the
-#: first five, `fixtures/robustness/manifest.json` for the sixth, which declares
+#: first six, `fixtures/robustness/manifest.json` for the seventh, which declares
 #: `tc14_blur_hopeless` "pregated". Nothing here is a guess about what the pipeline will
 #: say, because a demo that promises an outcome and produces another teaches a reviewer to
 #: distrust the ones that are right.
@@ -724,13 +724,21 @@ _ROBUSTNESS = Path(__file__).resolve().parents[2] / "fixtures" / "robustness"
 #: **One product per row, as far as the committed fixtures allow.** This was five rows of
 #: OLD TOM DISTILLERY: five identical brand names down the Brand column with five different
 #: recommendations beside them, which reads as one application checked five times and
-#: disagreed with itself. Brand is the only column a reviewer can use to tell one
-#: row from another at a glance, so the defects are spread across the distinct products the
-#: set actually ships — and across commodities, since a sample of nothing but spirits shows
-#: none of the rules that turn on what is in the bottle. Old Tom still appears three times:
-#: the only two-image fixture in the set is his, the only label with no warning at all is
-#: his, and the blurred photograph IS his label. That is what the set ships, not a choice
-#: available here — and four brands across six rows is the point being made anyway.
+#: disagreed with itself. Brand is the first column a reviewer scans to tell one row from
+#: another, so the defects are spread across the distinct products the set actually ships —
+#: and across commodities, since a sample of nothing but spirits shows none of the rules
+#: that turn on what is in the bottle.
+#:
+#: Old Tom carries four of the seven, and that is the set rather than a choice: the only
+#: two-image fixture is his, the only label with no warning at all is his, the blurred
+#: photograph IS his label, and **every mismatch fixture in the golden set is his** —
+#: `tc03`, `tc04`, `tc05`, `tc03b`, `tc05b`, `tc08`, without exception. Dropping the
+#: mismatch to buy a fifth brand was the wrong trade: "the label says 40%, the application
+#: says 45%" is the premise of the entire product, and a demo that shows three Missings, a
+#: judgment call and an unreadable photograph but never that has skipped the middle of its
+#: own argument. Four brands across seven rows still reads as different products, and the
+#: triage table names the driving field now, so two Old Tom rows with different defects no
+#: longer render as the same sentence.
 #:
 #: Ordered so the first row is a pass, like `sample.CASES` and for the same reason. It does
 #: not survive into the table — that is sorted worst-first, which is the batch view's whole
@@ -740,6 +748,9 @@ _SAMPLE_ROWS: Final[tuple[_SampleRow, ...]] = (
     # A label that checks out, photographed front and back — so the sample also exercises
     # the two-image case the evidence view has to handle. Spirits, OLD TOM DISTILLERY.
     _SampleRow("tc16_front_back"),
+    # The label says 40% where the application says 45%. The case the product exists for,
+    # and the only tier no other fixture in the set can supply without Old Tom's artwork.
+    _SampleRow("tc08_abv_mismatch"),
     # No government warning anywhere. The most serious thing a label can be missing, and
     # the row the worst-first ordering has to put at the top. Spirits, OLD TOM DISTILLERY.
     _SampleRow("tc07_missing_warning"),
@@ -764,7 +775,7 @@ _SAMPLE_ROWS: Final[tuple[_SampleRow, ...]] = (
     _SampleRow("tc01_old_tom_clean", artwork=(_ROBUSTNESS / "tc14_blur_hopeless.png",)),
 )
 
-#: The seventh row, and the reason it is here. Row-level validation is the part of batch
+#: The eighth row, and the reason it is here. Row-level validation is the part of batch
 #: mode that is hardest to believe without seeing it — 300 applications where three rows
 #: have a typo must queue 297, not refuse the file — and a reviewer cannot see it unless the
 #: manifest they were handed already contains one. A misspelled commodity is the typo a
@@ -823,7 +834,7 @@ def _sample_record(spec: _SampleRow, files: Sequence[Path]) -> dict[str, str]:
 #: The per-client lane in `api/middleware/ratelimit.py` cannot bound the bill: it is keyed
 #: on the client, and a caller with more addresses simply gets more budget. This is the
 #: number that says what a day of being pointed at costs — twenty clicks an hour is a
-#: hundred and twenty verifications an hour, which is a demo server, and anything above it
+#: hundred and forty verifications an hour, which is a demo server, and anything above it
 #: is not a person looking at the product.
 SAMPLE_BATCHES_PER_HOUR = 20
 _SAMPLE_WINDOW_SECONDS = 3600.0
@@ -885,7 +896,7 @@ async def create_sample_batch(request: Request) -> BatchAccepted:
     Neither one is told what the answer should be, which is the property that makes a demo
     worth watching.
 
-    Seven rows, six of which queue — four brands across two commodities, so the Brand
+    Eight rows, seven of which queue — four brands across two commodities, so the Brand
     column tells one row from the next and the wine row shows a rule that turns on what is
     in the bottle. The seventh is deliberately malformed so `row_errors` comes back
     non-empty: a batch that refuses 300 applications over one typo is the failure TC-20
@@ -897,7 +908,7 @@ async def create_sample_batch(request: Request) -> BatchAccepted:
     two limits rather than one: its own rate-limit lane at two a minute per client, and the
     hourly ceiling below across every caller — because a per-client limit is not a bill
     limit when the caller has more than one address. Without them, ten submissions a minute
-    times six verifications is roughly $180 an hour on a public URL with no authentication.
+    times seven verifications is roughly $210 an hour on a public URL with no authentication.
 
     The refusal has to read as a full server, not a broken feature. A reviewer who meets it
     should be told the tool works and how to see it working anyway.
