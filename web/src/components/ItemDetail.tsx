@@ -248,15 +248,6 @@ export default function ItemDetail({
     return role ? `Label picture — ${role}` : `Label picture ${index + 1}`;
   };
 
-  /**
-   * Highlight a row's region, switching pictures if it lives on the other one.
-   *
-   * `FieldRow` prints "Outlined as 2 on the picture" for any row that has a bbox, but the
-   * overlay only draws regions belonging to the picture on screen. On a front/back pair
-   * that sentence could name an outline the agent was looking straight past, with nothing
-   * to say it was on the other face. Following the region is the only reading of that
-   * sentence that is true.
-   */
   const toggle = (field: FieldName) => {
     setExpanded((current) => {
       const next = new Set(current);
@@ -266,10 +257,29 @@ export default function ItemDetail({
     });
   };
 
-  const activate = (field: FieldName | null) => {
+  /**
+   * Take the agent to a row, and to the picture its outline is on.
+   *
+   * Driven by the banner's row links — a deliberate "show me this one" — and never by
+   * hover. `FieldRow.onActivate` fires on `mouseenter` and `focus`, so wiring the picture
+   * switch to it meant running the mouse down the checklist flipped to the back face and
+   * left it there; `mouseleave` names no region, so nothing turned back. It also beat the
+   * agent's own choice on the switcher, which made a two-sided label impossible to hold
+   * still while reading. Hover highlights within the picture on screen (LP-104). Turning
+   * the page is a decision.
+   */
+  const jumpToField = (field: FieldName) => {
+    if (!expanded.has(field)) toggle(field);
     setActiveField(field);
     const region = regionFor(regions, field);
-    if (region) setImageIndex(region.imageIndex);
+    // Clamped: `image_index` comes from the server and nothing promises it names a
+    // picture this item has. Unclamped it selected an index with no URL behind it, the
+    // panel fell back to "not available to display", and the switcher only renders for
+    // two or more pictures — so there was no way back to the label at all.
+    if (region && region.imageIndex >= 0 && region.imageIndex < pictureCount) {
+      setImageIndex(region.imageIndex);
+    }
+    document.getElementById(`row-${field}`)?.scrollIntoView({ block: 'center' });
   };
 
   const activeImage = reportFor(imageIndex);
@@ -299,7 +309,11 @@ export default function ItemDetail({
         </div>
 
         {result ? (
-          <AggregateBanner aggregate={result.aggregate} fields={result.fields} />
+          <AggregateBanner
+            aggregate={result.aggregate}
+            fields={result.fields}
+            onJumpToField={jumpToField}
+          />
         ) : null}
 
         {/* The picture beside the checklist, exactly as Verify Now arranges them. When the
@@ -322,7 +336,7 @@ export default function ItemDetail({
                 imageLabel={labelFor(imageIndex)}
                 regions={regions}
                 activeField={activeField}
-                onActivateField={activate}
+                onActivateField={setActiveField}
                 geometryIsApproximate={geometryIsApproximate}
                 qualityNote={qualityNote}
                 onImageError={() =>
@@ -392,7 +406,7 @@ export default function ItemDetail({
                         number={numberFor(regions, field.field)}
                         expanded={expanded.has(field.field)}
                         onToggle={() => toggle(field.field)}
-                        onActivate={(on) => activate(on ? field.field : null)}
+                        onActivate={(on) => setActiveField(on ? field.field : null)}
                         decision={decisionFor(field.field)}
                         onDecide={(decision) => decide(field.field, decision)}
                         decisionProblem={problem[field.field] ?? null}
@@ -411,7 +425,7 @@ export default function ItemDetail({
                         number={null}
                         expanded={expanded.has(field.field)}
                         onToggle={() => toggle(field.field)}
-                        onActivate={(on) => activate(on ? field.field : null)}
+                        onActivate={(on) => setActiveField(on ? field.field : null)}
                         decision={decisionFor(field.field)}
                         onDecide={(decision) => decide(field.field, decision)}
                         decisionProblem={problem[field.field] ?? null}

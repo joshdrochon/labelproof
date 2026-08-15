@@ -25,7 +25,7 @@ import type {
 import { ApiFailure, listSamples, loadSample, prepareReading, verify } from '../api';
 import type { PreparedReading, SampleCase } from '../api';
 import { NEXT_STEP_LABELS, STAGES } from '../copy';
-import { evidenceRegions, regionFor } from '../evidence';
+import { evidenceRegions, numberFor, regionFor } from '../evidence';
 import { attentionFields, settledFields } from '../triage';
 import AggregateBanner from '../components/AggregateBanner';
 import ApplicationForm, {
@@ -571,10 +571,6 @@ function ChecklistScreen({
   // would let the two screens number the same label differently.
   const regions = useMemo(() => evidenceRegions(result.fields), [result.fields]);
 
-  const numberFor = useCallback(
-    (field: FieldName) => regions.find((r) => r.field === field)?.number ?? null,
-    [regions],
-  );
 
   const toggle = useCallback(
     (field: FieldName) => {
@@ -587,30 +583,46 @@ function ChecklistScreen({
   );
 
   /**
-   * Highlight a row's region, switching pictures when it lives on the other one.
+   * Turn to the picture a row's outline is actually on.
    *
-   * `FieldRow` prints "Outlined as 2 on the picture" for any row with a bbox, but the
-   * overlay only draws regions belonging to the picture on screen — so on a front/back
-   * pair that sentence could name an outline the agent was looking straight past.
+   * **Deliberate actions only** — the banner's row links and the n/p/j/k keys, both of
+   * which are an agent saying "take me to this row". It is NOT wired to hover.
+   *
+   * It was, briefly, and driving the screen showed why that is wrong: `FieldRow.onActivate`
+   * fires on `mouseenter` and `focus`, so sweeping the mouse down the checklist flipped
+   * the picture to the back and left it there — `mouseleave` passes null, which names no
+   * region and so restores nothing. Worse, it overrode the agent: choosing "back" on the
+   * switcher and then reading any front row snapped the picture away, making a two-sided
+   * label impossible to hold still. Hover is a HIGHLIGHT, confined to the picture already
+   * on screen and fully reverted on leave (LP-104); turning the page is a decision.
    */
-  const activate = useCallback(
-    (field: FieldName | null) => {
-      setActiveField(field);
+  const showRegionFor = useCallback(
+    (field: FieldName) => {
       const region = regionFor(regions, field);
-      if (region) setImageIndex(region.imageIndex);
+      if (!region) return;
+      // Clamped, because `image_index` arrives from the server and nothing upstream
+      // promises it names a picture this result actually has. Unclamped it set an index
+      // with no URL behind it: the panel fell back to "not available to display" and the
+      // switcher — which only renders for two or more pictures — was not there to undo
+      // it. The label was gone for the session, recoverable only by starting over and
+      // discarding every decision on the screen.
+      if (region.imageIndex >= 0 && region.imageIndex < imageUrls.length) {
+        setImageIndex(region.imageIndex);
+      }
     },
-    [regions, setActiveField, setImageIndex],
+    [regions, imageUrls.length, setImageIndex],
   );
 
   const jumpToField = useCallback(
     (field: FieldName) => {
       if (!expanded.has(field)) toggle(field);
-      activate(field);
+      setActiveField(field);
+      showRegionFor(field);
       const row = document.getElementById(`row-${field}`);
       row?.scrollIntoView({ block: 'center', behavior: 'smooth' });
       row?.querySelector<HTMLElement>('.row__toggle')?.focus();
     },
-    [expanded, activate, toggle],
+    [expanded, setActiveField, showRegionFor, toggle],
   );
 
   // Keyboard shortcuts for the power user (UX-4, LP-111). Never while typing.
@@ -719,7 +731,7 @@ function ChecklistScreen({
             }
             regions={regions}
             activeField={activeField}
-            onActivateField={activate}
+            onActivateField={setActiveField}
             geometryIsApproximate={approximateByIndex[imageIndex] ?? true}
             qualityNote={qualityNote}
           >
@@ -775,10 +787,10 @@ function ChecklistScreen({
                     result={row}
                     commodity={application.commodity}
                     variant="attention"
-                    number={numberFor(row.field)}
+                    number={numberFor(regions, row.field)}
                     expanded={expanded.has(row.field)}
                     onToggle={() => toggle(row.field)}
-                    onActivate={(on) => activate(on ? row.field : null)}
+                    onActivate={(on) => setActiveField(on ? row.field : null)}
                     decision={decisions[row.field] ?? null}
                     onDecide={(value) =>
                       setDecisions({ ...decisions, [row.field]: value ?? undefined })
@@ -812,7 +824,7 @@ function ChecklistScreen({
                     number={null}
                     expanded={expanded.has(row.field)}
                     onToggle={() => toggle(row.field)}
-                    onActivate={(on) => activate(on ? row.field : null)}
+                    onActivate={(on) => setActiveField(on ? row.field : null)}
                     decision={decisions[row.field] ?? null}
                     onDecide={(value) =>
                       setDecisions({ ...decisions, [row.field]: value ?? undefined })

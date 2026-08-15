@@ -136,11 +136,17 @@ describe('the label picture', () => {
   it('outlines the row that needs attention, and numbers it', () => {
     render(<ItemDetail item={item()} onClose={() => undefined} onDecisions={() => undefined} />);
 
-    // The mismatch is outlined and carries number 1. Two controls answer to that name by
-    // design — the marker on the picture and its entry in the legend below it — and both
-    // highlight the same region, which is the pairing `EvidenceOverlay` is built around.
+    // The mismatch is outlined and carries number 1. Two controls answer to that name
+    // inside the picture panel by design — the marker on the photo and its entry in the
+    // legend below it — and both highlight the same region, which is the pairing
+    // `EvidenceOverlay` is built around. (The banner carries a third, its jump link,
+    // which is why this is scoped to the figure rather than the whole dialog.)
     expect(screen.getByTestId('region-government_warning')).toBeInTheDocument();
-    expect(screen.getAllByRole('button', { name: /government warning/i })).toHaveLength(2);
+    expect(
+      within(screen.getByRole('figure')).getAllByRole('button', {
+        name: /government warning/i,
+      }),
+    ).toHaveLength(2);
     // The matching row is not drawn unless the agent asks for it. It has a region — so
     // hovering the row can still light up the words — but an outline on every settled
     // field is seven boxes competing with the one that matters.
@@ -261,22 +267,80 @@ describe('the label picture', () => {
     ).not.toBeInTheDocument();
   });
 
-  it('follows a region to the picture it is actually on', async () => {
+  /** A two-sided item whose only outlined row has its evidence on the BACK. */
+  function twoSided() {
+    return item({
+      images: ['front.png', 'back.png'],
+      result: {
+        ...result([imageReport(0, 'front'), imageReport(1, 'back')]),
+        fields: [
+          fieldResult('government_warning', 'mismatch', {
+            evidence: { image_index: 1, bbox: { x0: 0.1, y0: 0.7, x1: 0.9, y1: 0.9 } },
+          }),
+        ],
+      },
+    });
+  }
+
+  it('turns to the picture a row is outlined on when the agent asks for that row', async () => {
     // "Outlined as 1 on the picture" is a lie on a two-sided label if the outline is on
-    // the face the agent is not looking at and nothing says so.
-    const fields = [
-      fieldResult('government_warning', 'mismatch', {
-        evidence: { image_index: 1, bbox: { x0: 0.1, y0: 0.7, x1: 0.9, y1: 0.9 } },
+    // the face the agent is not looking at and nothing takes them there. The banner's row
+    // link is the deliberate ask.
+    const user = userEvent.setup();
+    render(<ItemDetail item={twoSided()} onClose={() => undefined} onDecisions={() => undefined} />);
+
+    // Starts on the front, where the region is not drawn.
+    expect(screen.queryByTestId('region-government_warning')).not.toBeInTheDocument();
+
+    await user.click(
+      within(screen.getByRole('region', { name: /recommendation/i })).getByRole('button', {
+        name: /government warning/i,
       }),
-    ];
+    );
+
+    expect(screen.getByRole('img', { name: /back/i })).toBeInTheDocument();
+    expect(screen.getByTestId('region-government_warning')).toBeInTheDocument();
+  });
+
+  it('never moves the picture on hover, and never overrides the agent\'s choice', async () => {
+    // Hover is a highlight, not a page turn (LP-104). Wiring the switch to `onActivate`
+    // meant sweeping the mouse down the checklist flipped to the back and left it there —
+    // `mouseleave` names no region, so nothing turned back — and it beat the agent's own
+    // switcher choice, making a two-sided label impossible to hold still while reading.
+    const user = userEvent.setup();
+    render(<ItemDetail item={twoSided()} onClose={() => undefined} onDecisions={() => undefined} />);
+
+    await user.hover(screen.getByTestId('row-government_warning'));
+    expect(screen.getByRole('img', { name: /front/i })).toBeInTheDocument();
+    await user.unhover(screen.getByTestId('row-government_warning'));
+    expect(screen.getByRole('img', { name: /front/i })).toBeInTheDocument();
+
+    // And the agent's own choice survives a sweep across the rows.
+    await user.click(
+      within(screen.getByRole('group', { name: /which picture/i })).getByRole('button', {
+        name: 'back',
+      }),
+    );
+    await user.hover(screen.getByTestId('row-government_warning'));
+    expect(screen.getByRole('img', { name: /back/i })).toBeInTheDocument();
+  });
+
+  it('ignores a region naming a picture the item does not have', async () => {
+    // `image_index` comes from the server. Unclamped it selected an index with no URL
+    // behind it — the panel fell back to "not available", and the switcher only renders
+    // for two or more pictures, so there was no way back to the label at all.
     const user = userEvent.setup();
     render(
       <ItemDetail
         item={item({
-          images: ['front.png', 'back.png'],
+          images: ['front.png'],
           result: {
-            ...result([imageReport(0, 'front'), imageReport(1, 'back')]),
-            fields,
+            ...result([imageReport(0, 'front')]),
+            fields: [
+              fieldResult('government_warning', 'mismatch', {
+                evidence: { image_index: 4, bbox: { x0: 0.1, y0: 0.7, x1: 0.9, y1: 0.9 } },
+              }),
+            ],
           },
         })}
         onClose={() => undefined}
@@ -284,13 +348,15 @@ describe('the label picture', () => {
       />,
     );
 
-    // Starts on the front, where the region is not drawn.
-    expect(screen.queryByTestId('region-government_warning')).not.toBeInTheDocument();
+    await user.click(
+      within(screen.getByRole('region', { name: /recommendation/i })).getByRole('button', {
+        name: /government warning/i,
+      }),
+    );
 
-    await user.hover(screen.getByTestId('row-government_warning'));
-
-    expect(screen.getByRole('img', { name: /back/i })).toBeInTheDocument();
-    expect(screen.getByTestId('region-government_warning')).toBeInTheDocument();
+    // The one picture it has is still on screen.
+    expect(screen.getByRole('img', { name: /label picture/i })).toBeInTheDocument();
+    expect(screen.queryByText(/not available to display/i)).not.toBeInTheDocument();
   });
 
   it('says the picture is missing rather than drawing a broken image', () => {
