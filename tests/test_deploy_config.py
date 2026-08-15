@@ -7,13 +7,13 @@ of failure this project keeps having to design against.
 
 The two that matter most:
 
-**The image must contain what `/sample` serves.** The Dockerfile deliberately copies a
+**The image must contain what the demos serve.** The Dockerfile deliberately copies a
 handful of paths out of `fixtures/` instead of the whole tree, because production has no
 business carrying the golden set. The cost of that is a way to be wrong: exclude one file
-the demo needs and the build succeeds, the container boots, both health checks pass, and
+a demo needs and the build succeeds, the container boots, both health checks pass, and
 the grader's one-click sample returns an error. That is the worst available outcome for a
-take-home, so the manifest the route actually serves is compared against the manifest the
-image actually copies.
+take-home, so the artwork the routes actually name is compared against the artwork the
+image actually copies — for `GET /sample` and for `POST /batch/sample` alike.
 
 **Configuration in one file must agree with code in another.** The latency budget against
 the model's measured latency, the keep-warm interval against the clamp the script
@@ -40,6 +40,7 @@ from typing import Any
 
 import pytest
 
+from api.routes.batch import _SAMPLE_ROWS, _sample_artwork
 from api.routes.sample import _GOLDEN, _LABELS, servable_images
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -91,25 +92,58 @@ def _is_copied(relative: Path, copied: list[str]) -> bool:
 # --- the image carries what the product serves (LP-129, UX-1) -------------------------
 
 
-def test_the_runtime_image_carries_the_one_click_sample() -> None:
-    """Every file `GET /sample` serves is copied into the image.
+def _artwork_each_demo_names() -> dict[str, list[Path]]:
+    """Repository-relative files the two one-click demos ask for, by demo.
 
-    Read from `api.routes.sample` rather than restated here, so adding a third demo image
-    fails this test instead of failing in front of a reviewer.
+    Derived from the shipped code, never restated: `servable_images()` for the picker on
+    the single-check screen, and `_SAMPLE_ROWS` walked through `_sample_artwork` for the
+    batch — which is the same function `POST /batch/sample` itself calls, so the list here
+    cannot describe a different sample than the one a reviewer gets.
+    """
+    return {
+        "GET /sample": [(_LABELS / name).relative_to(ROOT) for name in sorted(servable_images())],
+        "POST /batch/sample": [
+            path.resolve().relative_to(ROOT)
+            for spec in _SAMPLE_ROWS
+            for path in _sample_artwork(spec)
+        ],
+    }
+
+
+def test_the_runtime_image_carries_both_one_click_samples() -> None:
+    """Every image the two demos name is copied into the image, and the golden set with them.
+
+    **Read the Dockerfile, not the disk.** The batch sample shipped broken to production
+    asking for four label files and a robustness photograph that no COPY line named, and
+    `POST /batch/sample` answered 500 on the deployed URL while `/health` and `/ready`
+    stayed green. A green CI run, the full local suite, `scripts/smoke.sh` and a hand
+    walkthrough all missed it for one reason: every one of them runs against a source
+    checkout, where all 45 fixture images are sitting right there on disk. Only the
+    container is missing them. So a test that resolves these paths and calls `.exists()`
+    passes on a build nobody can use — the only artefact that can answer the question is
+    the COPY list itself.
+
+    The same gap caught the single-check picker when it went from one sample to four while
+    this block still named two images and no manifest, and again when the batch sample was
+    reworked onto seven products. Both demos are derived here now, so the next one fails
+    this test instead of failing in front of a reviewer.
     """
     copied = _copied_paths()
 
-    # The manifest the samples are READ from, plus every image they declare. Both are
-    # derived from `api.routes.sample`, so a fifth demo fails here rather than in front
-    # of a reviewer — which is what this caught when the picker went from one sample to
-    # four while the Dockerfile still named two images and no manifest at all.
-    required = [_GOLDEN.relative_to(ROOT)]
-    required += [(_LABELS / name).relative_to(ROOT) for name in sorted(servable_images())]
+    # The manifest both demos read their applications OUT of, plus every image they name.
+    required = {"golden/set.json": [_GOLDEN.relative_to(ROOT)]}
+    required.update(_artwork_each_demo_names())
 
-    missing = [str(path) for path in required if not _is_copied(path, copied)]
+    missing = {
+        source: [str(path) for path in paths if not _is_copied(path, copied)]
+        for source, paths in required.items()
+    }
+    missing = {source: paths for source, paths in missing.items() if paths}
+
     assert not missing, (
-        f"the Dockerfile does not copy {missing} into the runtime image. The one-click "
-        f"demo will return an error on the deployed URL while every health check passes."
+        f"the Dockerfile does not copy these into the runtime image: {missing}. Whichever "
+        f"demo names them returns an error on the deployed URL while every health check "
+        f"passes. Add them to the COPY block in the Dockerfile."
     )
 
 
