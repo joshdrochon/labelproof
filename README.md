@@ -82,6 +82,27 @@ closed.
 .venv/bin/python -m pytest        # inside `unshare --net` in CI, so "offline" is shown, not claimed
 ```
 
+### What to expect on <https://labelproof.fly.dev>
+
+The page itself answers in about **0.1s**. A verification takes about **6 seconds**,
+first click and every click after it, and the number on the screen is the one that was
+measured. There is **no warm-up period and no cold start to wait out** — the first
+request is not meaningfully slower than the tenth, and the reason is in
+[Keeping it warm](#keeping-it-warm) below.
+
+That is stated as a measurement rather than as a configuration claim, because it was
+reported as a 12-second first request and 3–5 second ones afterwards, and neither number
+reproduced. What the deployed URL actually does is in
+[How fast it actually is](#how-fast-it-actually-is-and-where-that-leaves-perf-1), with
+the cold-start table. **6 seconds is over the 5-second gate the brief sets** and this
+build does not meet it; that gap is the model's, it is not a start-up cost, and it is not
+something a second click improves.
+
+One exception, and it is the only slow path we found: a request that arrives **while the
+machine is restarting** — during a deploy — waits for the new process instead of failing.
+Measured at **20.2s**, answered 200. Nothing schedules a restart, so a reviewer will only
+see this if they click during a deployment.
+
 ---
 
 ## What it checks
@@ -780,6 +801,42 @@ The honest reading:
   [`docs/perf-deployed.md`](docs/perf-deployed.md) — the file rather than this sentence is
   the evidence.
 
+### There is no cold start, and here is the measurement
+
+This was investigated because a 12-second first request was reported against the deployed
+URL, with 3–5 second requests afterwards. **Neither number reproduced.** Everything below
+is `POST /verify` against <https://labelproof.fly.dev> with the two-image *clean* sample,
+on 2026-08-15, commit `0037a56`; the raw sample, including the runs this table summarises,
+is [`docs/coldstart-probe.txt`](docs/coldstart-probe.txt):
+
+| Condition | n | Client stopwatch | What it tells you |
+|---|--:|---|---|
+| Static page, `GET /` | 3 | 94–115 ms | Serving the interface costs nothing |
+| Warm verification | 8 | 5,493–7,031 ms | The ordinary case |
+| **First verification on a process that had just booted** | 3 | 5,863 / 6,062 / 6,128 ms | **No cold-start penalty worth a note** |
+| A request arriving *during* a machine restart | 1 | 20,178 ms, HTTP 200 | The one slow path, and it needs a deploy |
+
+The cold rows were taken by restarting the machine with `fly machine restart` and sending
+the first verification the instant `/health` answered — the payload was fetched before the
+restart, so no part of it is warming anything. What a cold process actually costs shows up
+in one stage and nowhere else: `preprocess` measures **749–769 ms** on the first request
+after boot against **500–580 ms** warm. That is roughly **180 ms, once** — Python touching
+OpenCV and Pillow code paths for the first time. `extract` is unchanged, because it is the
+provider's clock, not ours.
+
+So the three things a 12-second answer is usually blamed on were each ruled out rather
+than argued away. The machine does not stop: `auto_stop_machines = "off"`, and
+[`docs/keepwarm-probe.txt`](docs/keepwarm-probe.txt) probed nine times at 20-minute gaps
+with a worst first hit of 0.17s. The provider's prompt cache is kept warm every four
+minutes and, as `scripts/keepwarm.py` says at length, it was never worth latency anyway —
+it is a cost optimisation. And our own start-up cost is the 180 ms above.
+
+Two things this does **not** claim. It does not explain the original observation — it
+contradicts it, and the honest position is that we could not reproduce a 12-second request
+in any state we could put the service into except mid-restart. And a request that lands
+during a deploy is genuinely slow: Fly holds the connection rather than refusing it, so it
+answers correctly and late.
+
 The latency target is reported, never enforced. `LABELPROOF_LATENCY_TARGET_MS` (5000) is
 what the product is *held to*; the request budget and the provider timeout default from
 the model's measured latency instead. Enforcing the target as a timeout is what once
@@ -1409,6 +1466,12 @@ machine wake and an unprimed prompt cache.
 What this does *not* fix, said plainly: the TLS connection pool lives in the server
 process and expires after a few seconds idle regardless, so the first request still pays
 one handshake. The prompt cache was the part worth buying.
+
+**And it worked, measured from the outside.** The first verification on a process that has
+just booted takes about the same 6 seconds as the tenth — the numbers are in
+[There is no cold start](#there-is-no-cold-start-and-here-is-the-measurement). The residue
+is roughly 180 ms of first-touch import cost, which no keep-warm loop reaches because it
+belongs to the request path rather than the provider.
 
 ### Egress (NET-1)
 

@@ -1,0 +1,108 @@
+PERF-6 / J-07 — is the first request slow?
+
+target:    https://labelproof.fly.dev
+commit:    0037a56
+machine:   080d210b723398, performance-1x, 2 GB, iad, single machine
+config:    LABELPROOF_EXTRACTION_MODE=split, LABELPROOF_KEEPWARM=1 (240s)
+date:      2026-08-15, 16:18-16:26 UTC
+payload:   the `clean` sample — tc16_front_back_front.png + tc16_front_back_back.png,
+           73 KB total, two images
+
+WHY THIS EXISTS. A 12-second first request was reported against the deployed URL, with
+3-5 second requests after it. `fly.toml` sets `auto_stop_machines = "off"`, so there
+should be no machine to wake, which made the report worth measuring rather than
+explaining. Neither number reproduced. This file is the raw sample.
+
+HOW THE COLD ROWS WERE MADE COLD. `fly machine restart 080d210b723398`, then the first
+`POST /verify` sent as soon as `/health` answered 200. The application JSON and both
+images were fetched to disk BEFORE the restart, so nothing in the payload path warmed the
+process first. `scripts/timed_run.py` refuses to call its own run 1 "cold" for exactly
+this reason (J-07); these rows are cold because of what was arranged around them, not
+because of where they sit in a loop.
+
+--------------------------------------------------------------------------------------
+Static page — no model call, no application code
+--------------------------------------------------------------------------------------
+GET /           dns 0.003  connect 0.018  tls 0.049  ttfb 0.115  total 0.115  200
+GET /           dns 0.003  connect 0.019  tls 0.042  ttfb 0.103  total 0.104  200
+GET /           dns 0.002  connect 0.018  tls 0.038  ttfb 0.094  total 0.094  200
+GET /health                                            total 0.100  200
+GET /health                                            total 0.103  200
+GET /health                                            total 0.085  200
+
+--------------------------------------------------------------------------------------
+Warm verifications — machine up 12h42m
+--------------------------------------------------------------------------------------
+#   client_ms  server_ms  preprocess  extract  compare  request_id
+1        6358       6181         505     5671        1  req_147c6b79c3574c45
+2        5493       5307         506     4796        1  req_208090c05c3344d0
+3        6527       6279         501     5773        1  req_8ecaed08378444a9
+4        5516       5235         500     4730        1  req_a52277b9e4f244be
+5        6078       5865         499     5361        1  req_517f02839a6540dd
+6        7031       6836         577     6254        1  req_8fb8f06c31974200
+7        6224       6055         575     5476        1  req_84ec0dbf3f284a1e
+8        7038       6736        1354     5364        3  (racing /prepare, see below)
+
+--------------------------------------------------------------------------------------
+COLD — first verification on a process that had just booted
+--------------------------------------------------------------------------------------
+cycle  restart->2/2 checks  client_ms  server_ms  preprocess  extract  request_id
+1                     ~13s       6062       5848         752     5090  req_23326e8add2448a7
+2                   13.03s       5863       5579         749     4824  req_774b61ddca7e4e19
+3                   19.88s       6128       5853         769     5078  req_5cca2fff79b84e51
+
+The cold column is not slower than the warm one. The only stage that moves is
+`preprocess`: 749-769 ms cold against 500-580 ms warm, so a booted process pays roughly
+180 ms once, for first-touch imports in the request path. `extract` is the provider's
+clock and is identical either way.
+
+--------------------------------------------------------------------------------------
+The one slow path — a request arriving DURING a restart
+--------------------------------------------------------------------------------------
+`GET /health` in a tight loop across a `fly machine restart`. 120 requests, no failures,
+no non-200s:
+
+    16:25:12  200  0.159
+    16:25:13  200  0.177
+    16:25:14  200  0.184
+    16:25:15  200  20.179   <- landed mid-restart; Fly held the connection
+    16:25:36  200  0.203
+    16:25:36  200  0.190
+    16:25:37  200  0.184
+
+Fly holds the connection through the boot rather than refusing it, so the request answers
+correctly and 20 seconds late. Nothing schedules a restart, so this needs a deploy to
+happen at all.
+
+--------------------------------------------------------------------------------------
+Two other things that were ruled out rather than assumed
+--------------------------------------------------------------------------------------
+Local, for comparison. Same key, same model, `uvicorn api.main:app` on a laptop, first
+call after boot: 5274 / 5152 / 5197 ms client, preprocess 220 / 190 / 187. A local run is
+not slower on its first call either, so the 12 seconds is not a "the deployed one is
+special" effect in the other direction.
+
+The read-ahead racing the submit. `POST /prepare` and `POST /verify` fired at the same
+instant with the same artwork — what happens when an agent presses the button before the
+head start finishes. Verify answered in 7038 ms with `preprocess` at 1354 ms: the two
+requests contend for one vCPU on the image work, `extract` is untouched at 5364 ms, and
+the result is a second slower, not six.
+
+--------------------------------------------------------------------------------------
+RESULT
+--------------------------------------------------------------------------------------
+NOT REPRODUCED. Cold first verification 5.9-6.1s against a warm 5.5-7.0s. No cold start,
+no warm-up window, and no 3-5 second regime to fall back to afterwards — 6 seconds is
+simply what a verification costs on the configured model, and it misses PERF-1 by about
+a second and a half whether it is the first request or the hundredth.
+
+Scope: three cold observations, one restart-collision observation, one deployment,
+one model, one payload, one afternoon. It does not prove the reported 12 seconds never
+happened; it proves it is not the ordinary behaviour of this service, and that the
+ordinary behaviour is not 3-5 seconds either.
+
+Reproduce:
+    fly machine restart <id>
+    .venv/bin/python -m scripts.timed_run https://labelproof.fly.dev --runs 1 \
+        --application app.json --image front.png --image back.png \
+        --note "cold: first verify after fly machine restart"
