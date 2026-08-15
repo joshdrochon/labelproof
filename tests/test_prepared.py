@@ -10,8 +10,8 @@ from __future__ import annotations
 import pytest
 
 from api.models import Commodity, Extraction
-from api.provider.base import ProviderUsage
 from api.prepared import PreparedReadings, digest
+from api.provider.base import ProviderUsage
 
 
 class FakeClock:

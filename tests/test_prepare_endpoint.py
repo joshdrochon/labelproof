@@ -83,7 +83,7 @@ def test_the_prepared_path_makes_no_model_call_at_verify_time() -> None:
     assert len(calls) == 1, "verify extracted again despite being handed a reading"
 
 
-def test_the_result_reports_what_the_READING_cost_not_what_the_wait_cost() -> None:
+def test_the_result_reports_the_reading_cost_not_the_wait() -> None:
     """A result card that showed the wait would report a six-second model call as two
     milliseconds of work. The number on screen has to describe the work, not the moment
     the agent happened to press the button (OPS-1)."""
@@ -158,7 +158,7 @@ def test_an_unknown_or_expired_token_falls_back_rather_than_failing() -> None:
     """A restart between prepare and verify is ordinary. The agent must never see an error
     for an optimisation they did not ask for and cannot observe."""
     client = a_client()
-    response = verify(client, token="not-a-real-token")
+    response = verify(client, token="no-such-reading")  # noqa: S106 — not a secret
 
     assert response.status_code == 200
     assert response.json()["aggregate"]["recommendation"]
@@ -217,7 +217,13 @@ def test_prepare_draws_on_the_same_rate_limit_as_verify() -> None:
     way to spend the same money, reached by calling the other endpoint (SEC-9)."""
     lanes = tuple(
         Lane(name=n, per_minute=v)
-        for n, v in (("exempt", 0), ("verify", 30), ("batch_submit", 5), ("batch_read", 120), ("default", 60))
+        for n, v in (
+            ("exempt", 0),
+            ("verify", 30),
+            ("batch_submit", 5),
+            ("batch_read", 120),
+            ("default", 60),
+        )
     )
     assert lane_for("POST", "/prepare", lanes).name == "verify"
 
