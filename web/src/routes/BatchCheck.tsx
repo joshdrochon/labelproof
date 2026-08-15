@@ -36,9 +36,11 @@ import type { BatchAccepted } from '../types';
 import { RECOMMENDATIONS, VERDICTS } from '../copy';
 import { VerdictGlyph } from '../components/VerdictCard';
 import type {
+  AgentDecision,
   ApiError,
   BatchItem,
   BatchStatus,
+  FieldName,
   ItemState,
   Recommendation,
 } from '../types';
@@ -101,6 +103,23 @@ export default function BatchCheck() {
   // Whether the job on screen is the demonstration one. It changes exactly one sentence —
   // the explanation beside the bad manifest row — and nothing about how the job is run.
   const [isSample, setIsSample] = useState(false);
+
+  /**
+   * Decisions this screen has written, by item, laid over whatever the poll last said.
+   *
+   * Two reasons it lives here and not in the dialog. **A finished job stops polling** —
+   * see the effect below — so after the last tick nothing ever refreshes `item.decisions`
+   * again, and a ruling made in a dialog that then closed had nowhere to survive. That is
+   * the state almost all triage happens in, and it made the feature look like it worked
+   * only because a running job's polls were papering over it.
+   *
+   * And while a job IS running, this overlay is what makes the ordering safe: a status
+   * request that left before a write can land after it, and without an overlay the poll's
+   * stale copy would win and flip a button back.
+   */
+  const [decisions, setDecisions] = useState<
+    Record<string, Partial<Record<FieldName, AgentDecision>>>
+  >({});
 
   const abort = useRef<AbortController | null>(null);
   const jobId = status?.job_id ?? null;
@@ -235,7 +254,20 @@ export default function BatchCheck() {
     setFilter('all');
     setOpenItem(null);
     setIsSample(false);
+    setDecisions({});
   }, []);
+
+  // Memoised, both of them. `ItemDetail`'s focus effect depends on `onClose`, so a fresh
+  // arrow each render re-runs it — and on a running job that is every 1.5s poll, each one
+  // pulling focus back to the dialog heading while someone is mid-decision.
+  const closeItem = useCallback(() => setOpenItem(null), []);
+
+  const recordDecisions = useCallback(
+    (itemId: string, updated: Partial<Record<FieldName, AgentDecision>>) => {
+      setDecisions((current) => ({ ...current, [itemId]: updated }));
+    },
+    [],
+  );
 
   if (status === null) {
     return (
@@ -256,10 +288,13 @@ export default function BatchCheck() {
     <BatchResults
       status={status}
       isSample={isSample}
+      decisions={decisions}
+      onDecisions={recordDecisions}
       filter={filter}
       onFilter={setFilter}
       openItem={openItem}
       onOpenItem={setOpenItem}
+      onCloseItem={closeItem}
       onRetry={onRetry}
       retrying={retrying}
       onStartOver={startOver}
@@ -399,10 +434,13 @@ function BatchUpload({
 function BatchResults({
   status,
   isSample,
+  decisions,
+  onDecisions,
   filter,
   onFilter,
   openItem,
   onOpenItem,
+  onCloseItem,
   onRetry,
   retrying,
   onStartOver,
@@ -410,10 +448,16 @@ function BatchResults({
 }: {
   status: BatchStatus;
   isSample: boolean;
+  decisions: Record<string, Partial<Record<FieldName, AgentDecision>>>;
+  onDecisions: (
+    itemId: string,
+    updated: Partial<Record<FieldName, AgentDecision>>,
+  ) => void;
   filter: Filter;
   onFilter: (filter: Filter) => void;
   openItem: string | null;
   onOpenItem: (id: string | null) => void;
+  onCloseItem: () => void;
   onRetry: () => void;
   retrying: boolean;
   onStartOver: () => void;
@@ -426,11 +470,16 @@ function BatchResults({
   // Server order, never re-sorted here. `worst_first` is the contract; anything the
   // server did not rank goes after, in arrival order, so nothing silently disappears.
   const ordered = useMemo(() => {
-    const byId = new Map(status.items.map((item) => [item.item_id, item]));
+    // Our own writes win over the poll's copy of them. Everything else about the item is
+    // the server's — this overlays the one field this screen is allowed to author.
+    const withDecisions = status.items.map((item) =>
+      decisions[item.item_id] ? { ...item, decisions: decisions[item.item_id]! } : item,
+    );
+    const byId = new Map(withDecisions.map((item) => [item.item_id, item]));
     const ranked = summary.worst_first.flatMap((id) => byId.get(id) ?? []);
     const seen = new Set(ranked.map((item) => item.item_id));
     return [...ranked, ...status.items.filter((item) => !seen.has(item.item_id))];
-  }, [status.items, summary.worst_first]);
+  }, [status.items, summary.worst_first, decisions]);
 
   const visible = useMemo(
     () => (filter === 'all' ? ordered : ordered.filter((item) => bucketOf(item) === filter)),
@@ -549,7 +598,12 @@ function BatchResults({
           gives it a fresh instance — without the key React would reuse the one it has and
           the second row would open showing the first row's rulings. */}
       {open ? (
-        <ItemDetail key={open.item_id} item={open} onClose={() => onOpenItem(null)} />
+        <ItemDetail
+          key={open.item_id}
+          item={open}
+          onClose={onCloseItem}
+          onDecisions={(updated) => onDecisions(open.item_id, updated)}
+        />
       ) : null}
     </div>
   );

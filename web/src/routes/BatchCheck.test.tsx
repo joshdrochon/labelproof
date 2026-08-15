@@ -82,9 +82,18 @@ function status(overrides: Partial<BatchStatus> = {}): BatchStatus {
 }
 
 /** Drive the screen to its results state without going through the file picker. */
-async function startBatch(first: BatchStatus, accepted: Partial<Record<string, unknown>> = {}) {
-  const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+async function startBatch(
+  first: BatchStatus,
+  accepted: Partial<Record<string, unknown>> = {},
+  /** Answer a request the default mock does not know about. Return null to fall through. */
+  extra?: (url: string, init?: RequestInit) => Promise<Response | null>,
+) {
+  const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
+    if (extra) {
+      const answered = await extra(url, init);
+      if (answered) return answered;
+    }
     if (url === '/batch') {
       return new Response(
         JSON.stringify({ job_id: 'job_1', accepted: first.counts.total, message: 'Queued.', ...accepted }),
@@ -331,6 +340,52 @@ describe('the sample batch', () => {
     expect(screen.queryByText(/fix these rows/i)).not.toBeInTheDocument();
     // Still reported by row number — the demonstration is worthless if it hides the fact.
     expect(screen.getByText('4')).toBeInTheDocument();
+  });
+});
+
+describe('decisions on a finished job', () => {
+  /**
+   * The state almost all triage happens in, and the one where this was broken.
+   *
+   * A finished job stops polling — correctly, since it cannot change — so nothing
+   * refreshes `item.decisions` again. With the ruling held inside the dialog it went out
+   * of existence the moment the dialog closed, and reopening the row showed an un-pressed
+   * button. It demoed fine only because a RUNNING job's polls were papering over it.
+   */
+  it('keeps a ruling across closing and reopening the row', async () => {
+    const done = status({
+      state: 'done',
+      counts: { total: 1, queued: 0, processing: 0, done: 1, failed: 0 },
+      items: [item({ item_id: 'a', row: 2, result: result('return_for_correction') })],
+      summary: { by_recommendation: {}, by_verdict: {}, worst_first: ['a'], headline: '' },
+    });
+
+    const { user } = await startBatch(done, {}, async (url, init) => {
+      if (!url.endsWith('/decisions')) return null;
+      const body = JSON.parse(String(init?.body ?? '{}'));
+      // The server echoes the item back with the ruling recorded — and then never
+      // speaks again, because the job is done and polling has stopped.
+      return new Response(
+        JSON.stringify({ ...done.items[0], decisions: body.decisions }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      );
+    });
+
+    await waitFor(() => expect(screen.getByRole('table')).toBeInTheDocument());
+    await user.click(screen.getByRole('button', { name: /open row 2/i }));
+
+    // Attention rows open themselves, so the decision buttons are already on screen.
+    const agree = within(screen.getByRole('dialog')).getByRole('button', { name: 'I agree' });
+    await user.click(agree);
+    await waitFor(() => expect(agree).toHaveAttribute('aria-pressed', 'true'));
+
+    await user.click(within(screen.getByRole('dialog')).getByRole('button', { name: /close/i }));
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+
+    await user.click(screen.getByRole('button', { name: /open row 2/i }));
+    expect(
+      within(screen.getByRole('dialog')).getByRole('button', { name: 'I agree' }),
+    ).toHaveAttribute('aria-pressed', 'true');
   });
 });
 

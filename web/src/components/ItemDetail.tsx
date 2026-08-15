@@ -31,7 +31,7 @@ import AggregateBanner from './AggregateBanner';
 import EvidenceOverlay from './EvidenceOverlay';
 import FieldRow from './FieldRow';
 import { ApiFailure, batchItemImageUrl, setItemDecision } from '../api';
-import { evidenceRegions } from '../evidence';
+import { evidenceRegions, numberFor, regionFor } from '../evidence';
 import { attentionFields, settledFields } from '../triage';
 import type { AgentDecision, BatchItem, FieldName } from '../types';
 
@@ -50,33 +50,64 @@ const SAVE_FAILED =
 export default function ItemDetail({
   item,
   onClose,
+  onDecisions,
 }: {
   item: BatchItem;
+  /**
+   * Memoise this. The focus effect below depends on it, so a fresh arrow on every render
+   * re-runs the effect — and while a job is still running that is every 1.5s poll, each
+   * one yanking focus back to the dialog heading in the middle of a decision.
+   */
   onClose: () => void;
+  /**
+   * Hand the server's answer up to the batch screen, which owns the item list.
+   *
+   * Without this a decision made on a FINISHED job is lost the moment the dialog closes:
+   * polling has stopped, so nothing ever refreshes `item.decisions`, and reopening the row
+   * seeds from the stale copy the last poll left behind. That is the state almost all
+   * triage happens in.
+   */
+  onDecisions: (decisions: Partial<Record<FieldName, AgentDecision>>) => void;
 }) {
   const dialog = useRef<HTMLDivElement | null>(null);
   const heading = useRef<HTMLHeadingElement | null>(null);
-  const [expanded, setExpanded] = useState<FieldName | null>(null);
+  /**
+   * Rows that need a human start OPEN, exactly as they do on Verify Now.
+   *
+   * This was one-at-a-time and closed, which put both decision buttons a click behind
+   * "Why this verdict" on every row of every application. Across a queue of three hundred
+   * that is a click per row before any judgement happens, and it made the drill-in read
+   * as a summary you drill further into rather than as the checklist it is. Settled rows
+   * stay shut: they are on screen to be countable, not to be read.
+   */
+  const [expanded, setExpanded] = useState<ReadonlySet<FieldName>>(
+    () => new Set(attentionFields(item.result?.fields ?? []).map((row) => row.field)),
+  );
   const [activeField, setActiveField] = useState<FieldName | null>(null);
   const [imageIndex, setImageIndex] = useState(0);
+  /**
+   * Pictures whose bytes did not arrive. `urlFor` always returns a string, so without
+   * this an item image the server cannot serve renders as the browser's broken-image icon
+   * beside a complete checklist — which reads as a rendering glitch rather than as
+   * "the evidence for these verdicts is not here".
+   */
+  const [unavailable, setUnavailable] = useState<ReadonlySet<number>>(new Set());
 
   /**
-   * Three pieces of state, because "what the server holds" and "what the agent just
-   * clicked" are different facts and the screen has to be able to tell them apart.
+   * "What the server holds" and "what the agent just clicked" are different facts, and
+   * the screen has to be able to tell them apart.
    *
-   *   saved    the last answer the server gave for this item. Seeded from the polled
-   *            item and thereafter replaced only by a PATCH response — never re-seeded
-   *            from props. A poll that left the browser BEFORE a write can land AFTER
-   *            it, and re-seeding would make the button flip back to a value the server
-   *            no longer holds.
-   *   pending  the optimistic value for a row whose write is in flight, so pressing a
-   *            button feels immediate on a queue being worked at speed.
-   *   problem  the row whose write failed. Clearing `pending` on failure drops the
-   *            display back to `saved`, which is the truth, and this says why.
+   *   item.decisions  the server's answer, owned by the batch screen. It is NOT copied
+   *                   into state here: a local copy is exactly how a decision made after
+   *                   the job finished got stranded in a closed dialog. The parent keeps
+   *                   every PATCH response, so it survives a close, a reopen, and a poll
+   *                   that had already left before the write.
+   *   pending         the optimistic value for a row whose write is in flight, so
+   *                   pressing a button feels immediate on a queue worked at speed.
+   *   problem         the row whose write failed. Clearing `pending` on failure drops the
+   *                   display back to the server's value, which is the truth, and this
+   *                   says why.
    */
-  const [saved, setSaved] = useState<Partial<Record<FieldName, AgentDecision>>>(
-    () => item.decisions ?? {},
-  );
   const [pending, setPending] = useState<Partial<Record<FieldName, AgentDecision | null>>>({});
   const [problem, setProblem] = useState<Partial<Record<FieldName, string>>>({});
 
@@ -88,7 +119,7 @@ export default function ItemDetail({
   const writes = useRef<Partial<Record<FieldName, number>>>({});
 
   const decisionFor = (field: FieldName): AgentDecision | null =>
-    field in pending ? (pending[field] ?? null) : (saved[field] ?? null);
+    field in pending ? (pending[field] ?? null) : (item.decisions?.[field] ?? null);
 
   const decide = useCallback(
     (field: FieldName, next: AgentDecision | null) => {
@@ -120,7 +151,7 @@ export default function ItemDetail({
       // would discard the very thing they clicked for. The response lands on an unmounted
       // component, which React treats as a no-op, and the next poll carries the truth.
       void setItemDecision(item.job_id, item.item_id, field, next)
-        .then((updated) => settle(() => setSaved(updated.decisions)))
+        .then((updated) => settle(() => onDecisions(updated.decisions)))
         .catch((error: unknown) =>
           settle(() =>
             setProblem((current) => ({
@@ -133,7 +164,7 @@ export default function ItemDetail({
           ),
         );
     },
-    [item.item_id, item.job_id],
+    [item.item_id, item.job_id, onDecisions],
   );
 
   useEffect(() => {
@@ -201,11 +232,44 @@ export default function ItemDetail({
   const reportFor = (index: number) => result?.images.find((image) => image.index === index);
   const urlFor = (index: number): string =>
     reportFor(index)?.url ?? batchItemImageUrl(item.job_id, item.item_id, index);
-  const geometryIsApproximate = !result?.images.some((image) => Boolean(image.url));
+
+  /**
+   * Per picture, not per item.
+   *
+   * This asked whether ANY image carried a server URL, which on a two-sided label where
+   * the server named the front and not the back declared both exact — and then drew the
+   * back's outlines over the un-deskewed original with no warning at all. The question is
+   * only ever about the picture currently on screen.
+   */
+  const geometryIsApproximate = !reportFor(imageIndex)?.url;
 
   const labelFor = (index: number): string => {
     const role = reportFor(index)?.role;
     return role ? `Label picture — ${role}` : `Label picture ${index + 1}`;
+  };
+
+  /**
+   * Highlight a row's region, switching pictures if it lives on the other one.
+   *
+   * `FieldRow` prints "Outlined as 2 on the picture" for any row that has a bbox, but the
+   * overlay only draws regions belonging to the picture on screen. On a front/back pair
+   * that sentence could name an outline the agent was looking straight past, with nothing
+   * to say it was on the other face. Following the region is the only reading of that
+   * sentence that is true.
+   */
+  const toggle = (field: FieldName) => {
+    setExpanded((current) => {
+      const next = new Set(current);
+      if (next.has(field)) next.delete(field);
+      else next.add(field);
+      return next;
+    });
+  };
+
+  const activate = (field: FieldName | null) => {
+    setActiveField(field);
+    const region = regionFor(regions, field);
+    if (region) setImageIndex(region.imageIndex);
   };
 
   const activeImage = reportFor(imageIndex);
@@ -235,53 +299,62 @@ export default function ItemDetail({
         </div>
 
         {result ? (
-          <>
-            <AggregateBanner
-              aggregate={result.aggregate}
-              fields={result.fields}
-            />
+          <AggregateBanner aggregate={result.aggregate} fields={result.fields} />
+        ) : null}
 
-            {/* The picture beside the checklist, exactly as Verify Now arranges them.
-                When the item has no picture at all the column is dropped rather than
-                filled with an apology — the grid collapses and the checklist takes the
-                whole width, which is what the dialog did before the panel existed. */}
-            <div className="drawer__columns" data-evidence={pictureCount > 0 ? 'true' : 'false'}>
-              {pictureCount > 0 ? (
-                <div className="drawer__evidence">
-                  <EvidenceOverlay
-                    imageUrl={urlFor(imageIndex)}
-                    imageIndex={imageIndex}
-                    imageLabel={labelFor(imageIndex)}
-                    regions={regions}
-                    activeField={activeField}
-                    onActivateField={setActiveField}
-                    geometryIsApproximate={geometryIsApproximate}
-                    qualityNote={qualityNote}
+        {/* The picture beside the checklist, exactly as Verify Now arranges them. When the
+            item has no picture at all the column is dropped rather than filled with an
+            apology — the grid collapses and the remaining column takes the whole width,
+            which is what the dialog did before the panel existed.
+
+            **A failed item gets its picture too, with nothing drawn on it.** It used to
+            get a paragraph telling the agent to go and check this one on the Verify now
+            screen — that is, to re-upload a file the server is already holding, to look at
+            a label it could have shown them here. There are no verdicts to cite and so no
+            outlines; the picture is just the label, which is the one thing an agent whose
+            check did not run still wants. */}
+        <div className="drawer__columns" data-evidence={pictureCount > 0 ? 'true' : 'false'}>
+          {pictureCount > 0 ? (
+            <div className="drawer__evidence">
+              <EvidenceOverlay
+                imageUrl={unavailable.has(imageIndex) ? null : urlFor(imageIndex)}
+                imageIndex={imageIndex}
+                imageLabel={labelFor(imageIndex)}
+                regions={regions}
+                activeField={activeField}
+                onActivateField={activate}
+                geometryIsApproximate={geometryIsApproximate}
+                qualityNote={qualityNote}
+                onImageError={() =>
+                  setUnavailable((current) => new Set(current).add(imageIndex))
+                }
+              >
+                {pictureCount > 1 ? (
+                  <div
+                    className="evidence__switch"
+                    role="group"
+                    aria-label="Which picture to show"
                   >
-                    {pictureCount > 1 ? (
-                      <div
-                        className="evidence__switch"
-                        role="group"
-                        aria-label="Which picture to show"
+                    {Array.from({ length: pictureCount }, (_, index) => (
+                      <button
+                        type="button"
+                        key={index}
+                        className="btn btn--quiet"
+                        aria-pressed={index === imageIndex}
+                        onClick={() => setImageIndex(index)}
                       >
-                        {Array.from({ length: pictureCount }, (_, index) => (
-                          <button
-                            type="button"
-                            key={index}
-                            className="btn btn--quiet"
-                            aria-pressed={index === imageIndex}
-                            onClick={() => setImageIndex(index)}
-                          >
-                            {reportFor(index)?.role ?? `Picture ${index + 1}`}
-                          </button>
-                        ))}
-                      </div>
-                    ) : null}
-                  </EvidenceOverlay>
-                </div>
-              ) : null}
+                        {reportFor(index)?.role ?? `Picture ${index + 1}`}
+                      </button>
+                    ))}
+                  </div>
+                ) : null}
+              </EvidenceOverlay>
+            </div>
+          ) : null}
 
-              <div className="drawer__checklist">
+          <div className="drawer__checklist">
+            {result ? (
+              <>
                 {/* A TABLE, not a list.
 
                     `FieldRow` renders `<tr>` elements — it is written for the checklist in
@@ -306,18 +379,20 @@ export default function ItemDetail({
                   </thead>
 
                   <tbody className="checklist__group" data-group="attention">
-                    {attentionFields(result.fields).map((field, index) => (
+                    {attentionFields(result.fields).map((field) => (
                       <FieldRow
                         key={field.field}
                         result={field}
                         commodity={commodity}
                         variant="attention"
-                        number={index + 1}
-                        expanded={expanded === field.field}
-                        onToggle={() =>
-                          setExpanded((current) => (current === field.field ? null : field.field))
-                        }
-                        onActivate={(on) => setActiveField(on ? field.field : null)}
+                        // From the regions, NEVER from the position in this list. The
+                        // builder skips rows with no bbox, so a `missing` warning — which
+                        // sorts first — used to shift every following number by one and
+                        // point "outlined as 2" at region 1.
+                        number={numberFor(regions, field.field)}
+                        expanded={expanded.has(field.field)}
+                        onToggle={() => toggle(field.field)}
+                        onActivate={(on) => activate(on ? field.field : null)}
                         decision={decisionFor(field.field)}
                         onDecide={(decision) => decide(field.field, decision)}
                         decisionProblem={problem[field.field] ?? null}
@@ -334,11 +409,9 @@ export default function ItemDetail({
                         commodity={commodity}
                         variant="settled"
                         number={null}
-                        expanded={expanded === field.field}
-                        onToggle={() =>
-                          setExpanded((current) => (current === field.field ? null : field.field))
-                        }
-                        onActivate={(on) => setActiveField(on ? field.field : null)}
+                        expanded={expanded.has(field.field)}
+                        onToggle={() => toggle(field.field)}
+                        onActivate={(on) => activate(on ? field.field : null)}
                         decision={decisionFor(field.field)}
                         onDecide={(decision) => decide(field.field, decision)}
                         decisionProblem={problem[field.field] ?? null}
@@ -347,25 +420,27 @@ export default function ItemDetail({
                     ))}
                   </tbody>
                 </table>
+              </>
+            ) : (
+              <div className="drawer__failure">
+                <h3>This application was not checked</h3>
+                <p>
+                  {item.failure?.message ??
+                    'The check did not finish, so nothing about this label has been verified.'}
+                </p>
+                <p className="muted">
+                  Nothing here is a finding against the label — no part of it was read.
+                  {pictureCount > 0
+                    ? ' The label itself is beside this note if you want to look at it. Retry the batch to check it properly.'
+                    : ' Retry the batch to check it properly.'}
+                </p>
+                {item.attempts > 1 ? (
+                  <p className="muted">Tried {item.attempts} times.</p>
+                ) : null}
               </div>
-            </div>
-          </>
-        ) : (
-          <div className="drawer__failure">
-            <h3>This application was not checked</h3>
-            <p>
-              {item.failure?.message ??
-                'The check did not finish, so nothing about this label has been verified.'}
-            </p>
-            <p className="muted">
-              Nothing here is a finding against the label. Retry the batch, or check this
-              one on the Verify now screen.
-            </p>
-            {item.attempts > 1 ? (
-              <p className="muted">Tried {item.attempts} times.</p>
-            ) : null}
+            )}
           </div>
-        )}
+        </div>
       </div>
     </div>
   );

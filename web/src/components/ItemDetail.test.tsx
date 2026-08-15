@@ -12,8 +12,9 @@
  *     into a result that is not there. That path is the one an agent hits on a bad day.
  */
 
+import { useState } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { render, screen, waitFor, within } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 
 import ItemDetail from './ItemDetail';
@@ -92,15 +93,39 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-/** Open the reasoning panel for a row, where the two decision buttons live. */
-async function openRow(user: ReturnType<typeof userEvent.setup>, testId: string) {
-  const row = screen.getByTestId(testId);
-  await user.click(within(row).getByRole('button', { name: /why this verdict/i }));
+/**
+ * Make sure a row's reasoning panel — where the decision buttons live — is open.
+ *
+ * Attention rows open themselves, so this clicks only when one is shut. Clicking
+ * unconditionally is what these tests used to do, and once the rows started opening by
+ * default that click was closing them again.
+ */
+async function revealRow(user: ReturnType<typeof userEvent.setup>, testId: string) {
+  const toggle = within(screen.getByTestId(testId)).getByRole('button', {
+    name: /why this verdict|hide the reason/i,
+  });
+  if (toggle.getAttribute('aria-expanded') !== 'true') await user.click(toggle);
+}
+
+/**
+ * The dialog as the batch screen actually mounts it: the parent owns `decisions` and
+ * feeds each PATCH answer back down. Rendering it uncontrolled would let a decision look
+ * like it stuck when nothing was holding it — which is the bug these tests exist for.
+ */
+function Harness({ item: initial }: { item: BatchItem }) {
+  const [decisions, setDecisions] = useState(initial.decisions);
+  return (
+    <ItemDetail
+      item={{ ...initial, decisions }}
+      onClose={() => undefined}
+      onDecisions={setDecisions}
+    />
+  );
 }
 
 describe('the label picture', () => {
   it('shows the item image, fetched by job and item rather than by filename', () => {
-    render(<ItemDetail item={item()} onClose={() => undefined} />);
+    render(<ItemDetail item={item()} onClose={() => undefined} onDecisions={() => undefined} />);
 
     const picture = screen.getByRole('img', { name: /label picture/i });
     // The endpoint, not the manifest's filename. A filename is not addressable — two rows
@@ -109,7 +134,7 @@ describe('the label picture', () => {
   });
 
   it('outlines the row that needs attention, and numbers it', () => {
-    render(<ItemDetail item={item()} onClose={() => undefined} />);
+    render(<ItemDetail item={item()} onClose={() => undefined} onDecisions={() => undefined} />);
 
     // The mismatch is outlined and carries number 1. Two controls answer to that name by
     // design — the marker on the picture and its entry in the legend below it — and both
@@ -124,7 +149,7 @@ describe('the label picture', () => {
 
   it('offers a picture switcher only when there is more than one picture', async () => {
     const user = userEvent.setup();
-    const { unmount } = render(<ItemDetail item={item()} onClose={() => undefined} />);
+    const { unmount } = render(<ItemDetail item={item()} onClose={() => undefined} onDecisions={() => undefined} />);
     expect(screen.queryByRole('group', { name: /which picture/i })).not.toBeInTheDocument();
     unmount();
 
@@ -135,6 +160,7 @@ describe('the label picture', () => {
           result: result([imageReport(0, 'front'), imageReport(1, 'back')]),
         })}
         onClose={() => undefined}
+        onDecisions={() => undefined}
       />,
     );
 
@@ -147,24 +173,144 @@ describe('the label picture', () => {
     );
   });
 
-  it('draws on the server copy when it names one, and says so when it does not', () => {
+  it('says the geometry is approximate when it falls back to the submitted picture', () => {
     // The boxes are measured against the preprocessed image. Claiming pixel accuracy over
     // the picture as submitted would be a false trust signal, so the panel admits it.
-    render(<ItemDetail item={item()} onClose={() => undefined} />);
+    render(<ItemDetail item={item()} onClose={() => undefined} onDecisions={() => undefined} />);
     expect(screen.getByText(/can sit a little off/i)).toBeInTheDocument();
+  });
+
+  it('draws on the server copy when it names one, and drops the disclosure', () => {
+    // The other half of the branch above, which went untested: when the server names the
+    // preprocessed image the outlines DO land exactly, and repeating the apology anyway
+    // would train agents to ignore it on the labels where it is true.
+    const withUrl = imageReport(0, 'front');
+    withUrl.url = '/preprocessed/front.webp';
+    render(
+      <ItemDetail
+        item={item({ result: result([withUrl]) })}
+        onClose={() => undefined}
+        onDecisions={() => undefined}
+      />,
+    );
+
+    expect(screen.getByRole('img', { name: /label picture/i })).toHaveAttribute(
+      'src',
+      '/preprocessed/front.webp',
+    );
+    expect(screen.queryByText(/can sit a little off/i)).not.toBeInTheDocument();
+  });
+
+  it('judges each picture on its own, not the item as a whole', async () => {
+    // A server that named the front and not the back used to mark BOTH exact, then draw
+    // the back's outlines over the un-deskewed original without a word.
+    const front = imageReport(0, 'front');
+    front.url = '/preprocessed/front.webp';
+    // One outlined row per picture, so the disclosure is reachable on both — it only
+    // shows where there is a region for it to be about.
+    const fields = [
+      fieldResult('brand_name', 'mismatch'),
+      fieldResult('government_warning', 'mismatch', {
+        evidence: { image_index: 1, bbox: { x0: 0.1, y0: 0.7, x1: 0.9, y1: 0.9 } },
+      }),
+    ];
+    const user = userEvent.setup();
+    render(
+      <ItemDetail
+        item={item({
+          images: ['front.png', 'back.png'],
+          result: { ...result([front, imageReport(1, 'back')]), fields },
+        })}
+        onClose={() => undefined}
+        onDecisions={() => undefined}
+      />,
+    );
+
+    expect(screen.queryByText(/can sit a little off/i)).not.toBeInTheDocument();
+    await user.click(
+      within(screen.getByRole('group', { name: /which picture/i })).getByRole('button', {
+        name: 'back',
+      }),
+    );
+    expect(screen.getByText(/can sit a little off/i)).toBeInTheDocument();
+  });
+
+  it('numbers a row from its region, not from its place in the checklist', () => {
+    // A `missing` warning sorts FIRST and carries no bbox, so it produces no region. The
+    // drill-in used to number rows by position, which made the row below it say "outlined
+    // as 2" while its outline was the only one drawn and numbered 1.
+    const fields = [
+      fieldResult('government_warning', 'missing', { evidence: null }),
+      fieldResult('brand_name', 'mismatch'),
+    ];
+    render(
+      <ItemDetail
+        item={item({ result: { ...result(), fields } })}
+        onClose={() => undefined}
+        onDecisions={() => undefined}
+      />,
+    );
+
+    // One region exists and it is numbered 1. The brand-name row must claim that number.
+    expect(screen.getByTestId('region-brand_name')).toBeInTheDocument();
+    const brandRow = within(screen.getByTestId('row-brand_name'));
+    expect(brandRow.getByText(/outlined as 1 on the picture/i)).toBeInTheDocument();
+    // And the row with no evidence claims no outline at all.
+    expect(
+      within(screen.getByTestId('row-government_warning')).queryByText(/outlined as/i),
+    ).not.toBeInTheDocument();
+  });
+
+  it('follows a region to the picture it is actually on', async () => {
+    // "Outlined as 1 on the picture" is a lie on a two-sided label if the outline is on
+    // the face the agent is not looking at and nothing says so.
+    const fields = [
+      fieldResult('government_warning', 'mismatch', {
+        evidence: { image_index: 1, bbox: { x0: 0.1, y0: 0.7, x1: 0.9, y1: 0.9 } },
+      }),
+    ];
+    const user = userEvent.setup();
+    render(
+      <ItemDetail
+        item={item({
+          images: ['front.png', 'back.png'],
+          result: {
+            ...result([imageReport(0, 'front'), imageReport(1, 'back')]),
+            fields,
+          },
+        })}
+        onClose={() => undefined}
+        onDecisions={() => undefined}
+      />,
+    );
+
+    // Starts on the front, where the region is not drawn.
+    expect(screen.queryByTestId('region-government_warning')).not.toBeInTheDocument();
+
+    await user.hover(screen.getByTestId('row-government_warning'));
+
+    expect(screen.getByRole('img', { name: /back/i })).toBeInTheDocument();
+    expect(screen.getByTestId('region-government_warning')).toBeInTheDocument();
+  });
+
+  it('says the picture is missing rather than drawing a broken image', () => {
+    render(<ItemDetail item={item()} onClose={() => undefined} onDecisions={() => undefined} />);
+
+    fireEvent.error(screen.getByRole('img', { name: /label picture/i }));
+
+    // The checklist is unaffected and says so — the verdicts are still readable, it is
+    // only their citation that is missing.
+    expect(screen.getByText(/not available to display/i)).toBeInTheDocument();
+    expect(screen.queryByRole('img')).not.toBeInTheDocument();
+    expect(screen.getByTestId('row-government_warning')).toBeInTheDocument();
   });
 });
 
 describe('decisions outlive the dialog', () => {
   it('shows the rulings the server already holds, rather than starting blank', async () => {
     const user = userEvent.setup();
-    render(
-      <ItemDetail
-        item={item({ decisions: { government_warning: 'overridden' } })}
-        onClose={() => undefined}
-      />,
-    );
-    await openRow(user, 'row-government_warning');
+    render(<Harness item={item({ decisions: { government_warning: 'overridden' } })} />);
+    await revealRow(user, 'row-government_warning');
 
     expect(screen.getByRole('button', { name: 'I disagree' })).toHaveAttribute(
       'aria-pressed',
@@ -183,8 +329,8 @@ describe('decisions outlive the dialog', () => {
     vi.stubGlobal('fetch', fetchMock);
 
     const user = userEvent.setup();
-    render(<ItemDetail item={item()} onClose={() => undefined} />);
-    await openRow(user, 'row-government_warning');
+    render(<Harness item={item()} />);
+    await revealRow(user, 'row-government_warning');
     await user.click(screen.getByRole('button', { name: 'I agree' }));
 
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
@@ -208,13 +354,8 @@ describe('decisions outlive the dialog', () => {
     vi.stubGlobal('fetch', fetchMock);
 
     const user = userEvent.setup();
-    render(
-      <ItemDetail
-        item={item({ decisions: { government_warning: 'confirmed' } })}
-        onClose={() => undefined}
-      />,
-    );
-    await openRow(user, 'row-government_warning');
+    render(<Harness item={item({ decisions: { government_warning: 'confirmed' } })} />);
+    await revealRow(user, 'row-government_warning');
     await user.click(screen.getByRole('button', { name: 'I agree' }));
 
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
@@ -237,8 +378,8 @@ describe('decisions outlive the dialog', () => {
     );
 
     const user = userEvent.setup();
-    render(<ItemDetail item={item()} onClose={() => undefined} />);
-    await openRow(user, 'row-government_warning');
+    render(<Harness item={item()} />);
+    await revealRow(user, 'row-government_warning');
 
     const agree = screen.getByRole('button', { name: 'I agree' });
     await user.click(agree);
@@ -273,8 +414,8 @@ describe('decisions outlive the dialog', () => {
     );
 
     const user = userEvent.setup();
-    render(<ItemDetail item={item()} onClose={() => undefined} />);
-    await openRow(user, 'row-government_warning');
+    render(<Harness item={item()} />);
+    await revealRow(user, 'row-government_warning');
     await user.click(screen.getByRole('button', { name: 'I agree' }));
     await user.click(screen.getByRole('button', { name: 'I disagree' }));
 
@@ -312,6 +453,7 @@ describe('an item that could not be checked', () => {
           },
         })}
         onClose={() => undefined}
+        onDecisions={() => undefined}
       />,
     );
 

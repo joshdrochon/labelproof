@@ -158,14 +158,14 @@ describe('axe, over each screen', () => {
 
   it('finds nothing on the batch drill-in dialog', async () => {
     const { container } = render(
-      <ItemDetail item={drillInItem(0)} onClose={() => undefined} />,
+      <ItemDetail item={drillInItem(0)} onClose={() => undefined} onDecisions={() => undefined} />,
     );
     expectClean(await auditOf(container));
   });
 
   it('finds nothing on the drill-in with the label picture and its switcher', async () => {
     const { container } = render(
-      <ItemDetail item={drillInItem(2)} onClose={() => undefined} />,
+      <ItemDetail item={drillInItem(2)} onClose={() => undefined} onDecisions={() => undefined} />,
     );
     expectClean(await auditOf(container));
   });
