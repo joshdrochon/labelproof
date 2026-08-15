@@ -36,19 +36,25 @@ from api.provider.base import (
 )
 from api.rules import adjudicate as adjudicate_mod
 from fixtures.generator.catalog import by_name
+from fixtures.generator.layout import FIELD_BANDS
 from fixtures.generator.spec import LabelSpec
 
-#: Where each field sits on a rendered label, roughly. Evidence boxes only ever point an
-#: agent's eye at a region, so approximate is correct here — see the note below.
-_APPROX_REGIONS: dict[FieldName, BoundingBox] = {
-    FieldName.BRAND_NAME: BoundingBox(x0=0.08, y0=0.06, x1=0.92, y1=0.18),
-    FieldName.CLASS_TYPE: BoundingBox(x0=0.08, y0=0.20, x1=0.92, y1=0.28),
-    FieldName.ALCOHOL_CONTENT: BoundingBox(x0=0.08, y0=0.32, x1=0.92, y1=0.38),
-    FieldName.NET_CONTENTS: BoundingBox(x0=0.08, y0=0.38, x1=0.92, y1=0.44),
-    FieldName.COUNTRY_OF_ORIGIN: BoundingBox(x0=0.08, y0=0.44, x1=0.92, y1=0.50),
-    FieldName.PRODUCER: BoundingBox(x0=0.08, y0=0.54, x1=0.92, y1=0.62),
-    FieldName.GOVERNMENT_WARNING: BoundingBox(x0=0.08, y0=0.66, x1=0.92, y1=0.88),
-}
+#: Where each field actually sits on a generated label.
+#:
+#: Taken from `fixtures.generator.layout.FIELD_BANDS`, which is measured from the rendered
+#: pixels and guarded by `test_robustness` — move a block in `render.py` and that suite
+#: fails rather than silently drifting.
+#:
+#: This used to be a second, hand-guessed table living here. It disagreed with the
+#: measured one about every field, and about the warning by twenty percent of the image
+#: height: it put the statement at 0.66–0.88, which is inside `layout.BLANK_BAND`, the
+#: region defined as "a band with nothing printed in it". So every sample on the demo drew
+#: the government warning's outline on blank paper — the first thing a reviewer clicks,
+#: pointing at nothing, under a caption promising "outlined areas are where each checked
+#: value was read".
+#:
+#: Two tables describing one layout, and only one of them was measured.
+_APPROX_REGIONS: dict[FieldName, BoundingBox] = dict(FIELD_BANDS)
 
 
 def _unless_unread(unread: frozenset[str], name: str, value: bool) -> bool | None:

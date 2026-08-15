@@ -187,14 +187,14 @@ runs after it. That means it is a veto on the model's answer, not a way to avoid
 
 Two things to settle before applying it:
 
-* **Fix `api/provider/fake.py` first.** It places the government warning at y 0.66-0.88,
-  while the renderer puts it at 0.450-0.540 and everything below 0.62 is bare stock.
-  Feeding those boxes to `assess_region` lands on blank label, which scores `blank`, which
-  reads as legible — a false pass waiting for this wiring. The bands should come from
-  `fixtures/generator/layout.py` rather than being restated. This wave does not own
-  `api/provider/**`, so the mismatch is pinned instead by
-  `tests/test_quality.py::test_the_fake_providers_evidence_bands_do_not_match_the_renderer`,
-  which goes red once it is fixed. Any other provider supplying boxes needs the same check.
+* `api/provider/fake.py` is **done**. It restated the field bands by hand and disagreed
+  with the renderer about every one, placing the government warning at y 0.66-0.88 where
+  the renderer puts it at 0.450-0.540 - inside `layout.BLANK_BAND`, the region defined as
+  having nothing printed in it. Feeding that to `assess_region` would have scored `blank`
+  and read as legible, a false pass waiting for this wiring; it also drew the demo's own
+  evidence outline on bare paper. It now takes `fixtures/generator/layout.FIELD_BANDS`
+  directly, and `tests/test_sample_regions.py` asserts every box lands on print and none
+  overlaps the blank band. Any other provider supplying boxes needs the same check.
 * Forcing a verdict after aggregation means the aggregate must be recomputed, or the
   recommendation can disagree with the rows it is derived from.
 ```
