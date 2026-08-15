@@ -2465,6 +2465,52 @@ def test_export_carries_the_findings_not_only_the_verdicts(tmp_path: Path) -> No
     assert "net_contents" in rows_out[0]["findings"]
 
 
+def test_the_export_carries_the_agent_decisions_beside_the_findings(
+    tmp_path: Path,
+) -> None:
+    """HITL-5 names two things in one report: findings AND agent decisions.
+
+    Until the decisions column existed the export could only ever carry half of what the
+    requirement asks for — the tool's half. This is the case file Dave prints, and a report
+    that shows what the tool said with no record of what the agent did about it is the
+    half that leaves the human out.
+    """
+    client = make_client(tmp_path, provider=spec_provider())
+    job_id = post_batch(client, [row()]).json()["job_id"]
+    drain(client)
+    item_id = one_item(client, job_id)["item_id"]
+    decide(
+        client,
+        job_id,
+        item_id,
+        {"alcohol_content": "overridden", "brand_name": "confirmed"},
+    )
+
+    rows_out = list(csv.DictReader(io.StringIO(client.get(f"/batch/{job_id}/export.csv").text)))
+    assert rows_out[0]["agent_decisions"] == "brand_name=confirmed | alcohol_content=overridden"
+
+
+def test_a_row_nobody_has_ruled_on_exports_an_empty_cell(tmp_path: Path) -> None:
+    """Blank, not "pending" or "none". A word there reads as a judgement about the label."""
+    client = make_client(tmp_path, provider=spec_provider())
+    job_id = post_batch(client, [row()]).json()["job_id"]
+    drain(client)
+
+    rows_out = list(csv.DictReader(io.StringIO(client.get(f"/batch/{job_id}/export.csv").text)))
+    assert rows_out[0]["agent_decisions"] == ""
+
+
+def test_the_decisions_column_sits_second_to_last(tmp_path: Path) -> None:
+    """Next to `rationale`, because what the tool said and what the agent did are read
+    together. After `images` is where a printed page has stopped being read."""
+    client = make_client(tmp_path, provider=spec_provider())
+    job_id = post_batch(client, [row()]).json()["job_id"]
+    drain(client)
+
+    header = client.get(f"/batch/{job_id}/export.csv").text.splitlines()[0].split(",")
+    assert header[-2:] == ["agent_decisions", "images"]
+
+
 def test_a_failed_item_exports_its_reason(tmp_path: Path) -> None:
     client = make_client(tmp_path, provider=FailingProvider(retryable=False))
     job_id = post_batch(client, [row()]).json()["job_id"]
@@ -2751,6 +2797,31 @@ def test_the_export_route_applies_the_guard() -> None:
     body = client.get(f"/batch/{job_id}/export.csv").text
     assert "=cmd" in body, "the value should still be readable, just not executable"
     assert ",=cmd" not in body and body.count("'=cmd") == 1, body[:400]
+
+
+def test_the_new_decisions_column_goes_through_the_guard_like_every_other_cell() -> None:
+    """A column added after the sanitiser is a column the sanitiser does not cover.
+
+    The risk is not a hostile decision — there are two of those and both are enum values.
+    It is the shape of the change: someone appends a cell to the row, or writes it into the
+    file directly, on the far side of the `_csv_safe` map. The text is forced here so the
+    guard has something to act on, and the assertion is that the route still put an
+    apostrophe in front of it.
+    """
+    config = Config(use_fake_provider=True)
+    app = create_app(config=config, provider=SpecBackedProvider("tc01_old_tom_clean"))
+    client = TestClient(app)
+    job_id = client.post("/batch/sample").json()["job_id"]
+    drain(client)
+
+    with mock.patch.object(
+        batch_routes, "_decisions_text", return_value="=cmd|'/c calc'!A0"
+    ):
+        body = client.get(f"/batch/{job_id}/export.csv").text
+
+    assert "=cmd" in body, "the value should still be readable, just not executable"
+    assert ",=cmd" not in body, "a spreadsheet would execute this cell on open"
+    assert body.count("'=cmd") == 5, "every row's decisions cell, not only the first"
 
 
 # --- cold-start wiring (LP-334) -------------------------------------------------------

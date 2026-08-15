@@ -1210,6 +1210,11 @@ _EXPORT_HEADER: tuple[str, ...] = (
     *(f"verdict_{field.value}" for field in EXPORT_FIELDS),
     "findings",
     "rationale",
+    # HITL-5 asks for findings AND agent decisions in the same report. Second to last, next
+    # to `rationale`, because the two are read together: what the tool said, and what the
+    # agent did about it. Appending it after `images` would put the human half of the record
+    # after the file names, which is where a printed page stops being read.
+    "agent_decisions",
     "images",
 )
 
@@ -1253,6 +1258,24 @@ def _findings_text(item: BatchItem) -> str:
     return " | ".join(parts)
 
 
+def _decisions_text(item: BatchItem) -> str:
+    """The agent's rulings, in the same shape as the `findings` cell beside it (HITL-5).
+
+    One cell rather than seven more columns. The export already carries a `verdict_*` column
+    per field and adding a `decision_*` beside each would double the width of a sheet that
+    is printed, for a map that is empty on most rows.
+
+    Fields with no ruling are left out rather than written as blank pairs, so a reader can
+    see at a glance which rows a human has been through — and `EXPORT_FIELDS` orders what is
+    there, so the same two decisions read the same way in every export.
+    """
+    return " | ".join(
+        f"{field.value}={item.decisions[field].value}"
+        for field in EXPORT_FIELDS
+        if field in item.decisions
+    )
+
+
 def _export_row(item: BatchItem) -> list[str]:
     verdicts: dict[FieldName, str] = {}
     if item.result:
@@ -1282,6 +1305,7 @@ def _export_row(item: BatchItem) -> list[str]:
         *(verdicts.get(field, "") for field in EXPORT_FIELDS),
         _findings_text(item),
         rationale,
+        _decisions_text(item),
         " ".join(item.images),
     ]
 
