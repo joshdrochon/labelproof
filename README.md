@@ -14,7 +14,7 @@ recommendation. **It recommends — the agent decides.**
 | **Start here (reviewers)** | [`docs/evaluation.md`](docs/evaluation.md) — the brief's criteria, each with something to open |
 | **PRD audit** | [`docs/prd-audit.md`](docs/prd-audit.md) — both PRD checklists, line by line — MVP 14/15, Final 7/11 |
 | **Accuracy** | [`docs/accuracy.md`](docs/accuracy.md) — Tier A 100% on 175 rows, Tier B 71.4% on 21, confusion matrices, every miss explained |
-| **Cost** | [`docs/cost.md`](docs/cost.md) — $0.031 a verification, $0.018 in batch, measured |
+| **Cost** | [`docs/cost.md`](docs/cost.md) — $0.053 a verification, $0.022 a label in batch, measured on the shipped `split` configuration |
 | **Latency** | [`docs/perf-deployed.md`](docs/perf-deployed.md) — 20 timed runs on the deployed URL |
 | **Robustness** | [`docs/robustness.md`](docs/robustness.md) — angle, blur, glare, occlusion |
 | **Live** | <https://labelproof.fly.dev> |
@@ -285,11 +285,25 @@ only the failed items and leaves the finished ones alone.
 the driving field, the findings and the rationale — the file that goes in the case file
 and gets printed. Cells that a spreadsheet would execute are neutralised.
 
-Measured on the deployed URL: **22 applications in 42 seconds, 0 failures, $0.0179 per
-label** — cheaper than a single verification because the prompt cache is read on every
-item after the first. A 300-item run has not been performed; the extrapolation is roughly
-9.5 minutes against a 10-minute goal, and an extrapolation is exactly what cannot see rate
-limiting at that scale.
+**Measured on the deployed URL, at the size the brief asks for: 300 applications in
+291.9 seconds — 4.9 minutes — with 0 failures, 0 items rate-limited, and $6.59 of model
+spend, $0.0220 a label.** The first result was visible **8.3 seconds** after submit. Both
+PRD numbers are met: PERF-4's ten minutes and BATCH-2's ten seconds to something on the
+screen. Six malformed rows were sent alongside the 300 and came back reported by row
+number and column while all 300 good ones were queued anyway (TC-20). The whole run,
+including the polling trace, is in [`docs/batch-300.md`](docs/batch-300.md), and
+`scripts/batch_300.py` will do it again.
+
+**And Verify Now kept its lane.** Five real single verifications were fired during that
+batch, one every 45 seconds with 6 workers and 300 items in flight: 5,477–6,352 ms,
+median **5,854 ms**, against **5,574 ms** on the same service with nothing running. About
+**280 ms**, which is the priority-lane promise in BATCH-9 and PERF-5 measured rather than
+asserted — before this it was only checked in tests, against a stub budget.
+
+Two honest qualifications. The 300 applications carried **one image each**, where the
+22-item run carried two; that halves the artwork per label and is why the wall clock
+should not be compared with the older run's directly. And no rate limiting appeared **at
+six workers on this account** — that is a fact about this run, not a ceiling.
 
 ---
 
@@ -391,10 +405,14 @@ here.
   The truth is **Unreadable**, a statement about the photograph. Fixing it needs a signal
   the pipeline does not compute yet: whether the label runs past the frame boundary. Four
   of the nine Tier B misses are this one bug. See [`docs/accuracy.md`](docs/accuracy.md).
-- **The 300-item batch has not been run.** A real 22-application batch completed on the
-  deployed URL in 42s with no failures, which extrapolates to roughly 9.5 minutes for 300
-  against a 10-minute goal. Extrapolation is not measurement, and rate limiting at that
-  scale is exactly what an extrapolation cannot see.
+- ~~**The 300-item batch has not been run.**~~ **It has now.** 300 applications on the
+  deployed URL in 291.9s, 0 failures, no rate limiting, $6.59
+  ([`docs/batch-300.md`](docs/batch-300.md)). The extrapolation this bullet used to carry
+  said 9.5 minutes; the measurement says 4.9, and the reason it was pessimistic is that
+  the 22-item run it scaled from sent two images per application where this one sent one.
+  What remains unproven is the shape above it: nothing has been run at 300 with two images
+  each, and nothing has been run at a concurrency high enough to find the provider's
+  ceiling — six workers did not touch it.
 - **Tier B is six photographs, three of them scored.** They earned their place — each
   found a real defect the synthetic fixtures could not — but six is a sample, not a
   corpus, none of the ground truth is hand-transcribed, and every image-quality threshold

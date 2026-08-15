@@ -3,6 +3,29 @@
 Every figure here is measured on the deployed application, not estimated. Nothing is
 modelled from token-count guesses.
 
+> **READ THIS FIRST — the numbers below predate the shipped extraction mode.**
+>
+> Everything in this file was measured on 2026-08-12, when production ran
+> `LABELPROOF_EXTRACTION_MODE=single`. Production has run `split` since 2026-08-14, which
+> reads each image with two concurrent calls instead of one and therefore sends the
+> instruction prefix twice. It bought about 1.5 s of latency and it costs money, and this
+> file did not know that. Re-measured on the deployed URL on 2026-08-15:
+>
+> | | 2026-08-12, `single` | 2026-08-15, `split` | |
+> |---|--:|--:|---|
+> | One verification, two images | $0.0313 | **$0.0530** | 5 runs, `scripts/timed_run.py` |
+> | One label in a batch | $0.0179 *(two images)* | **$0.0220** *(one image)* | 300 items, [`batch-300.md`](batch-300.md) |
+>
+> The batch row is not a like-for-like comparison and is not presented as one: the newer
+> run sent half the artwork per label and still cost 23% more, so per *image* the increase
+> is larger than the totals suggest. The projections and the ROI section further down are
+> arithmetic on the old rates. **Multiply them by about 1.7 for single verifications and
+> about 1.2 for batch**, or re-run the two scripts, which is better.
+>
+> The rest of the file is left as it was measured rather than edited in place. It is a
+> record of what the system cost under a configuration it really ran, and rewriting the
+> numbers would destroy the only evidence of what the mode change actually bought.
+
 | | |
 |---|---|
 | Date | 2026-08-12 |
@@ -95,8 +118,11 @@ the vision tier that reads the government warning. Not a trade this product make
 
 **Concurrency ↔ throttling.** Batch runs 6 workers. Raising it does not raise cost per
 label, but it does raise the chance of provider rate limiting, which converts into retries
-and *does* cost money. 6 was chosen as a starting value and has not been tuned against a
-real 300-item job.
+and *does* cost money. 6 was chosen as a starting value. A real 300-item job has now been
+run at that setting — 300 applications, 291.9s, zero failures, zero retries, no rate
+limiting anywhere in the run ([`batch-300.md`](batch-300.md)) — so 6 workers is proven
+safe and proven *not* to be the ceiling. Where the ceiling actually is remains untested,
+and finding it costs another paid run.
 
 **Cache TTL ↔ traffic shape.** The 5-minute ephemeral cache is what makes batch cheap.
 An agent doing one verification every ten minutes pays the full input price every time —

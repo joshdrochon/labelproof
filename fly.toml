@@ -306,8 +306,11 @@ kill_timeout = "15s"
 #
 # 2 GB carries numpy, OpenCV and Pillow holding a few full-resolution frames while a batch
 # job runs its worker pool in the same process. Raise it if the batch pool OOMs; that is a
-# memory decision with evidence behind it, unlike the CPU one it replaces. A 22-item batch
-# ran clean at this size; 300 has not been tried.
+# memory decision with evidence behind it, unlike the CPU one it replaces. A 300-item
+# batch has now run clean at this size — 300 applications, 291.9s, zero failures, six
+# workers, no OOM and no restart (docs/batch-300.md). That run sent one image per
+# application; 300 at two images each has still not been tried, and that is the shape that
+# would actually test this number.
 #
 # REVISITED, with the measurement this comment asked for. Five samples on each size,
 # against the deployed URL, comparing `timings_ms.total - timings_ms.extract`:
