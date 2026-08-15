@@ -77,7 +77,7 @@ itself rather than in a footnote.
 | 7 | ≥3 cold users complete a verification with zero instructions | ❌ | Not run. Needs three people |
 | 8 | E2E in CI (single, batch, unreadable, provider-down); red CI blocks deploy | ✅ | All four flows are covered by tests that drive the real app through the real HTTP stack, and CI runs them offline. "Red CI blocks deploy" is **drilled, not merely configured**: a deliberately failing commit was pushed, the check went red, `mergeStateStatus` went BLOCKED, and `gh pr merge` was refused by the base branch policy — no deploy ran ([`ci-gate-drill.txt`](ci-gate-drill.txt)). The rollback direction is drilled too ([`rollback-drill.txt`](rollback-drill.txt)) |
 | 9 | Load: 300-item batch, throttling behaviour, Verify Now p95 during a batch | ⚠️ | The priority lane is measured and holds — verify during a running batch is indistinguishable from idle. The 300-item run and the throttling observation have not been done |
-| 10 | Cost analysis with measured per-label cost and projections | ✅ | [`cost.md`](cost.md) — $0.031 single, $0.0179 batch-amortised, projections at 130/600/1,200 a day with the arithmetic shown |
+| 10 | Cost analysis with measured per-label cost and projections | ✅ | [`cost.md`](cost.md) — $0.046 single, $0.022 batch-amortised on the shipped `split` mode (the $0.031 / $0.0179 pair in that file predates it and is flagged there), projections at 130/600/1,200 a day with the arithmetic shown |
 | 11 | Submission package: README, deployed URL, downloadable sample set | ✅ | This repository, <https://labelproof.fly.dev>, four one-click samples |
 
 ## What the pattern is

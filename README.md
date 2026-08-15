@@ -14,7 +14,7 @@ recommendation. **It recommends — the agent decides.**
 | **Start here (reviewers)** | [`docs/evaluation.md`](docs/evaluation.md) — the brief's criteria, each with something to open |
 | **PRD audit** | [`docs/prd-audit.md`](docs/prd-audit.md) — both PRD checklists, line by line — MVP 14/15, Final 7/11 |
 | **Accuracy** | [`docs/accuracy.md`](docs/accuracy.md) — Tier A 100% on 175 rows, Tier B 71.4% on 21, confusion matrices, every miss explained |
-| **Cost** | [`docs/cost.md`](docs/cost.md) — $0.053 a verification, $0.022 a label in batch, measured on the shipped `split` configuration |
+| **Cost** | [`docs/cost.md`](docs/cost.md) — $0.046 a verification, $0.022 a label in batch, measured on the shipped `split` configuration |
 | **Latency** | [`docs/perf-deployed.md`](docs/perf-deployed.md) — 20 timed runs on the deployed URL |
 | **Robustness** | [`docs/robustness.md`](docs/robustness.md) — angle, blur, glare, occlusion |
 | **Live** | <https://labelproof.fly.dev> |
@@ -335,7 +335,7 @@ with request ids, is in [`docs/perf-deployed.md`](docs/perf-deployed.md).
 | **p95** | **6.4s** |
 | max | 7.0s |
 | Successful | 20 / 20 |
-| Cost | $0.031 per verification |
+| Cost | $0.0462 per verification, mean of the same 20 runs |
 
 This number has been wrong twice, in both directions, and the corrections are left in
 rather than tidied away.
