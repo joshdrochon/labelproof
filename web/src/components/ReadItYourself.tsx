@@ -92,7 +92,7 @@ export default function ReadItYourself({
 
   return (
     <div className="unread">
-      <h4 className="detail__heading">Nothing was verified for this row</h4>
+      <h3 className="detail__heading">Nothing was verified for this row</h3>
       <p className="detail__text">
         The artwork could not be read here, so this row is neither right nor wrong yet.
       </p>

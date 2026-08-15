@@ -20,12 +20,12 @@ import type {
   ApiError,
   Application,
   FieldName,
-  FieldResult,
   VerificationResult,
 } from '../types';
 import { ApiFailure, listSamples, loadSample, prepareReading, verify } from '../api';
 import type { PreparedReading, SampleCase } from '../api';
-import { NEXT_STEP_LABELS, STAGES, fieldLabel } from '../copy';
+import { NEXT_STEP_LABELS, STAGES } from '../copy';
+import { evidenceRegions, numberFor, regionFor } from '../evidence';
 import { attentionFields, settledFields } from '../triage';
 import AggregateBanner from '../components/AggregateBanner';
 import ApplicationForm, {
@@ -37,7 +37,6 @@ import ApplicationForm, {
 import type { ApplicationDraft, DraftProblems } from '../components/ApplicationForm';
 import Dropzone from '../components/Dropzone';
 import EvidenceOverlay from '../components/EvidenceOverlay';
-import type { EvidenceRegion } from '../components/EvidenceOverlay';
 import FieldRow from '../components/FieldRow';
 
 type Phase = 'setup' | 'working' | 'checked' | 'problem';
@@ -49,8 +48,13 @@ interface Checked {
    *  reports the server's total, which describes the work rather than the wait. */
   elapsedMs: number;
   imageUrls: string[];
-  /** True when the outlines are drawn over the upload rather than a server-side copy. */
-  approximateGeometry: boolean;
+  /**
+   * Per picture: true where the outlines are drawn over the upload rather than a
+   * server-side copy. Not one flag for the whole result — a server that names the front
+   * and not the back would otherwise have both declared exact, and the back's outlines
+   * would sit on the un-deskewed original with nothing said.
+   */
+  approximateByIndex: boolean[];
 }
 
 export default function VerifyNow() {
@@ -129,7 +133,7 @@ export default function VerifyNow() {
         application,
         elapsedMs: Date.now() - startedRef.current,
         imageUrls: urls,
-        approximateGeometry: !hasServerUrls,
+        approximateByIndex: urls.map((_, i) => !serverUrls[i]),
       });
       setExpanded(new Set(attentionFields(result.fields).map((row) => row.field)));
       setDecisions({});
@@ -559,38 +563,14 @@ function ChecklistScreen({
   setImageIndex,
   onStartOver,
 }: ChecklistScreenProps) {
-  const { result, application, imageUrls, approximateGeometry } = checked;
+  const { result, application, imageUrls, approximateByIndex } = checked;
   const attention = useMemo(() => attentionFields(result.fields), [result.fields]);
   const settled = useMemo(() => settledFields(result.fields), [result.fields]);
 
-  const regions = useMemo<EvidenceRegion[]>(() => {
-    let counter = 0;
-    const build = (row: FieldResult, needsAttention: boolean): EvidenceRegion[] => {
-      const bbox = row.evidence?.bbox;
-      // No box, no highlight. Never a guessed region.
-      if (!bbox) return [];
-      if (needsAttention) counter += 1;
-      return [
-        {
-          field: row.field,
-          label: fieldLabel(row.field),
-          bbox,
-          imageIndex: row.evidence?.image_index ?? 0,
-          number: needsAttention ? counter : null,
-          needsAttention,
-        },
-      ];
-    };
-    return [
-      ...attention.flatMap((row) => build(row, true)),
-      ...settled.flatMap((row) => build(row, false)),
-    ];
-  }, [attention, settled]);
+  // Built by `evidence.ts`, which the batch drill-in also calls. Inlining it here again
+  // would let the two screens number the same label differently.
+  const regions = useMemo(() => evidenceRegions(result.fields), [result.fields]);
 
-  const numberFor = useCallback(
-    (field: FieldName) => regions.find((r) => r.field === field)?.number ?? null,
-    [regions],
-  );
 
   const toggle = useCallback(
     (field: FieldName) => {
@@ -602,15 +582,47 @@ function ChecklistScreen({
     [expanded, setExpanded],
   );
 
+  /**
+   * Turn to the picture a row's outline is actually on.
+   *
+   * **Deliberate actions only** — the banner's row links and the n/p/j/k keys, both of
+   * which are an agent saying "take me to this row". It is NOT wired to hover.
+   *
+   * It was, briefly, and driving the screen showed why that is wrong: `FieldRow.onActivate`
+   * fires on `mouseenter` and `focus`, so sweeping the mouse down the checklist flipped
+   * the picture to the back and left it there — `mouseleave` passes null, which names no
+   * region and so restores nothing. Worse, it overrode the agent: choosing "back" on the
+   * switcher and then reading any front row snapped the picture away, making a two-sided
+   * label impossible to hold still. Hover is a HIGHLIGHT, confined to the picture already
+   * on screen and fully reverted on leave (LP-104); turning the page is a decision.
+   */
+  const showRegionFor = useCallback(
+    (field: FieldName) => {
+      const region = regionFor(regions, field);
+      if (!region) return;
+      // Clamped, because `image_index` arrives from the server and nothing upstream
+      // promises it names a picture this result actually has. Unclamped it set an index
+      // with no URL behind it: the panel fell back to "not available to display" and the
+      // switcher — which only renders for two or more pictures — was not there to undo
+      // it. The label was gone for the session, recoverable only by starting over and
+      // discarding every decision on the screen.
+      if (region.imageIndex >= 0 && region.imageIndex < imageUrls.length) {
+        setImageIndex(region.imageIndex);
+      }
+    },
+    [regions, imageUrls.length, setImageIndex],
+  );
+
   const jumpToField = useCallback(
     (field: FieldName) => {
       if (!expanded.has(field)) toggle(field);
       setActiveField(field);
+      showRegionFor(field);
       const row = document.getElementById(`row-${field}`);
       row?.scrollIntoView({ block: 'center', behavior: 'smooth' });
       row?.querySelector<HTMLElement>('.row__toggle')?.focus();
     },
-    [expanded, setActiveField, toggle],
+    [expanded, setActiveField, showRegionFor, toggle],
   );
 
   // Keyboard shortcuts for the power user (UX-4, LP-111). Never while typing.
@@ -720,7 +732,7 @@ function ChecklistScreen({
             regions={regions}
             activeField={activeField}
             onActivateField={setActiveField}
-            geometryIsApproximate={approximateGeometry}
+            geometryIsApproximate={approximateByIndex[imageIndex] ?? true}
             qualityNote={qualityNote}
           >
             {imageUrls.length > 1 ? (
@@ -775,7 +787,7 @@ function ChecklistScreen({
                     result={row}
                     commodity={application.commodity}
                     variant="attention"
-                    number={numberFor(row.field)}
+                    number={numberFor(regions, row.field)}
                     expanded={expanded.has(row.field)}
                     onToggle={() => toggle(row.field)}
                     onActivate={(on) => setActiveField(on ? row.field : null)}

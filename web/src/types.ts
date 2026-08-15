@@ -222,6 +222,20 @@ export interface BatchItem {
   images: string[];
   result: VerificationResult | null;
   failure: ItemFailure | null;
+  /**
+   * What the agent decided about each row, kept by the server for the life of the job.
+   *
+   * The single-label screen keeps its decisions in component state because that screen
+   * IS the session — close it and there was nothing to keep. A batch is the opposite: an
+   * agent works three hundred applications over an afternoon, opening and closing the
+   * drill-in for each one, and a decision that lives in the modal is a decision that is
+   * gone the moment they move to the next row. It also has to reach the CSV export, and
+   * the export is written by the server.
+   *
+   * Partial on purpose. An absent field means the agent has not ruled on that row, which
+   * is a different fact from having agreed with it.
+   */
+  decisions: Partial<Record<FieldName, AgentDecision>>;
   created_at: number;
   started_at: number | null;
   finished_at: number | null;

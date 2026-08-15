@@ -29,14 +29,18 @@ import {
   batchExportUrl,
   batchStatus,
   createBatch,
+  createSampleBatch,
   retryBatch,
 } from '../api';
+import type { BatchAccepted } from '../types';
 import { RECOMMENDATIONS, VERDICTS } from '../copy';
 import { VerdictGlyph } from '../components/VerdictCard';
 import type {
+  AgentDecision,
   ApiError,
   BatchItem,
   BatchStatus,
+  FieldName,
   ItemState,
   Recommendation,
 } from '../types';
@@ -96,6 +100,26 @@ export default function BatchCheck() {
   const [filter, setFilter] = useState<Filter>('all');
   const [openItem, setOpenItem] = useState<string | null>(null);
   const [retrying, setRetrying] = useState(false);
+  // Whether the job on screen is the demonstration one. It changes exactly one sentence —
+  // the explanation beside the bad manifest row — and nothing about how the job is run.
+  const [isSample, setIsSample] = useState(false);
+
+  /**
+   * Decisions this screen has written, by item, laid over whatever the poll last said.
+   *
+   * Two reasons it lives here and not in the dialog. **A finished job stops polling** —
+   * see the effect below — so after the last tick nothing ever refreshes `item.decisions`
+   * again, and a ruling made in a dialog that then closed had nowhere to survive. That is
+   * the state almost all triage happens in, and it made the feature look like it worked
+   * only because a running job's polls were papering over it.
+   *
+   * And while a job IS running, this overlay is what makes the ordering safe: a status
+   * request that left before a write can land after it, and without an overlay the poll's
+   * stale copy would win and flip a button back.
+   */
+  const [decisions, setDecisions] = useState<
+    Record<string, Partial<Record<FieldName, AgentDecision>>>
+  >({});
 
   const abort = useRef<AbortController | null>(null);
   const jobId = status?.job_id ?? null;
@@ -145,45 +169,69 @@ export default function BatchCheck() {
     };
   }, [jobId, running]);
 
+  /**
+   * Straight into the running screen with the counts we already know, so the agent sees
+   * the batch exists before the first poll comes back.
+   *
+   * Shared by the upload and the sample on purpose. A demonstration that took a different
+   * path through this screen would demonstrate the path, not the product — the sample has
+   * to queue, poll, order and export exactly as an uploaded batch does, or it is worth
+   * nothing to the person deciding whether to trust it.
+   */
+  const beginJob = useCallback((accepted: BatchAccepted, sample: boolean) => {
+    setIsSample(sample);
+    setStatus({
+      job_id: accepted.job_id,
+      state: 'queued',
+      counts: {
+        total: accepted.accepted,
+        queued: accepted.accepted,
+        processing: 0,
+        done: 0,
+        failed: 0,
+      },
+      eta_seconds: null,
+      summary: { by_recommendation: {}, by_verdict: {}, worst_first: [], headline: '' },
+      items: [],
+      cost: {
+        input_tokens: 0,
+        output_tokens: 0,
+        cache_read_tokens: 0,
+        cache_creation_tokens: 0,
+        usd: 0,
+      },
+      row_errors: accepted.row_errors,
+      unmatched_files: accepted.unmatched_files,
+      expires_at: 0,
+      message: accepted.message,
+    });
+  }, []);
+
   const submit = useCallback(async () => {
     if (!manifest || submitting) return;
     setSubmitting(true);
     setProblem(null);
     try {
-      const accepted = await createBatch(manifest, images);
-      // Straight into the running screen with the counts we already know, so the agent
-      // sees the batch exists before the first poll comes back.
-      setStatus({
-        job_id: accepted.job_id,
-        state: 'queued',
-        counts: {
-          total: accepted.accepted,
-          queued: accepted.accepted,
-          processing: 0,
-          done: 0,
-          failed: 0,
-        },
-        eta_seconds: null,
-        summary: { by_recommendation: {}, by_verdict: {}, worst_first: [], headline: '' },
-        items: [],
-        cost: {
-          input_tokens: 0,
-          output_tokens: 0,
-          cache_read_tokens: 0,
-          cache_creation_tokens: 0,
-          usd: 0,
-        },
-        row_errors: accepted.row_errors,
-        unmatched_files: accepted.unmatched_files,
-        expires_at: 0,
-        message: accepted.message,
-      });
+      beginJob(await createBatch(manifest, images), false);
     } catch (err) {
       setProblem(err instanceof ApiFailure ? err.detail : null);
     } finally {
       setSubmitting(false);
     }
-  }, [manifest, images, submitting]);
+  }, [manifest, images, submitting, beginJob]);
+
+  const startSample = useCallback(async () => {
+    if (submitting) return;
+    setSubmitting(true);
+    setProblem(null);
+    try {
+      beginJob(await createSampleBatch(), true);
+    } catch (err) {
+      setProblem(err instanceof ApiFailure ? err.detail : null);
+    } finally {
+      setSubmitting(false);
+    }
+  }, [submitting, beginJob]);
 
   const onRetry = useCallback(async () => {
     if (!jobId || retrying) return;
@@ -205,7 +253,21 @@ export default function BatchCheck() {
     setProblem(null);
     setFilter('all');
     setOpenItem(null);
+    setIsSample(false);
+    setDecisions({});
   }, []);
+
+  // Memoised, both of them. `ItemDetail`'s focus effect depends on `onClose`, so a fresh
+  // arrow each render re-runs it — and on a running job that is every 1.5s poll, each one
+  // pulling focus back to the dialog heading while someone is mid-decision.
+  const closeItem = useCallback(() => setOpenItem(null), []);
+
+  const recordDecisions = useCallback(
+    (itemId: string, updated: Partial<Record<FieldName, AgentDecision>>) => {
+      setDecisions((current) => ({ ...current, [itemId]: updated }));
+    },
+    [],
+  );
 
   if (status === null) {
     return (
@@ -215,6 +277,7 @@ export default function BatchCheck() {
         onManifest={setManifest}
         onImages={setImages}
         onSubmit={submit}
+        onSample={startSample}
         submitting={submitting}
         problem={problem}
       />
@@ -224,10 +287,14 @@ export default function BatchCheck() {
   return (
     <BatchResults
       status={status}
+      isSample={isSample}
+      decisions={decisions}
+      onDecisions={recordDecisions}
       filter={filter}
       onFilter={setFilter}
       openItem={openItem}
       onOpenItem={setOpenItem}
+      onCloseItem={closeItem}
       onRetry={onRetry}
       retrying={retrying}
       onStartOver={startOver}
@@ -246,6 +313,7 @@ function BatchUpload({
   onManifest,
   onImages,
   onSubmit,
+  onSample,
   submitting,
   problem,
 }: {
@@ -254,6 +322,7 @@ function BatchUpload({
   onManifest: (file: File | null) => void;
   onImages: (files: File[]) => void;
   onSubmit: () => void;
+  onSample: () => void;
   submitting: boolean;
   problem: ApiError | null;
 }) {
@@ -280,6 +349,33 @@ function BatchUpload({
             </a>{' '}
             if you do not have one.
           </p>
+
+          {/* Beside the template, because it answers the same question — "I do not have a
+              spreadsheet yet" — and answers it harder. Verify Now's samples set the
+              register: say what it loads and that there is nothing to fill in, then get
+              out of the way. It runs the real queue on a real manifest; the only thing it
+              saves the reviewer is assembling one. */}
+          <div className="batch__sample">
+            {/* Says five, because five get checked. The manifest has six rows and one of
+                them is deliberately broken — calling that "six applications checked" is a
+                small lie on the one screen whose entire argument is that it never claims
+                more than it knows, and the reviewer meets the contradiction about four
+                seconds later when the row-errors notice appears. */}
+            <p className="batch__sample-note">
+              Or try a sample batch. Five applications with their labels, checked right
+              away, plus one deliberately broken row so you can see how that is reported —
+              nothing to upload.
+            </p>
+            <button
+              type="button"
+              className="btn btn--secondary"
+              onClick={onSample}
+              disabled={submitting}
+            >
+              Try a sample batch
+            </button>
+          </div>
+
           <label className="file-input">
             <span className="file-input__label">Spreadsheet (.csv)</span>
             <input
@@ -343,20 +439,31 @@ function BatchUpload({
 
 function BatchResults({
   status,
+  isSample,
+  decisions,
+  onDecisions,
   filter,
   onFilter,
   openItem,
   onOpenItem,
+  onCloseItem,
   onRetry,
   retrying,
   onStartOver,
   problem,
 }: {
   status: BatchStatus;
+  isSample: boolean;
+  decisions: Record<string, Partial<Record<FieldName, AgentDecision>>>;
+  onDecisions: (
+    itemId: string,
+    updated: Partial<Record<FieldName, AgentDecision>>,
+  ) => void;
   filter: Filter;
   onFilter: (filter: Filter) => void;
   openItem: string | null;
   onOpenItem: (id: string | null) => void;
+  onCloseItem: () => void;
   onRetry: () => void;
   retrying: boolean;
   onStartOver: () => void;
@@ -369,11 +476,16 @@ function BatchResults({
   // Server order, never re-sorted here. `worst_first` is the contract; anything the
   // server did not rank goes after, in arrival order, so nothing silently disappears.
   const ordered = useMemo(() => {
-    const byId = new Map(status.items.map((item) => [item.item_id, item]));
+    // Our own writes win over the poll's copy of them. Everything else about the item is
+    // the server's — this overlays the one field this screen is allowed to author.
+    const withDecisions = status.items.map((item) =>
+      decisions[item.item_id] ? { ...item, decisions: decisions[item.item_id]! } : item,
+    );
+    const byId = new Map(withDecisions.map((item) => [item.item_id, item]));
     const ranked = summary.worst_first.flatMap((id) => byId.get(id) ?? []);
     const seen = new Set(ranked.map((item) => item.item_id));
     return [...ranked, ...status.items.filter((item) => !seen.has(item.item_id))];
-  }, [status.items, summary.worst_first]);
+  }, [status.items, summary.worst_first, decisions]);
 
   const visible = useMemo(
     () => (filter === 'all' ? ordered : ordered.filter((item) => bucketOf(item) === filter)),
@@ -426,7 +538,9 @@ function BatchResults({
         ) : null}
       </dl>
 
-      {status.row_errors.length > 0 ? <RowErrors status={status} /> : null}
+      {status.row_errors.length > 0 ? (
+        <RowErrors status={status} isSample={isSample} />
+      ) : null}
       {status.unmatched_files.length > 0 ? (
         <details className="batch__notice">
           <summary>
@@ -484,7 +598,19 @@ function BatchResults({
 
       <BatchTable items={visible} total={ordered.length} onOpen={onOpenItem} />
 
-      {open ? <ItemDetail item={open} onClose={() => onOpenItem(null)} /> : null}
+      {/* Keyed by item. The dialog seeds its decision state from the item ONCE and then
+          trusts its own writes over the poll, which is what stops a stale poll from
+          flipping a button back. That is only correct if opening a different application
+          gives it a fresh instance — without the key React would reuse the one it has and
+          the second row would open showing the first row's rulings. */}
+      {open ? (
+        <ItemDetail
+          key={open.item_id}
+          item={open}
+          onClose={onCloseItem}
+          onDecisions={(updated) => onDecisions(open.item_id, updated)}
+        />
+      ) : null}
     </div>
   );
 }
@@ -506,15 +632,23 @@ function Count({
   );
 }
 
-function RowErrors({ status }: { status: BatchStatus }) {
+function RowErrors({ status, isSample }: { status: BatchStatus; isSample: boolean }) {
+  const many = status.row_errors.length !== 1;
   return (
     <details className="batch__notice" data-tone="serious" open>
       <summary>
-        {status.row_errors.length} row{status.row_errors.length === 1 ? '' : 's'} in the
-        spreadsheet could not be used
+        {isSample
+          ? `The sample includes ${status.row_errors.length} row${many ? 's' : ''} that cannot be used`
+          : `${status.row_errors.length} row${many ? 's' : ''} in the spreadsheet could not be used`}
       </summary>
+      {/* The sample's bad row is deliberate — it is there to show what a bad row looks
+          like before a reviewer meets one in their own file. Telling them to "fix these
+          rows" would be blaming them for a mistake we planted, and the first thing they
+          would do is go looking for a spreadsheet they never uploaded. */}
       <p className="batch__notice-help">
-        Everything else was queued. Fix these rows and upload them as a second batch.
+        {isSample
+          ? 'That is on purpose, so you can see how a bad row is reported: it is named by row number and everything else was queued anyway. Nothing here is your mistake.'
+          : 'Everything else was queued. Fix these rows and upload them as a second batch.'}
       </p>
       <table className="rowerrors">
         <thead>

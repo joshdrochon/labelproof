@@ -17,6 +17,25 @@ import { defineConfig, devices } from '@playwright/test';
 
 const BASE_URL = process.env.BASE_URL ?? 'https://labelproof.fly.dev';
 
+/**
+ * Where `batch.spec.ts` runs, and why it is not `BASE_URL`.
+ *
+ * The batch spec queues jobs and reads their results. Pointed at the deployment that
+ * means real provider calls billed against a real key, at a per-run cost, for a test
+ * whose whole subject is the queue rather than the model. Pointed at `npm run dev` with
+ * no API it means `dev/mockApi.ts`, which does not implement `/batch` at all and answers
+ * `/verify` with one canned verdict after a hardcoded 2.2s — hours have already gone into
+ * testing that stand-in and mistaking it for the product.
+ *
+ * So it defaults to a LOCAL server with the fixture provider, and the spec refuses to run
+ * against anything that does not identify itself as one. See `e2e/batch.spec.ts` for the
+ * exact command.
+ */
+const BATCH_BASE_URL = process.env.LABELPROOF_E2E_URL ?? 'http://127.0.0.1:8000';
+
+/** The batch spec, which every other project excludes and the batch project selects. */
+const BATCH_SPEC = /batch\.spec\.ts/;
+
 export default defineConfig({
   testDir: './e2e',
   // Against a live deployment with a per-IP rate limit, parallel workers race each other
@@ -33,8 +52,12 @@ export default defineConfig({
     trace: 'retain-on-failure',
   },
   projects: [
-    { name: 'chromium', use: { ...devices['Desktop Chrome'] } },
-    { name: 'firefox', use: { ...devices['Desktop Firefox'] } },
+    {
+      name: 'chromium',
+      testIgnore: BATCH_SPEC,
+      use: { ...devices['Desktop Chrome'] },
+    },
+    { name: 'firefox', testIgnore: BATCH_SPEC, use: { ...devices['Desktop Firefox'] } },
     // LP-315. A tablet viewport with touch, driven by Chromium.
     //
     // NOT `devices['iPad Pro 11']`, which is WebKit — and WebKit does not run on this
@@ -45,12 +68,27 @@ export default defineConfig({
     // LP-315 asks about, and it is honest that it does not test Safari's engine.
     {
       name: 'tablet',
+      testIgnore: BATCH_SPEC,
       use: {
         ...devices['Desktop Chrome'],
         viewport: { width: 834, height: 1112 },
         isMobile: false,
         hasTouch: true,
       },
+    },
+    /**
+     * The batch flow, end to end, against a real server (ENG-2).
+     *
+     * One engine, not three: this asserts that a job queues, streams, orders and exports —
+     * server behaviour the browser only reports on. Running it on the matrix would triple
+     * the queued jobs to re-check Gecko's rendering of a table already covered by
+     * `a11y.spec.ts`. A longer timeout because a batch is minutes of work, not one request.
+     */
+    {
+      name: 'batch',
+      testMatch: BATCH_SPEC,
+      timeout: 180_000,
+      use: { ...devices['Desktop Chrome'], baseURL: BATCH_BASE_URL },
     },
   ],
 

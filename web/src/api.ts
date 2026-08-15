@@ -15,6 +15,7 @@
  */
 
 import type {
+  AgentDecision,
   ApiError,
   Application,
   BatchAccepted,
@@ -23,6 +24,7 @@ import type {
   BoundingBox,
   Cost,
   ErrorKind,
+  FieldName,
   FieldResult,
   ImageReport,
   ItemState,
@@ -566,6 +568,21 @@ export function batchExportUrl(jobId: string): string {
 }
 
 /**
+ * One label picture belonging to one batch item, by position.
+ *
+ * A URL rather than a fetch, so the browser streams the bytes into an `<img>` and caches
+ * them the way it caches every other image. `index` is the 0-based position that
+ * `EvidenceRegion.imageIndex` counts in — the evidence boxes are measured against picture
+ * N, so the panel has to be able to ask for picture N and get exactly that one. Off by
+ * one here draws the outlines from the front label onto the back of the bottle.
+ */
+export function batchItemImageUrl(jobId: string, itemId: string, index: number): string {
+  return `/batch/${encodeURIComponent(jobId)}/items/${encodeURIComponent(
+    itemId,
+  )}/images/${index}`;
+}
+
+/**
  * Images are NOT shrunk on the way into a batch, and that is deliberate.
  *
  * `verify()` re-encodes each file because it is one or two images and the round trip is
@@ -595,8 +612,11 @@ export async function createBatch(
     throw networkFailure();
   }
   if (!response.ok) throw await readError(response);
+  return normalizeAccepted(await response.json());
+}
 
-  const obj = asRecord(await response.json());
+function normalizeAccepted(raw: unknown): BatchAccepted {
+  const obj = asRecord(raw);
   if (!obj) throw failure('internal', 'unreadable_response', ERROR_FALLBACK['internal']!);
   return {
     job_id: String(obj['job_id'] ?? ''),
@@ -605,6 +625,30 @@ export async function createBatch(
     unmatched_files: normalizeStrings(obj['unmatched_files']),
     message: typeof obj['message'] === 'string' ? obj['message'] : '',
   };
+}
+
+/**
+ * Queue the demonstration batch (LP-098's argument, applied to BATCH-1).
+ *
+ * The same shape as `createBatch`, deliberately: the screen that receives it must not be
+ * able to tell that this job was not uploaded. A sample that took a different code path
+ * would be a demo of the demo — the one thing worth showing here is the real queue, the
+ * real worker, and the real worst-first ordering, on a manifest the reviewer did not have
+ * to assemble first.
+ *
+ * The manifest behind it carries a deliberately broken row, so `row_errors` comes back
+ * non-empty. That is the point, and the screen says so rather than blaming the reviewer.
+ */
+export async function createSampleBatch(signal?: AbortSignal): Promise<BatchAccepted> {
+  let response: Response;
+  try {
+    response = await fetch('/batch/sample', { method: 'POST', signal });
+  } catch (err) {
+    if ((err as Error)?.name === 'AbortError') throw err;
+    throw networkFailure();
+  }
+  if (!response.ok) throw await readError(response);
+  return normalizeAccepted(await response.json());
 }
 
 function normalizeStrings(raw: unknown): string[] {
@@ -652,6 +696,32 @@ function normalizeCost(raw: unknown): Cost {
 
 const ITEM_STATES: readonly ItemState[] = ['queued', 'processing', 'done', 'failed'];
 
+const AGENT_DECISIONS: readonly string[] = ['confirmed', 'overridden'];
+
+/**
+ * The agent's rulings on one item's rows.
+ *
+ * Anything that is not one of the two words is dropped rather than carried through — a
+ * decision is what puts a human's name against a row, and a value the UI cannot render
+ * would show as a button in neither state, which reads as "not decided" while the server
+ * believes otherwise. Absent, malformed and null all come out the same way: no ruling.
+ *
+ * Keys are not checked against `FieldName`. One that is not a field is unreachable —
+ * nothing ever looks it up — and dropping it here would only mean the same silence with
+ * more code.
+ */
+function normalizeDecisions(raw: unknown): Partial<Record<FieldName, AgentDecision>> {
+  const rec = asRecord(raw);
+  if (!rec) return {};
+  const out: Partial<Record<FieldName, AgentDecision>> = {};
+  for (const [field, value] of Object.entries(rec)) {
+    if (typeof value === 'string' && AGENT_DECISIONS.includes(value)) {
+      out[field as FieldName] = value as AgentDecision;
+    }
+  }
+  return out;
+}
+
 function normalizeItem(raw: unknown): BatchItem | null {
   const rec = asRecord(raw);
   if (!rec || typeof rec['item_id'] !== 'string') return null;
@@ -681,6 +751,7 @@ function normalizeItem(raw: unknown): BatchItem | null {
           attempts: typeof failure_['attempts'] === 'number' ? failure_['attempts'] : 0,
         }
       : null,
+    decisions: normalizeDecisions(rec['decisions']),
     created_at: typeof rec['created_at'] === 'number' ? rec['created_at'] : 0,
     started_at: typeof rec['started_at'] === 'number' ? rec['started_at'] : null,
     finished_at: typeof rec['finished_at'] === 'number' ? rec['finished_at'] : null,
@@ -743,6 +814,55 @@ export async function batchStatus(
   }
   if (!response.ok) throw await readError(response);
   return normalizeStatus(await response.json());
+}
+
+/**
+ * Record — or clear — what the agent decided about one row of one item.
+ *
+ * Returns the whole item as the server now holds it, and the caller is expected to take
+ * that as the truth rather than keeping its optimistic guess. That is the difference
+ * between a decision that was saved and one that merely looked saved, and this screen has
+ * to be able to tell an agent which of the two happened: three hundred applications is
+ * exactly the volume at which nobody re-checks their own work.
+ *
+ * `null` clears the row. It is sent as an explicit null rather than by omitting the key,
+ * because an empty object is how you say "change nothing" and there would then be no way
+ * to take a ruling back.
+ */
+export async function setItemDecision(
+  jobId: string,
+  itemId: string,
+  field: FieldName,
+  decision: AgentDecision | null,
+  signal?: AbortSignal,
+): Promise<BatchItem> {
+  let response: Response;
+  try {
+    response = await fetch(
+      `/batch/${encodeURIComponent(jobId)}/items/${encodeURIComponent(itemId)}/decisions`,
+      {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ decisions: { [field]: decision } }),
+        signal,
+      },
+    );
+  } catch (err) {
+    if ((err as Error)?.name === 'AbortError') throw err;
+    throw networkFailure();
+  }
+  if (!response.ok) throw await readError(response);
+
+  const item = normalizeItem(await response.json());
+  if (!item) {
+    throw failure(
+      'internal',
+      'unreadable_response',
+      'The answer that came back could not be read, so it is not certain this row was saved.',
+      'retry',
+    );
+  }
+  return item;
 }
 
 /** Requeue the failed items and nothing else (BATCH-8). Returns the refreshed status. */
