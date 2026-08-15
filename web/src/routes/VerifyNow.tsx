@@ -77,8 +77,14 @@ export default function VerifyNow() {
   // A reading taken while the form was still being filled (LP-346). Null whenever there
   // is nothing usable — no files yet, still reading, or the attempt came back empty.
   // Every path that reaches `runCheck` works with or without it.
-  const [reading, setReading] = useState<PreparedReading | null>(null);
-  const [readingInFlight, setReadingInFlight] = useState(false);
+  //   null      — no attempt has finished for the current files
+  //   {token}   — the label has been read and the reading is usable
+  //   'none'    — an attempt finished and produced nothing usable
+  //
+  // One piece of state, written only when an attempt SETTLES. An earlier version kept a
+  // separate in-flight boolean written around the call, and the effect's own cleanup
+  // reset it faster than any render could show it.
+  const [reading, setReading] = useState<PreparedReading | 'none' | null>(null);
 
   const abortRef = useRef<AbortController | null>(null);
   const localUrlsRef = useRef<string[]>([]);
@@ -169,7 +175,11 @@ export default function VerifyNow() {
     setPhase('working');
     try {
       const result = await verify(
-        { application, files, preparedToken: reading?.token },
+        {
+          application,
+          files,
+          preparedToken: reading && reading !== 'none' ? reading.token : undefined,
+        },
         controller.signal,
       );
       settle(result, application, previews);
@@ -203,17 +213,18 @@ export default function VerifyNow() {
     setReading(null);
     if (files.length === 0 || phase === 'working') return undefined;
     const controller = new AbortController();
-    setReadingInFlight(true);
-    void prepareReading(files, draft.commodity, controller.signal)
-      .then((prepared) => {
-        if (!controller.signal.aborted) setReading(prepared);
-      })
-      .finally(() => {
-        if (!controller.signal.aborted) setReadingInFlight(false);
-      });
+    // A flag per run, rather than reading `controller.signal.aborted` back. React runs
+    // effects twice in development — setup, cleanup, setup — so the signal belonging to
+    // a superseded run is aborted while the run that replaced it is the live one. Keying
+    // the state update to the signal meant the surviving request's result was discarded
+    // and the panel never said anything, in development only.
+    let live = true;
+    void prepareReading(files, draft.commodity, controller.signal).then((prepared) => {
+      if (live) setReading(prepared ?? 'none');
+    });
     return () => {
+      live = false;
       controller.abort();
-      setReadingInFlight(false);
     };
     // `phase` is deliberately absent: re-reading because the screen moved to `checked`
     // would spend a model call on a label that has already been answered.
@@ -398,9 +409,9 @@ export default function VerifyNow() {
                   it is here so a head start is visible rather than mysterious, and so a
                   fast result later is not surprising. `role="status"` and not `alert` —
                   nothing here needs interrupting. */}
-              {files.length > 0 && (readingInFlight || reading) ? (
+              {files.length > 0 && reading !== 'none' ? (
                 <p className="reading-ahead" role="status">
-                  {readingInFlight
+                  {reading === null
                     ? 'Reading the label while you fill in the details…'
                     : 'Label read. Checking will be quick.'}
                 </p>
