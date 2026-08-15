@@ -43,6 +43,7 @@ import csv
 import io
 import shutil
 import threading
+import time
 import zipfile
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
@@ -72,7 +73,7 @@ from api.batch.models import (
     summarize,
     worst_first,
 )
-from api.batch.store import BatchStore, is_expired
+from api.batch.store import BatchStore, ItemStillRunning, is_expired
 from api.batch.worker import ProviderBudget, WorkerPool
 from api.config import Config
 from api.models import AgentDecision, FieldName
@@ -796,6 +797,61 @@ def _sample_record(spec: _SampleRow, files: Sequence[Path]) -> dict[str, str]:
     return record
 
 
+#: Sample batches this server will start in an hour, across every caller.
+#:
+#: The per-client lane in `api/middleware/ratelimit.py` cannot bound the bill: it is keyed
+#: on the client, and a caller with more addresses simply gets more budget. This is the
+#: number that says what a day of being pointed at costs — twenty clicks an hour is a
+#: hundred verifications an hour, which is a demo server, and anything above it is not a
+#: person looking at the product.
+SAMPLE_BATCHES_PER_HOUR = 20
+_SAMPLE_WINDOW_SECONDS = 3600.0
+
+
+class _SampleCeiling:
+    """How many sample batches have started recently, for the whole process.
+
+    A sliding window of start times rather than a token bucket, because the question this
+    answers is "how much has this server spent in the last hour", and a bucket that refills
+    continuously answers a different one. Twenty timestamps is the entire state.
+
+    Deliberately not in the rate limiter. That machinery is per-client by construction and
+    this cap exists precisely for the caller who is not one client.
+    """
+
+    def __init__(self, per_hour: int = SAMPLE_BATCHES_PER_HOUR):
+        self.per_hour = per_hour
+        self._starts: list[float] = []
+        self._lock = threading.Lock()
+
+    def take(self, *, now: float | None = None) -> bool:
+        """Claim a slot. False when the ceiling is reached and nothing was claimed."""
+        moment = time.monotonic() if now is None else now
+        with self._lock:
+            self._starts = [
+                start for start in self._starts if moment - start < _SAMPLE_WINDOW_SECONDS
+            ]
+            if len(self._starts) >= self.per_hour:
+                return False
+            self._starts.append(moment)
+            return True
+
+
+def get_sample_ceiling(request: Request) -> _SampleCeiling:
+    """One ceiling per process, built under the same guard as the store and the pool."""
+    ceiling: _SampleCeiling | None = getattr(request.app.state, "sample_ceiling", None)
+    if ceiling is not None:
+        return ceiling
+    with _WIRING:
+        ceiling = getattr(request.app.state, "sample_ceiling", None)
+        if ceiling is None:
+            # Two of these would be two ceilings, which is one ceiling of twice the height —
+            # the same class of bug LP-334 found in the store and the pool.
+            ceiling = _SampleCeiling()
+            request.app.state.sample_ceiling = ceiling
+        return ceiling
+
+
 @router.post("/batch/sample", response_model=BatchAccepted)
 async def create_sample_batch(request: Request) -> BatchAccepted:
     """Queue a batch built from the committed fixtures. No body, same answer as `POST /batch`.
@@ -812,12 +868,32 @@ async def create_sample_batch(request: Request) -> BatchAccepted:
     back non-empty: a batch that refuses 300 applications over one typo is the failure TC-20
     describes, and "297 queued, row 5 needs a fix" is not believable until it is seen.
 
-    It draws on the submit budget rather than the read one. A click here starts five real
-    verifications, and pricing it like a status poll would put the cost of a batch behind
-    the rate limit meant for polling.
+    **This is the only endpoint in the product that spends money on an empty body.** Every
+    other way to reach the model requires the caller to supply label artwork first, which is
+    its own brake; `GET /sample` looks similar and makes no model call at all. So it gets
+    two limits rather than one: its own rate-limit lane at two a minute per client, and the
+    hourly ceiling below across every caller — because a per-client limit is not a bill
+    limit when the caller has more than one address. Without them, ten submissions a minute
+    times five verifications is roughly $150 an hour on a public URL with no authentication.
+
+    The refusal has to read as a full server, not a broken feature. A reviewer who meets it
+    should be told the tool works and how to see it working anyway.
     """
     config = get_config(request)
     store = get_store(request)
+
+    if not get_sample_ceiling(request).take():
+        applog.warn("batch_sample_refused", count=SAMPLE_BATCHES_PER_HOUR, status=429)
+        raise errors.UserError(
+            f"The sample batch has already been started {SAMPLE_BATCHES_PER_HOUR} times "
+            f"on this server in the last hour, which is as many as it runs. Nothing is "
+            f"wrong — try again shortly, or upload a manifest and label images of your own "
+            f"to see the same thing on real applications.",
+            next_step="retry",
+            code="sample_ceiling_reached",
+            status_code=429,
+        )
+
     if purged := store.purge_expired():
         applog.log("batch_purged", count=len(purged))
 
@@ -880,7 +956,6 @@ def _require_job(
     retention_hours: int,
     *,
     now: float | None = None,
-    status_code: int | None = None,
 ) -> BatchJob:
     """The job, or the same refusal for "never existed" and "past its life".
 
@@ -904,12 +979,12 @@ def _require_job(
     The predicate is imported, not written here. See `api.batch.store.is_expired`, and the
     merge note on it about where the canonical definition will live.
 
-    `status_code` only picks the status line; the sentence, the code and the expiry rule are
-    the same for every caller. The endpoints that address a *sub-resource* — one item's
-    artwork, one item's decisions — answer 404, because from the caller's seat a missing job
-    and a missing item are the same fact and both are "that URL names nothing". The
-    job-level endpoints keep the 400 they have always sent rather than changing an answer
-    the SPA and the smoke script already read.
+    **404, on every batch endpoint.** This answered 400 until the item endpoints arrived
+    answering 404, and one fact with two status lines depending on which URL you asked is
+    worse than either choice made consistently. 404 is the correct one: the request is
+    well-formed and correctly addressed, the thing it names is not here — which is exactly
+    what `_STATUS` in `api/errors.py` says a status line is for, and why an error may carry
+    its own rather than inheriting the `user` default.
     """
     job = store.get_job(job_id)
     if job is not None and not is_expired(job.expires_at, now=now):
@@ -920,7 +995,7 @@ def _require_job(
         f"expired. Upload the manifest again to start a new batch.",
         next_step="navigate",
         code="batch_not_found",
-        status_code=status_code,
+        status_code=404,
     )
 
 
@@ -1047,7 +1122,7 @@ def batch_item_image(request: Request, job_id: str, item_id: str, index: int) ->
     """
     config = get_config(request)
     store = get_store(request)
-    _require_job(store, job_id, config.retention_hours, status_code=404)
+    _require_job(store, job_id, config.retention_hours)
     item = _require_item(store, job_id, item_id)
 
     path = (
@@ -1149,17 +1224,31 @@ def set_item_decisions(
     rather than the whole map. Sending the whole map is how one tab silently erases
     another's work, and `BatchStore.set_decisions` says more about why.
 
+    An item that has not finished is refused. A ruling recorded while a verdict is still
+    coming would be attached to that verdict the moment it lands — the agent's name on a
+    judgement of something produced after they made it, in the report HITL-5 says gets
+    printed. The check is inside the store's transaction, because a check here would race
+    the worker that is about to complete the item.
+
     No model call happens here, which is why this sits in the read rate-limit lane despite
     being a write: it is a click, at click frequency, and putting it in the submit lane
     would let an agent working quickly through a 300-row queue rate-limit themselves.
     """
     config = get_config(request)
     store = get_store(request)
-    _require_job(store, job_id, config.retention_hours, status_code=404)
+    _require_job(store, job_id, config.retention_hours)
     _require_item(store, job_id, item_id)
 
     updates = _read_decisions(patch)
-    item = store.set_decisions(item_id, updates)
+    try:
+        item = store.set_decisions(item_id, updates)
+    except ItemStillRunning as exc:
+        raise errors.UserError(
+            "This application has not finished being checked, so there is nothing to "
+            "confirm or override on it yet. Wait for its result and decide then.",
+            next_step="retry",
+            code="item_not_checked",
+        ) from exc
     if item is None:
         # Swept between the check above and the write. Same answer as an item that was
         # never there, because from the caller's seat it is the same fact.

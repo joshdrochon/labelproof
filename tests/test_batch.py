@@ -875,11 +875,11 @@ def test_an_expired_batch_is_not_served_even_before_it_is_swept(tmp_path: Path) 
 
     for path in (f"/batch/{job_id}", f"/batch/{job_id}/export.csv"):
         response = client.get(path)
-        assert response.status_code == 400, path
+        assert response.status_code == 404, path
         assert response.json()["error"]["code"] == "batch_not_found", path
 
     retry = client.post(f"/batch/{job_id}/retry")
-    assert retry.status_code == 400
+    assert retry.status_code == 404
     assert retry.json()["error"]["code"] == "batch_not_found"
 
 
@@ -1867,6 +1867,57 @@ def test_a_sample_click_leaves_the_committed_fixtures_where_they_were(
     assert {path: path.stat().st_size for path in before} == before
 
 
+def test_the_sample_batch_is_capped_across_every_caller_not_just_each_one(
+    tmp_path: Path,
+) -> None:
+    """The only endpoint here that spends money on an empty body.
+
+    Its rate-limit lane is per client, and a caller with more addresses gets more budget —
+    so the lane alone bounds nobody's bill. At ten a minute in the submit lane, one IP could
+    start fifty real verifications a minute against a live key on a public URL with no
+    authentication. This is the number that says what a day of being pointed at costs.
+    """
+    ceiling = batch_routes._SampleCeiling(per_hour=3)
+    assert [ceiling.take(now=100.0) for _ in range(4)] == [True, True, True, False]
+
+    # An hour later the window has slid and the server is open again.
+    assert ceiling.take(now=100.0 + 3601.0) is True
+
+
+def test_the_ceiling_refuses_in_the_products_voice_not_as_a_broken_feature(
+    tmp_path: Path,
+) -> None:
+    """A reviewer who meets the cap must be told the tool works and how to see it work.
+
+    "429" on a demo button reads as "this is broken", and the reviewer stops there. The
+    sentence has to say the server is busy, not that the feature is.
+    """
+    client = sample_client(tmp_path)
+    client.app.state.sample_ceiling = batch_routes._SampleCeiling(per_hour=1)
+
+    assert client.post("/batch/sample").status_code == 200
+    refused = client.post("/batch/sample")
+    drain(client)
+
+    assert refused.status_code == 429
+    error = refused.json()["error"]
+    assert error["code"] == "sample_ceiling_reached"
+    assert "Nothing is wrong" in error["message"]
+    assert "upload a manifest" in error["message"], "it names the way through"
+
+
+def test_a_refused_sample_starts_no_work_at_all(tmp_path: Path) -> None:
+    """A cap that refuses the response after queueing the items has capped nothing."""
+    client = sample_client(tmp_path)
+    client.app.state.sample_ceiling = batch_routes._SampleCeiling(per_hour=0)
+
+    assert client.post("/batch/sample").status_code == 429
+    store: BatchStore = client.app.state.batch_store
+    with store._conn() as connection:
+        queued = connection.execute("SELECT COUNT(*) AS n FROM items").fetchone()["n"]
+    assert queued == 0
+
+
 # --- HTTP: progressive results (BATCH-5, BATCH-4) -------------------------------------
 
 
@@ -1911,7 +1962,7 @@ def test_status_reports_counts_by_state(tmp_path: Path) -> None:
 
 def test_status_for_an_unknown_batch_explains_retention(tmp_path: Path) -> None:
     response = make_client(tmp_path).get("/batch/job_does_not_exist")
-    assert response.status_code == 400
+    assert response.status_code == 404
     message = response.json()["error"]["message"]
     assert "24 hours" in message
     assert "start a new batch" in message.lower()
@@ -1951,7 +2002,15 @@ def one_item(client: TestClient, job_id: str) -> dict[str, Any]:
 
 
 def test_an_items_artwork_is_served_so_the_evidence_can_be_drawn_on(tmp_path: Path) -> None:
-    """Without this the batch item view draws boxes on nothing and HITL-3 is half met."""
+    """Without this the batch item view draws boxes on nothing and HITL-3 is half met.
+
+    Byte for byte with what was uploaded, which is a decision and not an accident. Deskew
+    and downscale happen inside the pipeline and their output is never stored, so the
+    `Evidence` boxes — normalised against that preprocessed image — sit slightly off when
+    drawn over the original, and the UI says so. The moment this endpoint serves a
+    preprocessed copy that note is wrong on every batch item, and the batch is carrying a
+    second copy of 600 photographs under the retention promise.
+    """
     client = make_client(tmp_path, provider=spec_provider())
     job_id = post_batch(client, [row()]).json()["job_id"]
     drain(client)
@@ -1961,25 +2020,6 @@ def test_an_items_artwork_is_served_so_the_evidence_can_be_drawn_on(tmp_path: Pa
     assert response.status_code == 200
     assert response.content == GOOD_BYTES
     assert response.headers["content-type"] == "image/png"
-
-
-def test_the_bytes_served_are_the_ones_that_were_uploaded(tmp_path: Path) -> None:
-    """Byte-for-byte, because the evidence note the UI prints depends on it.
-
-    Deskew and downscale happen inside the pipeline and their output is never stored, so
-    the `Evidence` boxes — normalised against that preprocessed image — sit slightly off
-    when drawn over the original. The UI says so. The moment this endpoint starts serving a
-    preprocessed copy, that note is wrong on every batch item, and the batch is also
-    carrying a second copy of 600 photographs under the retention promise.
-    """
-    client = make_client(tmp_path, provider=spec_provider())
-    job_id = post_batch(client, [row()]).json()["job_id"]
-    drain(client)
-    item = one_item(client, job_id)
-
-    served = client.get(f"/batch/{job_id}/items/{item['item_id']}/images/0").content
-    assert served == GOOD_BYTES
-    assert len(served) == len(GOOD_BYTES)
 
 
 def test_the_artwork_is_not_left_in_a_shared_cache(tmp_path: Path) -> None:
@@ -2080,6 +2120,29 @@ def test_an_unknown_job_and_an_unknown_item_are_the_same_404(tmp_path: Path) -> 
     assert unknown_job.status_code == 404
 
 
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/batch/job_nope",
+        "/batch/job_nope/export.csv",
+        "/batch/job_nope/items/itm_nope/images/0",
+    ],
+)
+def test_every_batch_endpoint_answers_a_missing_job_with_the_same_status(
+    tmp_path: Path, path: str
+) -> None:
+    """One fact, one status line. The job endpoints answered 400 and the item endpoints 404,
+    which meant the answer to "is this batch here" depended on which URL you asked.
+
+    404 is the correct one: the request is well-formed and correctly addressed, and the
+    thing it names is not on this server. `api/errors.py` says as much about why an error
+    may carry its own status rather than inherit the `user` default.
+    """
+    client = make_client(tmp_path, provider=spec_provider())
+    assert client.get(path).status_code == 404
+    assert client.post("/batch/job_nope/retry").status_code == 404
+
+
 def test_a_manifest_name_that_climbs_out_of_the_job_directory_serves_nothing(
     tmp_path: Path,
 ) -> None:
@@ -2105,7 +2168,14 @@ def test_a_manifest_name_that_climbs_out_of_the_job_directory_serves_nothing(
 
 def test_an_item_naming_a_traversal_path_is_a_404_over_http(tmp_path: Path) -> None:
     """The same attempt through the endpoint, because a guard in the store is only worth
-    what the route does with it."""
+    what the route does with it.
+
+    `stored_name` is patched away for the duration of the request, and that is the whole
+    point of the test. Without the patch the manifest name is hashed to a digest that is not
+    on disk, so the route 404s because the file is missing — it would answer exactly the
+    same way with the containment check deleted, which is a traversal test that cannot fail.
+    Verified by mutation: remove `is_relative_to` from `image_path` and this goes red.
+    """
     client = make_client(tmp_path, provider=spec_provider())
     job_id = post_batch(client, [row()]).json()["job_id"]
     drain(client)
@@ -2120,7 +2190,13 @@ def test_an_item_naming_a_traversal_path_is_a_404_over_http(tmp_path: Path) -> N
             (json.dumps(["../../secret.txt"]), item["item_id"]),
         )
 
-    response = client.get(f"/batch/{job_id}/items/{item['item_id']}/images/0")
+    with mock.patch.object(store_mod, "stored_name", lambda supplied: supplied):
+        naive = (store.images_root / job_id) / "../../secret.txt"
+        assert naive.resolve() == secret.resolve(), (
+            "the traversal must really reach the secret, or this test proves nothing"
+        )
+        response = client.get(f"/batch/{job_id}/items/{item['item_id']}/images/0")
+
     assert response.status_code == 404
     assert b"not label artwork" not in response.content
 
@@ -2152,6 +2228,14 @@ def _write(path: Path, data: bytes) -> Path:
 # The tool recommends and the agent decides. Batch had nowhere to put the second half of
 # that sentence, so the HITL-5 export — findings AND agent decisions — could only ever
 # carry one of the two things it names.
+
+
+def _finished(store: BatchStore, job_id: str) -> str:
+    """Drive one seeded item to `done`, because only a finished item takes decisions."""
+    item = store.claim(job_id=job_id)
+    assert item is not None
+    store.complete(item.item_id, _result(Recommendation.NEEDS_REVIEW))
+    return item.item_id
 
 
 def decide(
@@ -2268,6 +2352,86 @@ def test_a_ruling_that_is_not_one_of_the_two_is_refused(tmp_path: Path, value: s
     assert one_item(client, job_id)["decisions"] == {}, "a refused patch changes nothing"
 
 
+def test_a_ruling_cannot_be_recorded_before_the_verdict_it_rules_on(tmp_path: Path) -> None:
+    """The common path of the failure `retry_failed` guards against, and it was open.
+
+    An item that is queued or processing has a verdict COMING. Record a ruling on it, let
+    the worker finish, and the item reaches `done` carrying the agent's name on a judgement
+    of a result produced after they made it — and it goes straight into the CSV that HITL-5
+    says gets printed and handed upward. The retry path was guarded; this one, which is the
+    one that happens on every batch, was not.
+
+    Both halves are asserted. Removing the state check in `set_decisions` makes the PATCH
+    succeed and the first assertion fail; removing `decisions = '{}'` from `complete` makes
+    the ruling survive into the finished item and the last one fail.
+    """
+    provider = GatedProvider(spec_provider(), release_after=0)
+    client = make_client(tmp_path, provider=provider, batch_workers=1)
+    job_id = post_batch(client, [row()]).json()["job_id"]
+
+    wait_until(
+        lambda: client.get(f"/batch/{job_id}?include_pending=true").json()["items"],
+        what="the item to exist",
+    )
+    item_id = one_item(client, job_id)["item_id"]
+
+    refused = decide(client, job_id, item_id, {"brand_name": "confirmed"})
+    assert refused.status_code == 400
+    assert refused.json()["error"]["code"] == "item_not_checked"
+
+    # The backstop, forced: whatever got past the door must not survive the verdict landing.
+    store: BatchStore = client.app.state.batch_store
+    with store._conn() as connection:
+        connection.execute(
+            "UPDATE items SET decisions = ? WHERE item_id = ?",
+            (json.dumps({"brand_name": "confirmed"}), item_id),
+        )
+
+    provider.gate.set()
+    drain(client)
+
+    finished = one_item(client, job_id)
+    assert finished["state"] == ItemState.DONE.value
+    assert finished["result"] is not None
+    assert finished["decisions"] == {}, (
+        "a ruling made before the verdict existed survived into it"
+    )
+    export = client.get(f"/batch/{job_id}/export.csv").text
+    assert "brand_name=confirmed" not in export
+
+
+def test_a_requeue_drops_the_decisions_the_item_was_carrying(tmp_path: Path) -> None:
+    """Every path back onto the queue clears them, not only the one an agent asks for.
+
+    `requeue` is the automatic retry after a transient outage and `recover` is what runs
+    after a restart. Neither should ever find a decision — `set_decisions` refuses an item
+    in flight — but both operate on a database an older build or a crash may have left in
+    any state, and a ruling that outlives its verdict by any route is the same defect.
+    """
+    store = BatchStore(tmp_path)
+    job_id = seed(store, count=2)
+    requeued_by_hand = store.claim(job_id=job_id)
+    stranded = store.claim(job_id=job_id)
+    assert requeued_by_hand is not None and stranded is not None
+
+    for item_id in (requeued_by_hand.item_id, stranded.item_id):
+        with store._conn() as connection:
+            connection.execute(
+                "UPDATE items SET decisions = ? WHERE item_id = ?",
+                (json.dumps({"producer": "overridden"}), item_id),
+            )
+
+    # The automatic retry after a transient outage.
+    store.requeue(requeued_by_hand.item_id)
+    after_requeue = store.get_item(requeued_by_hand.item_id)
+    assert after_requeue is not None and after_requeue.decisions == {}
+
+    # The restart, which finds whatever the dead process left `processing`.
+    assert BatchStore(tmp_path).recover() == 1
+    after_recover = store.get_item(stranded.item_id)
+    assert after_recover is not None and after_recover.decisions == {}
+
+
 def test_decisions_on_an_expired_batch_are_refused(tmp_path: Path) -> None:
     """SEC-2 — a batch we say is deleted must not still accept writes."""
     client = make_client(tmp_path, provider=spec_provider())
@@ -2327,7 +2491,7 @@ def test_decisions_survive_a_restart(tmp_path: Path) -> None:
     """BATCH-6 — the review an agent did before lunch is still there after a deploy."""
     store = BatchStore(tmp_path)
     job_id = seed(store, count=1)
-    item_id = store.items(job_id)[0].item_id
+    item_id = _finished(store, job_id)
     store.set_decisions(item_id, {FieldName.BRAND_NAME: AgentDecision.CONFIRMED})
 
     reopened = BatchStore(tmp_path)
@@ -2348,7 +2512,7 @@ def test_a_database_written_before_decisions_existed_gains_the_column(
     """
     store = BatchStore(tmp_path)
     job_id = seed(store, count=1)
-    item_id = store.items(job_id)[0].item_id
+    item_id = _finished(store, job_id)
     with store._conn() as connection:
         connection.execute("ALTER TABLE items DROP COLUMN decisions")
         assert "decisions" not in {
@@ -2372,7 +2536,7 @@ def test_a_decision_this_build_cannot_name_is_dropped_rather_than_served(
     """
     store = BatchStore(tmp_path)
     job_id = seed(store, count=1)
-    item_id = store.items(job_id)[0].item_id
+    item_id = _finished(store, job_id)
     with store._conn() as connection:
         connection.execute(
             "UPDATE items SET decisions = ? WHERE item_id = ?",
@@ -2768,13 +2932,14 @@ def test_ordinary_values_are_left_exactly_as_they_are(ordinary: str) -> None:
     assert batch_routes._csv_safe(ordinary) == ordinary
 
 
-def test_the_export_route_applies_the_guard() -> None:
+def test_the_export_route_applies_the_guard(tmp_path: Path) -> None:
     """End to end over HTTP, because the sanitiser existing is not the same as it running.
 
     A helper defined and not called is how the confidence floor survived this whole build.
     """
-    config = Config(use_fake_provider=True)
-    app = create_app(config=config, provider=SpecBackedProvider("tc01_old_tom_clean"))
+    app = create_app(
+        config=make_config(tmp_path), provider=SpecBackedProvider("tc01_old_tom_clean")
+    )
     client = TestClient(app)
 
     manifest = (
@@ -2799,7 +2964,9 @@ def test_the_export_route_applies_the_guard() -> None:
     assert ",=cmd" not in body and body.count("'=cmd") == 1, body[:400]
 
 
-def test_the_new_decisions_column_goes_through_the_guard_like_every_other_cell() -> None:
+def test_the_new_decisions_column_goes_through_the_guard_like_every_other_cell(
+    tmp_path: Path,
+) -> None:
     """A column added after the sanitiser is a column the sanitiser does not cover.
 
     The risk is not a hostile decision — there are two of those and both are enum values.
@@ -2808,8 +2975,9 @@ def test_the_new_decisions_column_goes_through_the_guard_like_every_other_cell()
     guard has something to act on, and the assertion is that the route still put an
     apostrophe in front of it.
     """
-    config = Config(use_fake_provider=True)
-    app = create_app(config=config, provider=SpecBackedProvider("tc01_old_tom_clean"))
+    app = create_app(
+        config=make_config(tmp_path), provider=SpecBackedProvider("tc01_old_tom_clean")
+    )
     client = TestClient(app)
     job_id = client.post("/batch/sample").json()["job_id"]
     drain(client)

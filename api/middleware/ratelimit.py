@@ -42,6 +42,15 @@ from api.middleware.asgi import (
 #: still refuses a script.
 BATCH_SUBMIT_PER_MINUTE = 10
 
+#: `POST /batch/sample` takes no body at all and starts five real verifications, which
+#: makes it the only endpoint in this product that spends money on an empty request. At the
+#: submit lane's ten a minute one client could start fifty verifications a minute against a
+#: live key on a public URL with no authentication — around $150 an hour. Two a minute is
+#: still a demo anybody can click through; the bill is bounded by the hourly ceiling in
+#: `api/routes/batch.py`, which this cannot do because it is per-client and a distributed
+#: caller simply brings more clients.
+BATCH_SAMPLE_PER_MINUTE = 2
+
 #: Progress polling. Four a second is far above what the UI does and far below a flood.
 BATCH_READ_PER_MINUTE = 240
 
@@ -82,6 +91,7 @@ def lanes_for(verify_per_minute: int) -> tuple[Lane, ...]:
     return (
         Lane("exempt", 0),
         Lane("verify", max(1, verify_per_minute)),
+        Lane("batch_sample", BATCH_SAMPLE_PER_MINUTE),
         Lane("batch_submit", BATCH_SUBMIT_PER_MINUTE),
         Lane("batch_read", BATCH_READ_PER_MINUTE),
         Lane("default", DEFAULT_PER_MINUTE),
@@ -131,6 +141,12 @@ def lane_for(method: str, path: str, lanes: tuple[Lane, ...]) -> Lane:
         return by_name["verify"]
     if path == "/batch":
         return by_name["batch_submit" if method == "POST" else "batch_read"]
+    # Its own lane, and checked before the prefix rule below so it cannot fall into the
+    # submit one. It is the only endpoint here that starts real work from an EMPTY body:
+    # every other way to spend money on this service requires the caller to supply label
+    # artwork first, which is its own natural brake.
+    if path == "/batch/sample" and method == "POST":
+        return by_name["batch_sample"]
     if path.startswith("/batch/"):
         # `POST /batch/{id}/retry` re-queues failed items — it starts work, so it draws on
         # the submit budget rather than the generous read one.
@@ -292,6 +308,7 @@ class RateLimitMiddleware:
 
 __all__ = [
     "BATCH_READ_PER_MINUTE",
+    "BATCH_SAMPLE_PER_MINUTE",
     "BATCH_SUBMIT_PER_MINUTE",
     "DEFAULT_PER_MINUTE",
     "Lane",

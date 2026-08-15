@@ -484,6 +484,7 @@ lists one nothing emits.
 | Event | Level | Meaning |
 |---|---|---|
 | `app_started` | INFO | Process is up and serving. |
+| `batch_decisions` | INFO | An agent recorded or cleared decisions on one batch item. Carries how many rows the request touched and how many the item now carries — never which, and never what they were (SEC-4). |
 | `batch_exported` | INFO | A batch result CSV was produced. |
 | `batch_item_complete` | INFO | One batch item reached a verdict. |
 | `batch_item_failed` | WARNING | One batch item failed; the rest of the job continues. |
@@ -493,6 +494,8 @@ lists one nothing emits.
 | `batch_queued` | INFO | A batch job was accepted. |
 | `batch_recovered` | INFO | Unfinished batch items were picked back up after a restart. |
 | `batch_retry` | INFO | Failed items in a batch were requeued. |
+| `batch_sample_queued` | INFO | The built-in sample batch was started from the committed fixtures. Separate from batch_queued so demo traffic can be told from real work in the cost figures. |
+| `batch_sample_refused` | WARNING | The sample batch was refused because the hourly ceiling across all callers was reached. It is the only endpoint that spends money on an empty body, so this line is what says the bill was bounded rather than the feature broken. |
 | `circuit_breaker` | WARNING | The provider circuit opened or closed. Opening is the warning; closing rides the same event. |
 | `config_incomplete` | WARNING | A required setting is missing; /ready is red. |
 | `cost_model_unknown` | WARNING | A verification ran on a model with no entry in the price list; cost was estimated at the most expensive known tier. |

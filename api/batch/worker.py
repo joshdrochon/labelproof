@@ -137,6 +137,21 @@ class _BudgetedProvider:
     A provider that cannot be built is still a per-item failure with a readable reason, not
     a dead worker — it just leaves through `process`'s barrier now instead of a second one
     around construction, so it is logged like every other item failure.
+
+    **Two consequences, both accepted rather than overlooked.**
+
+    On a genuinely misconfigured server — no key, no fake mode — a 300-item batch now pays
+    full ingest, deskew and quality scoring on roughly 600 photographs before each item
+    discovers there is no provider, where it used to fail on the first line. That is CPU and
+    a few minutes; it is not tokens, and it is not money. The trade is a slower failure on a
+    server nobody has finished setting up, against the correct sentence on every unreadable
+    photograph on a server that works.
+
+    A keyless server can also now produce a *partly successful* batch: a pre-gated item
+    reaches `done` with Unreadable rows and no provider involved, alongside items that
+    failed for want of one. That reads oddly in a status summary, and it is still the
+    honest answer — the pre-gate really did check those images and really did conclude
+    nothing could be read from them, which is true whatever the provider situation is.
     """
 
     def __init__(

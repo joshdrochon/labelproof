@@ -141,7 +141,20 @@ def golden_entry(fixture: str) -> dict[str, Any]:
 
 
 def _entry(case: SampleCase) -> dict[str, Any]:
-    return golden_entry(case.fixture)
+    """The same lookup, with the message this screen has always shown.
+
+    Deliberately not `golden_entry` with a different string: a reviewer on the single-check
+    screen is told which SAMPLE cannot load, by the title on the card they just clicked.
+    A fixture name is our vocabulary, not theirs, and swapping one for the other would be a
+    user-facing regression bought for four lines of shared code.
+    """
+    entry = _golden().get(case.fixture)
+    if entry is None:
+        raise errors.InternalError(
+            f"The sample “{case.title}” names a fixture that is not in the "
+            f"committed set, so the demo cannot load it. Upload a label of your own."
+        )
+    return entry
 
 
 def servable_images() -> frozenset[str]:

@@ -27,6 +27,7 @@ and free; reading 1.2 GB into memory to write it out again is neither.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import shutil
@@ -40,6 +41,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from api.batch.models import (
+    TERMINAL_STATES,
     BatchItem,
     BatchJob,
     ItemFailure,
@@ -101,6 +103,19 @@ _ADDED_COLUMNS: tuple[tuple[str, str, str], ...] = (
         "ALTER TABLE items ADD COLUMN decisions TEXT NOT NULL DEFAULT '{}'",
     ),
 )
+
+
+class ItemStillRunning(Exception):
+    """A decision was recorded against an item that has no verdict for it yet.
+
+    A domain refusal rather than an HTTP one, because the check that produces it has to sit
+    inside the store's transaction to be worth anything, and the store has no business
+    choosing a status line. `api/routes/batch.py` turns it into a sentence.
+    """
+
+    def __init__(self, item_id: str):
+        super().__init__(f"{item_id} has not finished, so there is nothing to decide yet")
+        self.item_id = item_id
 
 
 def new_job_id() -> str:
@@ -182,7 +197,17 @@ class BatchStore:
             connection.close()
 
     def _migrate(self) -> None:
-        with self._conn() as connection:
+        """Create what is missing, add what a previous release did not have.
+
+        Under `_write_lock` and tolerant of losing the race, because two stores really can
+        be built at once against one volume: `api/retention.py` constructs its own from the
+        sweeper thread at boot, and the app builds one on the first batch request. The lock
+        only covers this process, so on the first deploy onto an existing database both can
+        see `decisions` absent and both issue the ALTER. The loser gets `duplicate column
+        name` out of `__init__` — a crash at startup, once per volume, for a migration that
+        in fact succeeded.
+        """
+        with self._write_lock, self._conn() as connection:
             connection.executescript(_SCHEMA)
             for table, column, statement in _ADDED_COLUMNS:
                 present = {
@@ -190,7 +215,10 @@ class BatchStore:
                     for row in connection.execute(f"PRAGMA table_info({table})")
                 }
                 if column not in present:
-                    connection.execute(statement)
+                    # Suppressed rather than checked again: another process adding the same
+                    # column is the only way this fails, and it is the outcome we wanted.
+                    with contextlib.suppress(sqlite3.OperationalError):
+                        connection.execute(statement)
 
     # --- writing ---------------------------------------------------------------------
 
@@ -328,11 +356,20 @@ class BatchStore:
     def complete(
         self, item_id: str, result: VerificationResult, *, now: float | None = None
     ) -> None:
+        """Store one item's verdict. Any decision recorded against an older one goes.
+
+        `set_decisions` refuses an item that is still running, so most of the time there is
+        nothing here to clear. This is the backstop for the window between the two: an agent
+        rules on a `failed` item at the same moment a retry requeues it, the ruling lands
+        just after the retry cleared it, and the worker then completes the item. Without
+        this line the agent's name ends up on a verdict produced after they gave it — the
+        exact failure the guard exists for, reached by a race instead of a bug.
+        """
         moment = time.time() if now is None else now
         with self._write_lock, self._conn() as connection:
             connection.execute(
-                "UPDATE items SET state = ?, result = ?, failure = NULL, finished_at = ? "
-                "WHERE item_id = ?",
+                "UPDATE items SET state = ?, result = ?, failure = NULL, decisions = '{}', "
+                "finished_at = ? WHERE item_id = ?",
                 (ItemState.DONE.value, result.model_dump_json(), moment, item_id),
             )
             _settle_job(connection, _job_of(connection, item_id), moment)
@@ -357,45 +394,74 @@ class BatchStore:
         the other's work. A decision that quietly disappears is worse than one that was
         never recorded, because the agent has already moved on believing it was kept.
 
+        **An item still in flight takes no decisions at all**, and that check lives here
+        rather than at the route because it has to be inside the same transaction to mean
+        anything. An item that is `queued` or `processing` has a verdict *coming*: record a
+        ruling on it, let the worker finish, and the item reaches `done` carrying the
+        agent's name on a judgement of a result produced after they made it — which then
+        goes into the printed report HITL-5 describes. That is the same failure
+        `retry_failed` guards against, arriving by the ordinary path rather than the rare
+        one. `TERMINAL_STATES` is the existing statement of "nothing more will happen to
+        this without an explicit retry", so it is the predicate, not a second list.
+
+        A `failed` item is terminal and does take decisions: "we could not check this, I
+        checked it by hand" is a real ruling, and it is why `retry_failed` has to clear
+        them.
+
         Read and write are one `BEGIN IMMEDIATE` transaction for the same reason `claim` is:
         two decisions arriving together would otherwise both read the old map and the second
         would write the first one out of existence.
         """
+        running = False
         with self._write_lock, self._conn() as connection:
             connection.execute("BEGIN IMMEDIATE")
             try:
                 row = connection.execute(
                     "SELECT * FROM items WHERE item_id = ?", (item_id,)
                 ).fetchone()
-                if row is None:
+                if row is None or (
+                    running := ItemState(str(row["state"])) not in TERMINAL_STATES
+                ):
                     connection.execute("ROLLBACK")
-                    return None
+                else:
+                    merged = dict(_decisions_of(row))
+                    for field, decision in updates.items():
+                        if decision is None:
+                            merged.pop(field, None)
+                        else:
+                            merged[field] = decision
 
-                merged = dict(_decisions_of(row))
-                for field, decision in updates.items():
-                    if decision is None:
-                        merged.pop(field, None)
-                    else:
-                        merged[field] = decision
-
-                connection.execute(
-                    "UPDATE items SET decisions = ? WHERE item_id = ?",
-                    (json.dumps({f.value: d.value for f, d in merged.items()}), item_id),
-                )
-                connection.execute("COMMIT")
+                    connection.execute(
+                        "UPDATE items SET decisions = ? WHERE item_id = ?",
+                        (json.dumps({f.value: d.value for f, d in merged.items()}), item_id),
+                    )
+                    connection.execute("COMMIT")
             except Exception:
                 connection.execute("ROLLBACK")
                 raise
+
+        # Raised outside the transaction, so the refusal cannot roll back twice.
+        if running:
+            raise ItemStillRunning(item_id)
+        if row is None:
+            return None
 
         item = _item_from_row(row)
         item.decisions = merged
         return item
 
     def requeue(self, item_id: str) -> None:
-        """Put an item back for another attempt. `attempts` is deliberately not reset."""
+        """Put an item back for another attempt. `attempts` is deliberately not reset.
+
+        Decisions go, for the reason `retry_failed` gives at length: whatever the agent
+        ruled on was about to be replaced. Every path that puts an item back on the queue
+        clears them — this one, `retry_failed` and `recover` — so there is no route by which
+        a ruling outlives the verdict it was made against.
+        """
         with self._write_lock, self._conn() as connection:
             connection.execute(
-                "UPDATE items SET state = ?, started_at = NULL WHERE item_id = ?",
+                "UPDATE items SET state = ?, decisions = '{}', started_at = NULL "
+                "WHERE item_id = ?",
                 (ItemState.QUEUED.value, item_id),
             )
 
@@ -438,10 +504,16 @@ class BatchStore:
         Requeueing is safe because verification has no side effects outside this store —
         it reads images and writes a result, so doing it twice costs one extra call and
         changes nothing else.
+
+        Decisions go with it, like every other requeue. A `processing` item should not be
+        carrying any — `set_decisions` refuses one — but this runs at startup against a file
+        an older build or a crash may have left in any state, which is the one place where
+        assuming an invariant holds is least justified.
         """
         with self._write_lock, self._conn() as connection:
             cursor = connection.execute(
-                "UPDATE items SET state = ?, started_at = NULL WHERE state = ?",
+                "UPDATE items SET state = ?, decisions = '{}', started_at = NULL "
+                "WHERE state = ?",
                 (ItemState.QUEUED.value, ItemState.PROCESSING.value),
             )
             return cursor.rowcount or 0

@@ -169,7 +169,24 @@ EVENTS: dict[str, tuple[int, str]] = {
         logging.INFO,
         "Unfinished batch items were picked back up after a restart.",
     ),
+    "batch_sample_queued": (
+        logging.INFO,
+        "The built-in sample batch was started from the committed fixtures. Separate from "
+        "batch_queued so demo traffic can be told from real work in the cost figures.",
+    ),
+    "batch_sample_refused": (
+        logging.WARNING,
+        "The sample batch was refused because the hourly ceiling across all callers was "
+        "reached. It is the only endpoint that spends money on an empty body, so this "
+        "line is what says the bill was bounded rather than the feature broken.",
+    ),
     "batch_retry": (logging.INFO, "Failed items in a batch were requeued."),
+    "batch_decisions": (
+        logging.INFO,
+        "An agent recorded or cleared decisions on one batch item. Carries how many rows "
+        "the request touched and how many the item now carries — never which, and never "
+        "what they were (SEC-4).",
+    ),
     "batch_exported": (logging.INFO, "A batch result CSV was produced."),
     "batch_purged": (logging.INFO, "A batch job's data passed its TTL and was deleted."),
     "batch_item_complete": (logging.INFO, "One batch item reached a verdict."),
