@@ -56,6 +56,7 @@ function item(overrides: Partial<BatchItem> & { item_id: string; row: number }):
     images: ['front.png'],
     result: null,
     failure: null,
+    decisions: {},
     created_at: 0,
     started_at: null,
     finished_at: null,

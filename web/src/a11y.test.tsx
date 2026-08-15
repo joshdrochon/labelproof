@@ -111,20 +111,34 @@ describe('axe, over each screen', () => {
     expectClean(await auditOf(container));
   });
 
-  it('finds nothing on the batch drill-in dialog', async () => {
-    const item: BatchItem = {
+  /**
+   * The drill-in is audited in both of its shapes, because they are different markup.
+   * With no picture the dialog is a banner and a table; with one it grows a figure, a
+   * numbered legend and — on a two-sided label — a picture switcher, none of which the
+   * no-image case exercises. Auditing only the simpler one would have left the panel an
+   * agent actually reads uncovered.
+   */
+  function drillInItem(pictures: number): BatchItem {
+    return {
       item_id: 'a',
       job_id: 'j',
       row: 3,
       state: 'done',
       attempts: 1,
       application: APPLICATION,
-      images: [],
+      images: Array.from({ length: pictures }, (_, i) => `label-${i}.png`),
       result: {
         request_id: 'req_1',
         aggregate: aggregate(),
         fields: [fieldResult('government_warning', 'mismatch')],
-        images: [],
+        images: Array.from({ length: pictures }, (_, index) => ({
+          index,
+          role: index === 0 ? 'front' : 'back',
+          quality: {
+            blur: 0.9, exposure: 0.9, glare: 0.02, skew_deg: 0.4,
+            resolution_ok: true, verdict: 'ok', reason: null,
+          },
+        })),
         timings_ms: {
           ingest: 1, quality: 1, preprocess: 1, extract: 1, compare: 1,
           adjudicate: null, total: 5,
@@ -135,11 +149,24 @@ describe('axe, over each screen', () => {
         },
       },
       failure: null,
+      decisions: {},
       created_at: 0,
       started_at: null,
       finished_at: null,
     };
-    const { container } = render(<ItemDetail item={item} onClose={() => undefined} />);
+  }
+
+  it('finds nothing on the batch drill-in dialog', async () => {
+    const { container } = render(
+      <ItemDetail item={drillInItem(0)} onClose={() => undefined} />,
+    );
+    expectClean(await auditOf(container));
+  });
+
+  it('finds nothing on the drill-in with the label picture and its switcher', async () => {
+    const { container } = render(
+      <ItemDetail item={drillInItem(2)} onClose={() => undefined} />,
+    );
     expectClean(await auditOf(container));
   });
 });

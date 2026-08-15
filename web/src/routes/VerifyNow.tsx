@@ -20,12 +20,12 @@ import type {
   ApiError,
   Application,
   FieldName,
-  FieldResult,
   VerificationResult,
 } from '../types';
 import { ApiFailure, listSamples, loadSample, prepareReading, verify } from '../api';
 import type { PreparedReading, SampleCase } from '../api';
-import { NEXT_STEP_LABELS, STAGES, fieldLabel } from '../copy';
+import { NEXT_STEP_LABELS, STAGES } from '../copy';
+import { evidenceRegions } from '../evidence';
 import { attentionFields, settledFields } from '../triage';
 import AggregateBanner from '../components/AggregateBanner';
 import ApplicationForm, {
@@ -37,7 +37,6 @@ import ApplicationForm, {
 import type { ApplicationDraft, DraftProblems } from '../components/ApplicationForm';
 import Dropzone from '../components/Dropzone';
 import EvidenceOverlay from '../components/EvidenceOverlay';
-import type { EvidenceRegion } from '../components/EvidenceOverlay';
 import FieldRow from '../components/FieldRow';
 
 type Phase = 'setup' | 'working' | 'checked' | 'problem';
@@ -563,29 +562,9 @@ function ChecklistScreen({
   const attention = useMemo(() => attentionFields(result.fields), [result.fields]);
   const settled = useMemo(() => settledFields(result.fields), [result.fields]);
 
-  const regions = useMemo<EvidenceRegion[]>(() => {
-    let counter = 0;
-    const build = (row: FieldResult, needsAttention: boolean): EvidenceRegion[] => {
-      const bbox = row.evidence?.bbox;
-      // No box, no highlight. Never a guessed region.
-      if (!bbox) return [];
-      if (needsAttention) counter += 1;
-      return [
-        {
-          field: row.field,
-          label: fieldLabel(row.field),
-          bbox,
-          imageIndex: row.evidence?.image_index ?? 0,
-          number: needsAttention ? counter : null,
-          needsAttention,
-        },
-      ];
-    };
-    return [
-      ...attention.flatMap((row) => build(row, true)),
-      ...settled.flatMap((row) => build(row, false)),
-    ];
-  }, [attention, settled]);
+  // Built by `evidence.ts`, which the batch drill-in also calls. Inlining it here again
+  // would let the two screens number the same label differently.
+  const regions = useMemo(() => evidenceRegions(result.fields), [result.fields]);
 
   const numberFor = useCallback(
     (field: FieldName) => regions.find((r) => r.field === field)?.number ?? null,
