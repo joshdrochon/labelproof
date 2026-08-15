@@ -616,9 +616,14 @@ def built_spa(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 def test_the_batch_router_is_reachable_over_http(tmp_path: Path) -> None:
-    """`GET /batch/{id}` must answer as batch, not as an unknown address."""
+    """`GET /batch/{id}` must answer as batch, not as an unknown address.
+
+    404 and `batch_not_found` together are what say the router is mounted: the SPA fallback
+    also answers 404, so the status alone would pass with batch unreachable. The code is the
+    half that can only come from the batch router.
+    """
     response = make_client(storage_dir=str(tmp_path)).get("/batch/job_does_not_exist")
-    assert response.status_code == 400
+    assert response.status_code == 404
     assert response.json()["error"]["code"] == "batch_not_found"
 
 

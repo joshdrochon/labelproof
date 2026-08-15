@@ -36,14 +36,14 @@ from api.provider.base import (
 )
 from api.rules import adjudicate as adjudicate_mod
 from fixtures.generator.catalog import by_name
-from fixtures.generator.layout import FIELD_BANDS
+from fixtures.generator.layout import BANDS_BY_FACE
 from fixtures.generator.spec import LabelSpec
 
-#: Where each field actually sits on a generated label.
+#: Where each field actually sits on a generated label, per face.
 #:
-#: Taken from `fixtures.generator.layout.FIELD_BANDS`, which is measured from the rendered
-#: pixels and guarded by `test_robustness` — move a block in `render.py` and that suite
-#: fails rather than silently drifting.
+#: Taken from `fixtures.generator.layout`, which is measured from the rendered pixels and
+#: guarded by `test_robustness` and `test_sample_regions` — move a block in `render.py` and
+#: those suites fail rather than silently drifting.
 #:
 #: This used to be a second, hand-guessed table living here. It disagreed with the
 #: measured one about every field, and about the warning by twenty percent of the image
@@ -53,8 +53,30 @@ from fixtures.generator.spec import LabelSpec
 #: pointing at nothing, under a caption promising "outlined areas are where each checked
 #: value was read".
 #:
-#: Two tables describing one layout, and only one of them was measured.
-_APPROX_REGIONS: dict[FieldName, BoundingBox] = dict(FIELD_BANDS)
+#: It was then replaced by the measured single-face table applied to every image, which
+#: fixed the single-face samples and left the same lie standing on the back of a
+#: two-image one: a back face drops the brand and class/type blocks, so its warning sits
+#: at 0.27-0.35 and the single-face box at 0.45-0.54 landed on bare paper below it. TC-16
+#: is in the sample batch, so that was still the first thing a reviewer clicked.
+#:
+#: One table per layout now, and every one of them measured.
+_REGIONS_BY_FACE: dict[str, dict[FieldName, BoundingBox]] = BANDS_BY_FACE
+
+
+def _regions_for(role: str | None) -> dict[FieldName, BoundingBox]:
+    """The measured bands for the face this image shows, or none at all.
+
+    `role` is what the pipeline concluded the image is (`api.verify.default_roles`, which
+    labels one image `single` and a pair `front`/`back`) and it rides on `ImageInput`. It
+    is the only face signal that describes *this image*: `spec.face` describes the fixture,
+    and for a two-faced fixture it names one face while the request carries both.
+
+    An unnamed or unrecognised role gets an empty table, so every `bbox` comes back None
+    and the reviewer sees no outline. That is the honest answer — the demo's caption says
+    an outline is where a value was read, and we do not know where we read this one. A box
+    drawn from a guessed layout is not a smaller version of that answer, it is a false one.
+    """
+    return _REGIONS_BY_FACE.get(role or "", {})
 
 
 def _unless_unread(unread: frozenset[str], name: str, value: bool) -> bool | None:
@@ -77,8 +99,13 @@ class SpecBackedProvider:
         name: FieldName,
         value: str | None,
         present: bool,
+        regions: dict[FieldName, BoundingBox],
     ) -> None:
         """Record one extracted field.
+
+        `regions` is the band table for the face this image shows, passed in rather than
+        read from a module global: the same provider serves the front and the back of one
+        application in a single call, and they are laid out differently.
 
         A method rather than a closure over the per-image `fields` dict: a function
         defined inside the loop captures the loop variable by reference, which is a live
@@ -89,14 +116,14 @@ class SpecBackedProvider:
         if name in self.illegible:
             fields[name] = ExtractedField(
                 value=None, confidence=0.0, legible=False,
-                bbox=_APPROX_REGIONS.get(name),
+                bbox=regions.get(name),
             )
             return
         fields[name] = ExtractedField(
             value=value or None,
             confidence=0.95 if value else 0.0,
             legible=True,
-            bbox=_APPROX_REGIONS.get(name),
+            bbox=regions.get(name),
         )
 
     def extract(self, request: ExtractionRequest) -> ExtractionResponse:
@@ -108,20 +135,39 @@ class SpecBackedProvider:
             on_front = face in ("front", "single")
             on_back = face in ("back", "single")
 
+            # Which fields are on this face comes from the spec, which is ground truth for
+            # what was drawn. *Where* they are comes from the image's own role only — the
+            # spec of a two-faced fixture names one face while the request carries both,
+            # so falling back to it here would draw the front's boxes on the back.
+            regions = _regions_for(image.role)
+
             fields: dict[FieldName, ExtractedField] = {}
             put = self._put
 
-            put(fields, FieldName.BRAND_NAME, spec.brand_name, on_front)
-            put(fields, FieldName.CLASS_TYPE, spec.class_type, on_front)
-            put(fields, FieldName.ALCOHOL_CONTENT, spec.alcohol_text, on_front or face == "back")
-            put(fields, FieldName.NET_CONTENTS, spec.net_contents, on_front or face == "back")
+            put(fields, FieldName.BRAND_NAME, spec.brand_name, on_front, regions)
+            put(fields, FieldName.CLASS_TYPE, spec.class_type, on_front, regions)
+            put(
+                fields,
+                FieldName.ALCOHOL_CONTENT,
+                spec.alcohol_text,
+                on_front or face == "back",
+                regions,
+            )
+            put(
+                fields,
+                FieldName.NET_CONTENTS,
+                spec.net_contents,
+                on_front or face == "back",
+                regions,
+            )
             put(
                 fields,
                 FieldName.COUNTRY_OF_ORIGIN,
                 spec.country_of_origin,
                 on_front or face == "back",
+                regions,
             )
-            put(fields, FieldName.PRODUCER, spec.producer, on_back)
+            put(fields, FieldName.PRODUCER, spec.producer, on_back, regions)
 
             warning_text: str | None = None
             typography = WarningTypography()
@@ -129,7 +175,7 @@ class SpecBackedProvider:
                 if FieldName.GOVERNMENT_WARNING in self.illegible:
                     fields[FieldName.GOVERNMENT_WARNING] = ExtractedField(
                         value=None, confidence=0.0, legible=False,
-                        bbox=_APPROX_REGIONS[FieldName.GOVERNMENT_WARNING],
+                        bbox=regions.get(FieldName.GOVERNMENT_WARNING),
                     )
                 else:
                     warning_text = spec.rendered_warning()
@@ -160,7 +206,7 @@ class SpecBackedProvider:
                     )
                     fields[FieldName.GOVERNMENT_WARNING] = ExtractedField(
                         value=warning_text, confidence=0.95, legible=True,
-                        bbox=_APPROX_REGIONS[FieldName.GOVERNMENT_WARNING],
+                        bbox=regions.get(FieldName.GOVERNMENT_WARNING),
                     )
 
             extractions.append(

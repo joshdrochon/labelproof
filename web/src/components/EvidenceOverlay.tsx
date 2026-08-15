@@ -46,6 +46,16 @@ interface EvidenceOverlayProps {
   geometryIsApproximate?: boolean;
   /** Rendered under the picture when the image itself was hard to read. */
   qualityNote?: string | null;
+  /**
+   * The picture at `imageUrl` did not load.
+   *
+   * Without this the "not available to display" branch below is unreachable for any
+   * caller that builds its URL rather than holding a blob — the URL is always a string,
+   * so the panel renders an `<img>` and the browser draws its broken-image icon beside a
+   * full checklist. A missing picture has to be SAID, because the agent's next move
+   * depends on knowing the evidence is absent rather than assuming they mis-clicked.
+   */
+  onImageError?: () => void;
   children?: React.ReactNode;
 }
 
@@ -118,6 +128,7 @@ export default function EvidenceOverlay({
   onActivateField,
   geometryIsApproximate = false,
   qualityNote = null,
+  onImageError,
   children,
 }: EvidenceOverlayProps) {
   const visible = useMemo(
@@ -144,7 +155,12 @@ export default function EvidenceOverlay({
 
       <div className="evidence__frame">
         {imageUrl ? (
-          <img className="evidence__image" src={imageUrl} alt={imageLabel} />
+          <img
+            className="evidence__image"
+            src={imageUrl}
+            alt={imageLabel}
+            onError={onImageError}
+          />
         ) : (
           <p className="evidence__missing">
             The label picture is not available to display. The checklist beside this

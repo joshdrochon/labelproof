@@ -52,8 +52,10 @@ from api.batch.worker import MAX_ATTEMPTS, ProviderBudget, WorkerPool, process
 from api.config import Config
 from api.main import create_app
 from api.models import (
+    AgentDecision,
     Aggregate,
     Application,
+    Commodity,
     Cost,
     FieldName,
     FieldResult,
@@ -874,11 +876,11 @@ def test_an_expired_batch_is_not_served_even_before_it_is_swept(tmp_path: Path) 
 
     for path in (f"/batch/{job_id}", f"/batch/{job_id}/export.csv"):
         response = client.get(path)
-        assert response.status_code == 400, path
+        assert response.status_code == 404, path
         assert response.json()["error"]["code"] == "batch_not_found", path
 
     retry = client.post(f"/batch/{job_id}/retry")
-    assert retry.status_code == 400
+    assert retry.status_code == 404
     assert retry.json()["error"]["code"] == "batch_not_found"
 
 
@@ -1679,6 +1681,330 @@ def test_an_unreadable_manifest_is_a_user_error_not_a_crash(tmp_path: Path) -> N
     assert "template" in response.json()["error"]["message"]
 
 
+# --- HTTP: the sample batch (UX-1, DEL-5) ---------------------------------------------
+#
+# Verify Now has had one-click samples since LP-088 and batch had nothing, so seeing this
+# half of the product meant hand-building a CSV and gathering images first. These run in
+# SAMPLE MODE — no provider injected, `use_fake_provider` on, exactly the configuration a
+# reviewer's server is in — because that is the path the endpoint exists to serve and the
+# one where a provider that fails closed on unrecognised artwork can quietly turn a demo
+# into five failures.
+
+
+def sample_client(tmp_path: Path) -> TestClient:
+    """The shipped sample-mode configuration, with nothing injected in front of it."""
+    config = make_config(tmp_path, anthropic_api_key="", batch_workers=3)
+    return TestClient(create_app(config=config, provider=None))
+
+
+def test_the_sample_batch_queues_seven_and_reports_the_eighth(tmp_path: Path) -> None:
+    """TC-20 — three bad rows out of 300 must queue 297, and nobody believes that unseen.
+
+    Row-level validation is the part of batch mode hardest to take on trust, and a reviewer
+    cannot see it unless the manifest they were handed already contains a bad row. So one
+    of the eight is deliberately malformed, and `row_errors` names its line and its column
+    the way a spreadsheet does.
+    """
+    client = sample_client(tmp_path)
+    response = client.post("/batch/sample")
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["accepted"] == 7
+    assert len(body["row_errors"]) == 1
+    error = body["row_errors"][0]
+    assert error["column"] == "commodity"
+    assert error["row"] >= 2, "the header is row 1, so no application can be row 1"
+    assert body["unmatched_files"] == [], (
+        "the malformed row reuses an image another row names, so nothing is left unused"
+    )
+
+
+def test_the_sample_batch_answers_in_the_same_shape_as_an_upload(tmp_path: Path) -> None:
+    """A client that can read `POST /batch` must not need a second reader for this."""
+    client = sample_client(tmp_path)
+    sampled = client.post("/batch/sample").json()
+
+    assert set(sampled) == {
+        "job_id",
+        "accepted",
+        "row_errors",
+        "unmatched_files",
+        "message",
+    }
+    assert sampled["job_id"].startswith("job_")
+
+
+def test_the_sample_batch_covers_the_outcomes_a_reviewer_needs_to_see(
+    tmp_path: Path,
+) -> None:
+    """One click, and the taxonomy is on screen: a pass, a value that disagrees, a missing
+    warning, a required statement absent under a rule that turns on the commodity, an import
+    with no country of origin, a judgment call, and a photograph nobody could read.
+
+    Asserted as outcomes rather than as fixture names. A row that quietly stopped producing
+    the thing it was chosen for would still name the right fixture, and the sample would go
+    on claiming to show something it no longer shows.
+    """
+    client = sample_client(tmp_path)
+    job_id = client.post("/batch/sample").json()["job_id"]
+    drain(client)
+
+    items = client.get(f"/batch/{job_id}?include_pending=true").json()["items"]
+    assert len(items) == 7
+    assert all(item["state"] == ItemState.DONE.value for item in items), (
+        "sample mode failed a row it was supposed to check: "
+        f"{[i['failure'] for i in items if i['failure']]}"
+    )
+
+    by_image = {item["images"][0]: item for item in items}
+    outcomes = {
+        name: item["result"]["aggregate"]["recommendation"] for name, item in by_image.items()
+    }
+    assert outcomes["tc16_front_back_front.png"] == Recommendation.READY_TO_APPROVE.value
+
+    # "The label says 40%, the application says 45%" is the premise of the product. A demo
+    # that shows every other tier and skips this one has skipped its own argument.
+    abv = by_image["tc08_abv_mismatch.png"]["result"]["fields"]
+    assert next(f for f in abv if f["field"] == "alcohol_content")["verdict"] == (
+        Verdict.MISMATCH.value
+    )
+
+    warning = by_image["tc07_missing_warning.png"]["result"]["fields"]
+    assert next(f for f in warning if f["field"] == "government_warning")["verdict"] == (
+        Verdict.MISSING.value
+    )
+
+    # A wine above 14%. The same silence would be Not applicable on a table wine, so this
+    # row is the one that shows the commodity being read rather than one rule for all three.
+    wine = by_image["tc26_wine_above_fourteen_needs_abv.png"]["result"]["fields"]
+    assert next(f for f in wine if f["field"] == "alcohol_content")["verdict"] == (
+        Verdict.MISSING.value
+    )
+
+    origin = by_image["tc19_import_missing_origin.png"]["result"]["fields"]
+    assert next(f for f in origin if f["field"] == "country_of_origin")["verdict"] == (
+        Verdict.MISSING.value
+    )
+
+    # The judgment tier. Without a row like this the demo only ever shows the tool deciding,
+    # never the tool declining to decide, which is half of what it is for.
+    variation = by_image["tc02_stones_throw.png"]["result"]["fields"]
+    assert next(f for f in variation if f["field"] == "brand_name")["verdict"] == (
+        Verdict.ACCEPTABLE_VARIATION.value
+    )
+    assert outcomes["tc02_stones_throw.png"] == Recommendation.NEEDS_REVIEW.value
+
+    blurred = by_image["tc14_blur_hopeless.png"]["result"]
+    assert {f["verdict"] for f in blurred["fields"]} == {Verdict.UNREADABLE.value}
+
+
+def test_no_two_rows_of_the_sample_read_the_same_on_screen(tmp_path: Path) -> None:
+    """The table has to be seven rows about seven applications, or it reads as noise.
+
+    This was five rows of OLD TOM DISTILLERY with five different recommendations beside
+    them — one product apparently checked five times and disagreed with itself — and the
+    first thing anyone said about the sample was that its results table made no sense.
+
+    **The assertion is on what the reviewer can see, not on a brand count.** A count is the
+    wrong tripwire now: every mismatch fixture in the golden set is Old Tom's, so buying a
+    fifth brand costs the sample the Mismatch tier, and four of the seven rows are his by
+    necessity. What has to be true is weaker than "seven brands" and stronger than "four
+    brands" — that no row is a duplicate of another *as rendered*. The triage table shows
+    brand, recommendation, and the field that drove it, so those three together are a row's
+    identity on screen; two rows sharing all three would be the original complaint back
+    again, whatever the brand column happened to say.
+
+    The brand floor stays underneath it as a second, cruder guard, because rows can be
+    distinguishable and still tiring to scan. It sits exactly on its floor at four, so
+    swapping any of Stonehill, Maison Claire or Stone's Throw for another Old Tom fixture
+    fails here — which is the drift this is watching for.
+
+    The two are not one assertion wearing two hats, and that was checked rather than
+    assumed. Replacing the wine row with `tc03_title_case_warning` trips the duplicate check
+    only; replacing the import row with `tc06_buried_warning` — an Old Tom fixture whose
+    recommendation and driving field collide with nothing else here — trips the brand floor
+    only. Either guard alone would let one of those through.
+
+    Asserted against the manifest the endpoint actually writes, not against `_SAMPLE_ROWS`,
+    because the manifest is what the reviewer downloads and what the parser reads. A row
+    whose commodity was written from a hardcoded constant rather than from its own fixture
+    would pass a check of the tuple and fail here.
+    """
+    client = sample_client(tmp_path)
+    job_id = client.post("/batch/sample").json()["job_id"]
+    drain(client)
+
+    store: BatchStore = client.app.state.batch_store
+    queued = store.items(job_id)
+    brands = [item.application.brand_name for item in queued]
+    commodities = {item.application.commodity for item in queued}
+
+    # What the triage table puts in front of a reviewer, row by row.
+    on_screen = [
+        (
+            item.application.brand_name,
+            item.result.aggregate.recommendation if item.result else None,
+            item.result.aggregate.driving_field if item.result else None,
+        )
+        for item in queued
+    ]
+    duplicates = [row for row in on_screen if on_screen.count(row) > 1]
+    assert not duplicates, (
+        f"two rows of the sample render identically — same brand, same recommendation, "
+        f"same driving field — so the table shows one application twice: {duplicates}"
+    )
+
+    assert len(set(brands)) >= 4, f"the sample reads as one product checked repeatedly: {brands}"
+    assert len(commodities) >= 2, (
+        f"every row is the same commodity, so the sample shows no rule that depends on "
+        f"it: {commodities}"
+    )
+    assert Commodity.WINE in commodities, (
+        "the wine row is what proves alcohol content is judged against the commodity"
+    )
+
+
+def test_the_unreadable_row_blames_the_photograph_and_not_the_server(
+    tmp_path: Path,
+) -> None:
+    """In sample mode a hopeless photograph must still read as a hopeless photograph.
+
+    The fixture provider fails closed on artwork it does not recognise, which is right — but
+    resolving one for an image the pre-gate has already refused put that refusal on the row
+    instead. A blurred photograph came back as "this server is running in sample mode",
+    which is the tool blaming its own configuration for a defect in the picture, and it is
+    the one row of this sample that would make a reviewer think the demo is broken.
+    """
+    client = sample_client(tmp_path)
+    job_id = client.post("/batch/sample").json()["job_id"]
+    drain(client)
+
+    items = client.get(f"/batch/{job_id}?include_pending=true").json()["items"]
+    blurred = next(i for i in items if i["images"] == ["tc14_blur_hopeless.png"])
+
+    assert blurred["state"] == ItemState.DONE.value
+    assert blurred["failure"] is None
+    rationale = blurred["result"]["aggregate"]["rationale"]
+    assert "sample mode" not in rationale.lower()
+    assert "blurry" in rationale.lower() or "retake" in rationale.lower()
+
+
+def test_the_sample_batch_invents_no_results(tmp_path: Path) -> None:
+    """It supplies the paperwork, not the answers.
+
+    Every row goes through the real parser, the real pairing rule and the real pipeline. A
+    provider that cannot read the artwork must therefore produce failures here, not a
+    cheerful canned verdict — which is the same thing `api/routes/sample.py` refuses to do
+    and the worst bug this codebase has ever carried.
+    """
+    config = make_config(tmp_path, batch_workers=2)
+    client = TestClient(create_app(config=config, provider=FailingProvider(retryable=False)))
+    job_id = client.post("/batch/sample").json()["job_id"]
+    drain(client)
+
+    items = client.get(f"/batch/{job_id}?include_pending=true").json()["items"]
+    readable = [item for item in items if item["images"] != ["tc14_blur_hopeless.png"]]
+    assert readable, "the sample lost every row that needs a provider"
+    assert all(item["state"] == ItemState.FAILED.value for item in readable)
+    assert Recommendation.READY_TO_APPROVE.value not in json.dumps(items)
+
+
+def test_the_sample_manifest_is_written_in_the_parsers_own_columns(tmp_path: Path) -> None:
+    """A hand-written header would drift the first time a column is added, and the sample
+    would start refusing itself with a message about a missing column."""
+    client = sample_client(tmp_path)
+    job_id = client.post("/batch/sample").json()["job_id"]
+    drain(client)
+
+    store: BatchStore = client.app.state.batch_store
+    queued = store.items(job_id)
+    assert [item.row for item in queued] == [2, 3, 4, 5, 6, 7, 8]
+    assert all(item.application.brand_name for item in queued)
+
+
+def test_the_sample_names_only_fixtures_this_build_actually_ships(tmp_path: Path) -> None:
+    """The committed set is the source of truth for both demos, so a rename fails here
+    rather than shipping a sample that 500s on the reviewer's first click."""
+    for spec in batch_routes._SAMPLE_ROWS:
+        files = batch_routes._sample_artwork(spec)
+        assert files, f"{spec.fixture} names no artwork"
+        for path in files:
+            assert path.is_file(), f"{path} is not in this build"
+
+
+def test_a_sample_click_leaves_the_committed_fixtures_where_they_were(
+    tmp_path: Path,
+) -> None:
+    """`_assemble` RENAMES the files it keeps into the job directory.
+
+    Pointing it at `fixtures/` rather than at a copy would move the committed artwork out of
+    the source tree on the first click, and the second click — and every test that reads a
+    fixture afterwards — would fail with a missing file.
+    """
+    before = {
+        path: path.stat().st_size
+        for spec in batch_routes._SAMPLE_ROWS
+        for path in batch_routes._sample_artwork(spec)
+    }
+    client = sample_client(tmp_path)
+    client.post("/batch/sample")
+    drain(client)
+
+    assert {path: path.stat().st_size for path in before} == before
+
+
+def test_the_sample_batch_is_capped_across_every_caller_not_just_each_one(
+    tmp_path: Path,
+) -> None:
+    """The only endpoint here that spends money on an empty body.
+
+    Its rate-limit lane is per client, and a caller with more addresses gets more budget —
+    so the lane alone bounds nobody's bill. At ten a minute in the submit lane, one IP could
+    start fifty real verifications a minute against a live key on a public URL with no
+    authentication. This is the number that says what a day of being pointed at costs.
+    """
+    ceiling = batch_routes._SampleCeiling(per_hour=3)
+    assert [ceiling.take(now=100.0) for _ in range(4)] == [True, True, True, False]
+
+    # An hour later the window has slid and the server is open again.
+    assert ceiling.take(now=100.0 + 3601.0) is True
+
+
+def test_the_ceiling_refuses_in_the_products_voice_not_as_a_broken_feature(
+    tmp_path: Path,
+) -> None:
+    """A reviewer who meets the cap must be told the tool works and how to see it work.
+
+    "429" on a demo button reads as "this is broken", and the reviewer stops there. The
+    sentence has to say the server is busy, not that the feature is.
+    """
+    client = sample_client(tmp_path)
+    client.app.state.sample_ceiling = batch_routes._SampleCeiling(per_hour=1)
+
+    assert client.post("/batch/sample").status_code == 200
+    refused = client.post("/batch/sample")
+    drain(client)
+
+    assert refused.status_code == 429
+    error = refused.json()["error"]
+    assert error["code"] == "sample_ceiling_reached"
+    assert "Nothing is wrong" in error["message"]
+    assert "upload a manifest" in error["message"], "it names the way through"
+
+
+def test_a_refused_sample_starts_no_work_at_all(tmp_path: Path) -> None:
+    """A cap that refuses the response after queueing the items has capped nothing."""
+    client = sample_client(tmp_path)
+    client.app.state.sample_ceiling = batch_routes._SampleCeiling(per_hour=0)
+
+    assert client.post("/batch/sample").status_code == 429
+    store: BatchStore = client.app.state.batch_store
+    with store._conn() as connection:
+        queued = connection.execute("SELECT COUNT(*) AS n FROM items").fetchone()["n"]
+    assert queued == 0
+
+
 # --- HTTP: progressive results (BATCH-5, BATCH-4) -------------------------------------
 
 
@@ -1723,7 +2049,7 @@ def test_status_reports_counts_by_state(tmp_path: Path) -> None:
 
 def test_status_for_an_unknown_batch_explains_retention(tmp_path: Path) -> None:
     response = make_client(tmp_path).get("/batch/job_does_not_exist")
-    assert response.status_code == 400
+    assert response.status_code == 404
     message = response.json()["error"]["message"]
     assert "24 hours" in message
     assert "start a new batch" in message.lower()
@@ -1741,6 +2067,573 @@ def test_pending_items_are_hidden_unless_asked_for(tmp_path: Path) -> None:
 
     provider.gate.set()
     drain(client)
+
+
+# --- HTTP: item artwork (HITL-3) ------------------------------------------------------
+#
+# HITL-3 asks for the extracted value AND the image region for every field. Batch showed
+# the values with no picture behind them, so the evidence half of the requirement was met
+# on the single-check screen and missing on the half of the product that handles 300
+# applications at a time. These pin the endpoint that closes it.
+
+
+BACK_IMAGE = "old_tom_back.png"
+BACK_BYTES = checker_png((180, 180, 200))
+
+
+def one_item(client: TestClient, job_id: str) -> dict[str, Any]:
+    body = client.get(f"/batch/{job_id}?include_pending=true").json()
+    assert body["items"], "the job has no items to read artwork from"
+    item: dict[str, Any] = body["items"][0]
+    return item
+
+
+def test_an_items_artwork_is_served_so_the_evidence_can_be_drawn_on(tmp_path: Path) -> None:
+    """Without this the batch item view draws boxes on nothing and HITL-3 is half met.
+
+    Byte for byte with what was uploaded, which is a decision and not an accident. Deskew
+    and downscale happen inside the pipeline and their output is never stored, so the
+    `Evidence` boxes — normalised against that preprocessed image — sit slightly off when
+    drawn over the original, and the UI says so. The moment this endpoint serves a
+    preprocessed copy that note is wrong on every batch item, and the batch is carrying a
+    second copy of 600 photographs under the retention promise.
+    """
+    client = make_client(tmp_path, provider=spec_provider())
+    job_id = post_batch(client, [row()]).json()["job_id"]
+    drain(client)
+    item = one_item(client, job_id)
+
+    response = client.get(f"/batch/{job_id}/items/{item['item_id']}/images/0")
+    assert response.status_code == 200
+    assert response.content == GOOD_BYTES
+    assert response.headers["content-type"] == "image/png"
+
+
+def test_the_artwork_is_not_left_in_a_shared_cache(tmp_path: Path) -> None:
+    """SEC-2 — a cached copy outlives the batch, and the deletion promise with it.
+
+    The batch and its images are deleted after the retention window. A response a proxy is
+    free to keep is a copy of somebody's unpublished label artwork sitting somewhere the
+    sweeper cannot reach, while the API tells the caller it is gone.
+    """
+    client = make_client(tmp_path, provider=spec_provider())
+    job_id = post_batch(client, [row()]).json()["job_id"]
+    drain(client)
+    item = one_item(client, job_id)
+
+    headers = client.get(f"/batch/{job_id}/items/{item['item_id']}/images/0").headers
+    assert headers["cache-control"] == "private, no-store"
+
+
+def test_the_index_is_the_one_the_extraction_numbers(tmp_path: Path) -> None:
+    """`Extraction.image_index` is 0-based, so an evidence box needs no translation.
+
+    Off by one here puts the front label's box on the back photograph — an evidence overlay
+    that is confidently pointing at the wrong picture, which is worse than none at all.
+    """
+    client = make_client(tmp_path, provider=spec_provider())
+    job_id = post_batch(
+        client,
+        [row(back_image=BACK_IMAGE)],
+        images={GOOD_IMAGE: GOOD_BYTES, BACK_IMAGE: BACK_BYTES},
+    ).json()["job_id"]
+    drain(client)
+    item = one_item(client, job_id)
+    assert item["images"] == [GOOD_IMAGE, BACK_IMAGE]
+
+    base = f"/batch/{job_id}/items/{item['item_id']}/images"
+    assert client.get(f"{base}/0").content == GOOD_BYTES
+    assert client.get(f"{base}/1").content == BACK_BYTES
+
+
+@pytest.mark.parametrize("index", [1, 7, -1])
+def test_an_index_with_no_image_behind_it_is_a_404(tmp_path: Path, index: int) -> None:
+    """A one-image item asked for its second photograph names nothing, and says so."""
+    client = make_client(tmp_path, provider=spec_provider())
+    job_id = post_batch(client, [row()]).json()["job_id"]
+    drain(client)
+    item = one_item(client, job_id)
+
+    response = client.get(f"/batch/{job_id}/items/{item['item_id']}/images/{index}")
+    assert response.status_code == 404
+    assert response.json()["error"]["next_step"] == "navigate"
+
+
+def test_an_expired_batchs_artwork_is_no_longer_served(tmp_path: Path) -> None:
+    """SEC-2 — the same expiry check the status endpoint uses, or the promise has a hole.
+
+    Purging is driven by `POST /batch`, so between expiry and the next upload the files are
+    still on disk. Status and export refuse them; an image endpoint that did not would hand
+    back the artwork itself, which is the most identifiable thing a batch holds.
+    """
+    client = make_client(tmp_path, provider=spec_provider())
+    job_id = post_batch(client, [row()]).json()["job_id"]
+    drain(client)
+    item = one_item(client, job_id)
+    path = f"/batch/{job_id}/items/{item['item_id']}/images/0"
+    assert client.get(path).status_code == 200
+
+    expire(client, job_id)
+
+    refused = client.get(path)
+    assert refused.status_code == 404
+    assert refused.content != GOOD_BYTES
+
+
+def test_an_item_cannot_be_fetched_under_another_batchs_reference(tmp_path: Path) -> None:
+    """Otherwise the expiry check above guards nothing: an expired batch's artwork would
+    come back through a live batch's URL, because the item ID is all the lookup needed."""
+    client = make_client(tmp_path, provider=spec_provider())
+    stale = post_batch(client, [row()]).json()["job_id"]
+    live = post_batch(client, [row()]).json()["job_id"]
+    drain(client)
+    item = one_item(client, stale)
+    expire(client, stale)
+
+    response = client.get(f"/batch/{live}/items/{item['item_id']}/images/0")
+    assert response.status_code == 404
+    assert response.content != GOOD_BYTES
+
+
+def test_an_unknown_job_and_an_unknown_item_are_the_same_404(tmp_path: Path) -> None:
+    """Both are "that URL names nothing here", and neither confirms the other exists."""
+    client = make_client(tmp_path, provider=spec_provider())
+    job_id = post_batch(client, [row()]).json()["job_id"]
+    drain(client)
+
+    unknown_item = client.get(f"/batch/{job_id}/items/itm_nope/images/0")
+    unknown_job = client.get("/batch/job_nope/items/itm_nope/images/0")
+    assert unknown_item.status_code == 404
+    assert unknown_job.status_code == 404
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/batch/job_nope",
+        "/batch/job_nope/export.csv",
+        "/batch/job_nope/items/itm_nope/images/0",
+    ],
+)
+def test_every_batch_endpoint_answers_a_missing_job_with_the_same_status(
+    tmp_path: Path, path: str
+) -> None:
+    """One fact, one status line. The job endpoints answered 400 and the item endpoints 404,
+    which meant the answer to "is this batch here" depended on which URL you asked.
+
+    404 is the correct one: the request is well-formed and correctly addressed, and the
+    thing it names is not on this server. `api/errors.py` says as much about why an error
+    may carry its own status rather than inherit the `user` default.
+    """
+    client = make_client(tmp_path, provider=spec_provider())
+    assert client.get(path).status_code == 404
+    assert client.post("/batch/job_nope/retry").status_code == 404
+
+
+def test_a_manifest_name_that_climbs_out_of_the_job_directory_serves_nothing(
+    tmp_path: Path,
+) -> None:
+    """SEC-5 — image names come from an uploaded manifest, and a manifest can say anything.
+
+    `stored_name` hashes the name, so today the digest is what stops the climb. This
+    patches that away on purpose: it is the change a future debugging convenience would
+    make — readable stored names — and the containment check is what has to still be
+    standing afterwards. Without it, `image_path` would resolve straight onto the secret
+    below and hand it back over HTTP.
+    """
+    store = BatchStore(tmp_path / "store")
+    job = store.create_job()
+    secret = tmp_path / "store" / "secret.txt"
+    secret.write_bytes(b"not label artwork")
+
+    with mock.patch.object(store_mod, "stored_name", lambda supplied: supplied):
+        naive = (store.images_root / job.job_id) / "../../secret.txt"
+        assert naive.resolve() == secret.resolve(), "the traversal must really reach it"
+        assert store.image_path(job.job_id, "../../secret.txt") is None
+        assert store.read_image(job.job_id, "../../secret.txt") is None
+
+
+def test_an_item_naming_a_traversal_path_is_a_404_over_http(tmp_path: Path) -> None:
+    """The same attempt through the endpoint, because a guard in the store is only worth
+    what the route does with it.
+
+    `stored_name` is patched away for the duration of the request, and that is the whole
+    point of the test. Without the patch the manifest name is hashed to a digest that is not
+    on disk, so the route 404s because the file is missing — it would answer exactly the
+    same way with the containment check deleted, which is a traversal test that cannot fail.
+    Verified by mutation: remove `is_relative_to` from `image_path` and this goes red.
+    """
+    client = make_client(tmp_path, provider=spec_provider())
+    job_id = post_batch(client, [row()]).json()["job_id"]
+    drain(client)
+
+    store: BatchStore = client.app.state.batch_store
+    item = one_item(client, job_id)
+    secret = Path(store.root) / "secret.txt"
+    secret.write_bytes(b"not label artwork")
+    with store._conn() as connection:
+        connection.execute(
+            "UPDATE items SET images = ? WHERE item_id = ?",
+            (json.dumps(["../../secret.txt"]), item["item_id"]),
+        )
+
+    with mock.patch.object(store_mod, "stored_name", lambda supplied: supplied):
+        naive = (store.images_root / job_id) / "../../secret.txt"
+        assert naive.resolve() == secret.resolve(), (
+            "the traversal must really reach the secret, or this test proves nothing"
+        )
+        response = client.get(f"/batch/{job_id}/items/{item['item_id']}/images/0")
+
+    assert response.status_code == 404
+    assert b"not label artwork" not in response.content
+
+
+def test_stored_bytes_nobody_can_identify_are_never_served_as_markup(
+    tmp_path: Path,
+) -> None:
+    """A file this tool cannot name must not be handed back as something a browser runs.
+
+    The stored bytes are whatever was uploaded. Trusting the manifest's `.png` and echoing
+    a content type from it is how an uploaded file becomes script on this origin.
+    """
+    assert (
+        batch_routes._stored_media_type(_write(tmp_path / "junk.img", b"<html>hi</html>"))
+        == "application/octet-stream"
+    )
+    assert batch_routes._stored_media_type(_write(tmp_path / "real.img", GOOD_BYTES)) == (
+        "image/png"
+    )
+
+
+def _write(path: Path, data: bytes) -> Path:
+    path.write_bytes(data)
+    return path
+
+
+# --- HTTP: agent decisions (HITL-1, HITL-5) -------------------------------------------
+#
+# The tool recommends and the agent decides. Batch had nowhere to put the second half of
+# that sentence, so the HITL-5 export — findings AND agent decisions — could only ever
+# carry one of the two things it names.
+
+
+def _finished(store: BatchStore, job_id: str) -> str:
+    """Drive one seeded item to `done`, because only a finished item takes decisions."""
+    item = store.claim(job_id=job_id)
+    assert item is not None
+    store.complete(item.item_id, _result(Recommendation.NEEDS_REVIEW))
+    return item.item_id
+
+
+def decide(
+    client: TestClient, job_id: str, item_id: str, decisions: dict[str, str | None]
+) -> Any:
+    return client.patch(
+        f"/batch/{job_id}/items/{item_id}/decisions", json={"decisions": decisions}
+    )
+
+
+def test_a_decision_is_recorded_against_the_row_the_agent_ruled_on(tmp_path: Path) -> None:
+    client = make_client(tmp_path, provider=spec_provider())
+    job_id = post_batch(client, [row()]).json()["job_id"]
+    drain(client)
+    item = one_item(client, job_id)
+
+    response = decide(client, job_id, item["item_id"], {"brand_name": "confirmed"})
+    assert response.status_code == 200
+    assert response.json()["decisions"] == {"brand_name": "confirmed"}
+    assert response.json()["item_id"] == item["item_id"]
+
+
+def test_a_decision_is_still_there_after_the_page_is_reloaded(tmp_path: Path) -> None:
+    """The failure this feature exists to prevent is "it looked saved but wasn't".
+
+    A decisions map served only by the endpoint that wrote it is exactly that failure: the
+    agent rules on a row, the table refreshes on the next poll, and their work is gone from
+    the screen while sitting in the database. So the item carries it on every read.
+    """
+    client = make_client(tmp_path, provider=spec_provider())
+    job_id = post_batch(client, [row()]).json()["job_id"]
+    drain(client)
+    item = one_item(client, job_id)
+
+    decide(client, job_id, item["item_id"], {"alcohol_content": "overridden"})
+
+    reloaded = one_item(client, job_id)
+    assert reloaded["decisions"] == {"alcohol_content": "overridden"}
+
+
+def test_rows_the_patch_does_not_mention_are_left_alone(tmp_path: Path) -> None:
+    """An agent rules on one row at a time, so a request carries one row.
+
+    Replacing the whole map instead of merging is how two tabs — or an agent and whoever
+    they handed the queue to — each silently erase the other's work.
+    """
+    client = make_client(tmp_path, provider=spec_provider())
+    job_id = post_batch(client, [row()]).json()["job_id"]
+    drain(client)
+    item_id = one_item(client, job_id)["item_id"]
+
+    decide(client, job_id, item_id, {"brand_name": "confirmed"})
+    body = decide(client, job_id, item_id, {"net_contents": "overridden"}).json()
+
+    assert body["decisions"] == {
+        "brand_name": "confirmed",
+        "net_contents": "overridden",
+    }
+
+
+def test_null_takes_a_decision_back(tmp_path: Path) -> None:
+    client = make_client(tmp_path, provider=spec_provider())
+    job_id = post_batch(client, [row()]).json()["job_id"]
+    drain(client)
+    item_id = one_item(client, job_id)["item_id"]
+
+    decide(client, job_id, item_id, {"brand_name": "confirmed", "producer": "overridden"})
+    body = decide(client, job_id, item_id, {"brand_name": None}).json()
+
+    assert body["decisions"] == {"producer": "overridden"}
+
+
+def test_an_item_with_no_decisions_says_so_rather_than_omitting_the_field(
+    tmp_path: Path,
+) -> None:
+    """A client that has to tell "no decisions" from "this build has no decisions" by the
+    absence of a key will get it wrong once and then stop trusting the field."""
+    client = make_client(tmp_path, provider=spec_provider())
+    job_id = post_batch(client, [row()]).json()["job_id"]
+    drain(client)
+
+    assert one_item(client, job_id)["decisions"] == {}
+
+
+@pytest.mark.parametrize("name", ["brandname", "vintage", "", "BRAND_NAME"])
+def test_a_field_this_tool_does_not_check_is_refused_in_a_sentence(
+    tmp_path: Path, name: str
+) -> None:
+    """Not a pydantic dump. Every other refusal this app makes is written for a person."""
+    client = make_client(tmp_path, provider=spec_provider())
+    job_id = post_batch(client, [row()]).json()["job_id"]
+    drain(client)
+    item_id = one_item(client, job_id)["item_id"]
+
+    response = decide(client, job_id, item_id, {name: "confirmed"})
+    assert response.status_code == 400
+    error = response.json()["error"]
+    assert error["code"] == "unknown_field"
+    assert "government_warning" in error["message"], "the message lists what is accepted"
+
+
+@pytest.mark.parametrize("value", ["approved", "rejected", "pending", "Confirmed", ""])
+def test_a_ruling_that_is_not_one_of_the_two_is_refused(tmp_path: Path, value: str) -> None:
+    """Two values and the absence of one. A third would reach the printed report as a word
+    nobody can define."""
+    client = make_client(tmp_path, provider=spec_provider())
+    job_id = post_batch(client, [row()]).json()["job_id"]
+    drain(client)
+    item_id = one_item(client, job_id)["item_id"]
+
+    response = decide(client, job_id, item_id, {"brand_name": value})
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "unknown_decision"
+    assert one_item(client, job_id)["decisions"] == {}, "a refused patch changes nothing"
+
+
+def test_a_ruling_cannot_be_recorded_before_the_verdict_it_rules_on(tmp_path: Path) -> None:
+    """The common path of the failure `retry_failed` guards against, and it was open.
+
+    An item that is queued or processing has a verdict COMING. Record a ruling on it, let
+    the worker finish, and the item reaches `done` carrying the agent's name on a judgement
+    of a result produced after they made it — and it goes straight into the CSV that HITL-5
+    says gets printed and handed upward. The retry path was guarded; this one, which is the
+    one that happens on every batch, was not.
+
+    Both halves are asserted. Removing the state check in `set_decisions` makes the PATCH
+    succeed and the first assertion fail; removing `decisions = '{}'` from `complete` makes
+    the ruling survive into the finished item and the last one fail.
+    """
+    provider = GatedProvider(spec_provider(), release_after=0)
+    client = make_client(tmp_path, provider=provider, batch_workers=1)
+    job_id = post_batch(client, [row()]).json()["job_id"]
+
+    wait_until(
+        lambda: client.get(f"/batch/{job_id}?include_pending=true").json()["items"],
+        what="the item to exist",
+    )
+    item_id = one_item(client, job_id)["item_id"]
+
+    refused = decide(client, job_id, item_id, {"brand_name": "confirmed"})
+    assert refused.status_code == 400
+    assert refused.json()["error"]["code"] == "item_not_checked"
+
+    # The backstop, forced: whatever got past the door must not survive the verdict landing.
+    store: BatchStore = client.app.state.batch_store
+    with store._conn() as connection:
+        connection.execute(
+            "UPDATE items SET decisions = ? WHERE item_id = ?",
+            (json.dumps({"brand_name": "confirmed"}), item_id),
+        )
+
+    provider.gate.set()
+    drain(client)
+
+    finished = one_item(client, job_id)
+    assert finished["state"] == ItemState.DONE.value
+    assert finished["result"] is not None
+    assert finished["decisions"] == {}, (
+        "a ruling made before the verdict existed survived into it"
+    )
+    export = client.get(f"/batch/{job_id}/export.csv").text
+    assert "brand_name=confirmed" not in export
+
+
+def test_a_requeue_drops_the_decisions_the_item_was_carrying(tmp_path: Path) -> None:
+    """Every path back onto the queue clears them, not only the one an agent asks for.
+
+    `requeue` is the automatic retry after a transient outage and `recover` is what runs
+    after a restart. Neither should ever find a decision — `set_decisions` refuses an item
+    in flight — but both operate on a database an older build or a crash may have left in
+    any state, and a ruling that outlives its verdict by any route is the same defect.
+    """
+    store = BatchStore(tmp_path)
+    job_id = seed(store, count=2)
+    requeued_by_hand = store.claim(job_id=job_id)
+    stranded = store.claim(job_id=job_id)
+    assert requeued_by_hand is not None and stranded is not None
+
+    for item_id in (requeued_by_hand.item_id, stranded.item_id):
+        with store._conn() as connection:
+            connection.execute(
+                "UPDATE items SET decisions = ? WHERE item_id = ?",
+                (json.dumps({"producer": "overridden"}), item_id),
+            )
+
+    # The automatic retry after a transient outage.
+    store.requeue(requeued_by_hand.item_id)
+    after_requeue = store.get_item(requeued_by_hand.item_id)
+    assert after_requeue is not None and after_requeue.decisions == {}
+
+    # The restart, which finds whatever the dead process left `processing`.
+    assert BatchStore(tmp_path).recover() == 1
+    after_recover = store.get_item(stranded.item_id)
+    assert after_recover is not None and after_recover.decisions == {}
+
+
+def test_decisions_on_an_expired_batch_are_refused(tmp_path: Path) -> None:
+    """SEC-2 — a batch we say is deleted must not still accept writes."""
+    client = make_client(tmp_path, provider=spec_provider())
+    job_id = post_batch(client, [row()]).json()["job_id"]
+    drain(client)
+    item_id = one_item(client, job_id)["item_id"]
+    expire(client, job_id)
+
+    response = decide(client, job_id, item_id, {"brand_name": "confirmed"})
+    assert response.status_code == 404
+
+
+def test_an_unknown_item_cannot_be_ruled_on(tmp_path: Path) -> None:
+    client = make_client(tmp_path, provider=spec_provider())
+    job_id = post_batch(client, [row()]).json()["job_id"]
+    drain(client)
+
+    assert decide(client, job_id, "itm_nope", {"brand_name": "confirmed"}).status_code == 404
+
+
+def test_a_retry_clears_the_decisions_on_the_item_it_requeues(tmp_path: Path) -> None:
+    """A ruling recorded against the verdict a retry replaces is worse than none at all.
+
+    An agent who marks a failed item "overridden" to mean "I checked this one by hand" and
+    then retries it has to be asked again — otherwise their name sits on a judgement of a
+    result they never saw, in the report HITL-5 says gets printed and handed upward.
+    """
+    provider = PoisonProvider(spec_provider())
+    client = make_client(tmp_path, provider=provider)
+    job_id = post_batch(
+        client,
+        [row(), row(front=POISON_IMAGE)],
+        images={GOOD_IMAGE: GOOD_BYTES, POISON_IMAGE: POISON_BYTES},
+    ).json()["job_id"]
+    drain(client)
+
+    items = client.get(f"/batch/{job_id}?include_pending=true").json()["items"]
+    failed = next(i for i in items if i["state"] == ItemState.FAILED.value)
+    survivor = next(i for i in items if i["state"] == ItemState.DONE.value)
+    decide(client, job_id, failed["item_id"], {"brand_name": "overridden"})
+    decide(client, job_id, survivor["item_id"], {"brand_name": "confirmed"})
+
+    client.post(f"/batch/{job_id}/retry")
+    drain(client)
+
+    after = {
+        item["item_id"]: item["decisions"]
+        for item in client.get(f"/batch/{job_id}?include_pending=true").json()["items"]
+    }
+    assert after[failed["item_id"]] == {}, "the retried item kept a stale ruling"
+    assert after[survivor["item_id"]] == {"brand_name": "confirmed"}, (
+        "retry touched an item it was not asked to rerun"
+    )
+
+
+def test_decisions_survive_a_restart(tmp_path: Path) -> None:
+    """BATCH-6 — the review an agent did before lunch is still there after a deploy."""
+    store = BatchStore(tmp_path)
+    job_id = seed(store, count=1)
+    item_id = _finished(store, job_id)
+    store.set_decisions(item_id, {FieldName.BRAND_NAME: AgentDecision.CONFIRMED})
+
+    reopened = BatchStore(tmp_path)
+    reloaded = reopened.get_item(item_id)
+    assert reloaded is not None
+    assert reloaded.decisions == {FieldName.BRAND_NAME: AgentDecision.CONFIRMED}
+
+
+def test_a_database_written_before_decisions_existed_gains_the_column(
+    tmp_path: Path,
+) -> None:
+    """`CREATE TABLE IF NOT EXISTS` does nothing to a table that already exists.
+
+    So a schema change made only in `_SCHEMA` is invisible to the one database that
+    matters — the file on the deployed machine, holding the jobs BATCH-6 promises will
+    survive a restart. Without the `ALTER TABLE`, the first read after the deploy raises
+    `no such column: decisions` on every job an agent started before it.
+    """
+    store = BatchStore(tmp_path)
+    job_id = seed(store, count=1)
+    item_id = _finished(store, job_id)
+    with store._conn() as connection:
+        connection.execute("ALTER TABLE items DROP COLUMN decisions")
+        assert "decisions" not in {
+            str(r["name"]) for r in connection.execute("PRAGMA table_info(items)")
+        }
+
+    reopened = BatchStore(tmp_path)
+    item = reopened.get_item(item_id)
+    assert item is not None and item.decisions == {}
+    assert reopened.set_decisions(item_id, {FieldName.PRODUCER: AgentDecision.CONFIRMED})
+
+
+def test_a_decision_this_build_cannot_name_is_dropped_rather_than_served(
+    tmp_path: Path,
+) -> None:
+    """A column is not a schema, and the export is printed.
+
+    Anything that wrote this file — an older build, a hand-run UPDATE during an incident —
+    could leave a word here that this build has no definition for. Carrying it through to a
+    case file is how an undefined term ends up in front of a reviewer.
+    """
+    store = BatchStore(tmp_path)
+    job_id = seed(store, count=1)
+    item_id = _finished(store, job_id)
+    with store._conn() as connection:
+        connection.execute(
+            "UPDATE items SET decisions = ? WHERE item_id = ?",
+            (json.dumps({"brand_name": "escalated", "vintage": "confirmed",
+                         "producer": "overridden"}), item_id),
+        )
+
+    item = store.get_item(item_id)
+    assert item is not None
+    assert item.decisions == {FieldName.PRODUCER: AgentDecision.OVERRIDDEN}
 
 
 # --- HTTP: retry (BATCH-8) ------------------------------------------------------------
@@ -1821,6 +2714,52 @@ def test_export_carries_the_findings_not_only_the_verdicts(tmp_path: Path) -> No
     rows_out = list(csv.DictReader(io.StringIO(client.get(f"/batch/{job_id}/export.csv").text)))
     assert rows_out[0]["findings"]
     assert "net_contents" in rows_out[0]["findings"]
+
+
+def test_the_export_carries_the_agent_decisions_beside_the_findings(
+    tmp_path: Path,
+) -> None:
+    """HITL-5 names two things in one report: findings AND agent decisions.
+
+    Until the decisions column existed the export could only ever carry half of what the
+    requirement asks for — the tool's half. This is the case file Dave prints, and a report
+    that shows what the tool said with no record of what the agent did about it is the
+    half that leaves the human out.
+    """
+    client = make_client(tmp_path, provider=spec_provider())
+    job_id = post_batch(client, [row()]).json()["job_id"]
+    drain(client)
+    item_id = one_item(client, job_id)["item_id"]
+    decide(
+        client,
+        job_id,
+        item_id,
+        {"alcohol_content": "overridden", "brand_name": "confirmed"},
+    )
+
+    rows_out = list(csv.DictReader(io.StringIO(client.get(f"/batch/{job_id}/export.csv").text)))
+    assert rows_out[0]["agent_decisions"] == "brand_name=confirmed | alcohol_content=overridden"
+
+
+def test_a_row_nobody_has_ruled_on_exports_an_empty_cell(tmp_path: Path) -> None:
+    """Blank, not "pending" or "none". A word there reads as a judgement about the label."""
+    client = make_client(tmp_path, provider=spec_provider())
+    job_id = post_batch(client, [row()]).json()["job_id"]
+    drain(client)
+
+    rows_out = list(csv.DictReader(io.StringIO(client.get(f"/batch/{job_id}/export.csv").text)))
+    assert rows_out[0]["agent_decisions"] == ""
+
+
+def test_the_decisions_column_sits_second_to_last(tmp_path: Path) -> None:
+    """Next to `rationale`, because what the tool said and what the agent did are read
+    together. After `images` is where a printed page has stopped being read."""
+    client = make_client(tmp_path, provider=spec_provider())
+    job_id = post_batch(client, [row()]).json()["job_id"]
+    drain(client)
+
+    header = client.get(f"/batch/{job_id}/export.csv").text.splitlines()[0].split(",")
+    assert header[-2:] == ["agent_decisions", "images"]
 
 
 def test_a_failed_item_exports_its_reason(tmp_path: Path) -> None:
@@ -2080,13 +3019,14 @@ def test_ordinary_values_are_left_exactly_as_they_are(ordinary: str) -> None:
     assert batch_routes._csv_safe(ordinary) == ordinary
 
 
-def test_the_export_route_applies_the_guard() -> None:
+def test_the_export_route_applies_the_guard(tmp_path: Path) -> None:
     """End to end over HTTP, because the sanitiser existing is not the same as it running.
 
     A helper defined and not called is how the confidence floor survived this whole build.
     """
-    config = Config(use_fake_provider=True)
-    app = create_app(config=config, provider=SpecBackedProvider("tc01_old_tom_clean"))
+    app = create_app(
+        config=make_config(tmp_path), provider=SpecBackedProvider("tc01_old_tom_clean")
+    )
     client = TestClient(app)
 
     manifest = (
@@ -2109,6 +3049,34 @@ def test_the_export_route_applies_the_guard() -> None:
     body = client.get(f"/batch/{job_id}/export.csv").text
     assert "=cmd" in body, "the value should still be readable, just not executable"
     assert ",=cmd" not in body and body.count("'=cmd") == 1, body[:400]
+
+
+def test_the_new_decisions_column_goes_through_the_guard_like_every_other_cell(
+    tmp_path: Path,
+) -> None:
+    """A column added after the sanitiser is a column the sanitiser does not cover.
+
+    The risk is not a hostile decision — there are two of those and both are enum values.
+    It is the shape of the change: someone appends a cell to the row, or writes it into the
+    file directly, on the far side of the `_csv_safe` map. The text is forced here so the
+    guard has something to act on, and the assertion is that the route still put an
+    apostrophe in front of it.
+    """
+    app = create_app(
+        config=make_config(tmp_path), provider=SpecBackedProvider("tc01_old_tom_clean")
+    )
+    client = TestClient(app)
+    job_id = client.post("/batch/sample").json()["job_id"]
+    drain(client)
+
+    with mock.patch.object(
+        batch_routes, "_decisions_text", return_value="=cmd|'/c calc'!A0"
+    ):
+        body = client.get(f"/batch/{job_id}/export.csv").text
+
+    assert "=cmd" in body, "the value should still be readable, just not executable"
+    assert ",=cmd" not in body, "a spreadsheet would execute this cell on open"
+    assert body.count("'=cmd") == 7, "every row's decisions cell, not only the first"
 
 
 # --- cold-start wiring (LP-334) -------------------------------------------------------

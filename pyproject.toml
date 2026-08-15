@@ -120,7 +120,7 @@ ignore = [
 #                          threshold in one module, and `T.PREGATE_HOPELESS` reads as the
 #                          citation it is.
 #   E, F                 — one-letter result/expectation factories local to a test module.
-#   ProviderUnavailable, NetworkAccessDenied
+#   ProviderUnavailable, NetworkAccessDenied, ItemStillRunning
 #                        — read as the state they describe. `…Error` adds a syllable and
 #                          no information, and the codebase set this convention first.
 extend-ignore-names = [
@@ -130,6 +130,7 @@ extend-ignore-names = [
     "F",
     "ProviderUnavailable",
     "NetworkAccessDenied",
+    "ItemStillRunning",
 ]
 
 [tool.ruff.lint.flake8-tidy-imports]

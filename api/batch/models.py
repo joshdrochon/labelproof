@@ -22,6 +22,7 @@ from enum import StrEnum
 from pydantic import BaseModel, Field
 
 from api.models import (
+    AgentDecision,
     Application,
     Cost,
     FieldName,
@@ -93,6 +94,18 @@ class BatchItem(BaseModel):
     images: list[str] = Field(default_factory=list)
     result: VerificationResult | None = None
     failure: ItemFailure | None = None
+    decisions: dict[FieldName, AgentDecision] = Field(default_factory=dict)
+    """What the agent ruled on each row, for the fields they have ruled on (HITL-5).
+
+    On the item rather than beside it, so it rides along with every read of the item —
+    `GET /batch/{id}`, the export, the PATCH response. An agent who records a decision and
+    then reloads the page must see it still there; a decisions map served from only one of
+    the three endpoints is the "it looked saved but wasn't" failure this exists to prevent.
+
+    Sparse on purpose. An absent field is one nobody has ruled on yet, which is a different
+    fact from either decision and is not worth a third enum value to say.
+    """
+
     created_at: float = 0.0
     started_at: float | None = None
     finished_at: float | None = None

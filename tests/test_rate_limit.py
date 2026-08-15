@@ -24,6 +24,7 @@ from fastapi.testclient import TestClient
 from api.config import Config
 from api.middleware.ratelimit import (
     BATCH_READ_PER_MINUTE,
+    BATCH_SAMPLE_PER_MINUTE,
     BATCH_SUBMIT_PER_MINUTE,
     RateLimiter,
     lane_for,
@@ -45,8 +46,23 @@ LANES = lanes_for(30)
         ("POST", "/verify", "verify"),
         ("POST", "/batch", "batch_submit"),
         ("POST", "/batch/job_abc/retry", "batch_submit"),
+        # Its own lane. One click starts five real verifications from an EMPTY body, which
+        # nothing else in this product does — every other route to the model needs the
+        # caller to supply artwork first. Two a minute is still a demo; the bill is bounded
+        # by the hourly ceiling in the route, which a per-client lane cannot do.
+        ("POST", "/batch/sample", "batch_sample"),
+        # The GET is an ordinary read that 404s. Only the POST spends anything.
+        ("GET", "/batch/sample", "batch_read"),
         ("GET", "/batch/job_abc", "batch_read"),
         ("GET", "/batch/job_abc/export.csv", "batch_read"),
+        # Artwork for the evidence overlay. One item view fetches an image per photograph
+        # on top of the polling the status endpoint is already doing, so it has to sit in
+        # the generous read lane rather than anywhere near the verification budget.
+        ("GET", "/batch/job_abc/items/itm_abc/images/0", "batch_read"),
+        # A write, and still the read lane: recording a decision makes no model call. It is
+        # a click at click frequency, and the submit lane's ten a minute would rate-limit an
+        # agent working briskly down a 300-row queue against themselves.
+        ("PATCH", "/batch/job_abc/items/itm_abc/decisions", "batch_read"),
         ("GET", "/batch/manifest-template.csv", "batch_read"),
         ("GET", "/sample", "default"),
         ("GET", "/", "default"),
@@ -55,6 +71,33 @@ LANES = lanes_for(30)
 )
 def test_each_path_draws_on_the_budget_it_should(method: str, path: str, expected: str) -> None:
     assert lane_for(method, path, LANES).name == expected
+
+
+def test_the_sample_batch_gets_the_tightest_lane_in_the_table() -> None:
+    """It is the only endpoint that spends money on an empty body, so it is priced hardest.
+
+    Asserted as an ordering rather than as the number 2, because what has to stay true is
+    that nobody widens it back to the submit lane's budget while reading this as a typo.
+    """
+    lane = lane_for("POST", "/batch/sample", LANES)
+    assert lane.name == "batch_sample"
+    assert lane.per_minute == BATCH_SAMPLE_PER_MINUTE
+    assert lane.per_minute < BATCH_SUBMIT_PER_MINUTE < BATCH_READ_PER_MINUTE
+
+
+def test_the_sample_lane_cannot_spend_the_submit_budget() -> None:
+    """Separate buckets, so a reviewer clicking the sample cannot lock themselves out of
+    uploading a real batch, and a script hammering the sample cannot buy more of it by
+    exhausting a lane it does not draw on."""
+    limiter = RateLimiter(LANES)
+    sample = lane_for("POST", "/batch/sample", LANES)
+    submit = lane_for("POST", "/batch", LANES)
+
+    for _ in range(BATCH_SAMPLE_PER_MINUTE + 5):
+        limiter.check(sample, "1.2.3.4", now=100.0)
+
+    assert limiter.check(sample, "1.2.3.4", now=100.0) > 0.0
+    assert limiter.check(submit, "1.2.3.4", now=100.0) == 0.0
 
 
 def test_health_checks_are_never_limited() -> None:

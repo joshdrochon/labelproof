@@ -123,14 +123,58 @@ class ProviderBudget:
 
 
 class _BudgetedProvider:
-    """Wraps the real provider so every batch call passes through the shared budget."""
+    """The item's provider: resolved when it is first needed, and behind the shared budget.
 
-    def __init__(self, inner: ExtractionProvider, budget: ProviderBudget):
-        self._inner = inner
+    **Resolution is deferred, and that is not tidiness.** `verify_item` pre-gates the
+    artwork before it extracts anything, so an image nobody could read never reaches a
+    provider at all — and in sample mode resolving one anyway was actively wrong. The
+    fixture provider fails closed on artwork it does not recognise (rightly), and that
+    refusal landed on items the pre-gate had already answered honestly: a photograph too
+    blurred to read came back as "this server is running in sample mode" instead of "this
+    image could not be read", which is the tool blaming its own configuration for a defect
+    in the picture. The costs are unchanged either way; only which sentence the agent gets.
+
+    A provider that cannot be built is still a per-item failure with a readable reason, not
+    a dead worker — it just leaves through `process`'s barrier now instead of a second one
+    around construction, so it is logged like every other item failure.
+
+    **Two consequences, both accepted rather than overlooked.**
+
+    On a genuinely misconfigured server — no key, no fake mode — a 300-item batch now pays
+    full ingest, deskew and quality scoring on roughly 600 photographs before each item
+    discovers there is no provider, where it used to fail on the first line. That is CPU and
+    a few minutes; it is not tokens, and it is not money. The trade is a slower failure on a
+    server nobody has finished setting up, against the correct sentence on every unreadable
+    photograph on a server that works.
+
+    A keyless server can also now produce a *partly successful* batch: a pre-gated item
+    reaches `done` with Unreadable rows and no provider involved, alongside items that
+    failed for want of one. That reads oddly in a status summary, and it is still the
+    honest answer — the pre-gate really did check those images and really did conclude
+    nothing could be read from them, which is true whatever the provider situation is.
+    """
+
+    def __init__(
+        self,
+        factory: ProviderFactory,
+        filenames: Sequence[str],
+        budget: ProviderBudget,
+    ):
+        self._factory = factory
+        self._filenames = list(filenames)
         self._budget = budget
-        self.name = getattr(inner, "name", "provider")
+        self._inner: ExtractionProvider | None = None
+        #: Whatever the resolved provider calls itself, once there is one. A plain
+        #: attribute rather than a property because `ExtractionProvider` declares `name` as
+        #: a settable variable, and a read-only property does not satisfy the protocol.
+        self.name = "provider"
 
     def extract(self, request: ExtractionRequest) -> ExtractionResponse:
+        if self._inner is None:
+            # Outside the slot: constructing a provider is not a call to it, and holding a
+            # batch slot while doing so would shrink the budget for no reason.
+            self._inner = self._factory(self._filenames)
+            self.name = getattr(self._inner, "name", "provider")
         with self._budget.batch_slot():
             return self._inner.extract(request)
 
@@ -352,24 +396,14 @@ class WorkerPool:
                 self._live -= 1
 
     def _process_one(self, item: BatchItem) -> None:
-        """Resolve a provider and run the item. Isolation covers provider resolution too.
+        """Run one item. Isolation covers provider resolution too — see `_BudgetedProvider`.
 
         A provider that cannot even be constructed — no key, sample mode that does not
         recognise the artwork — is a per-item failure with a readable reason, not a dead
-        worker.
+        worker. That failure now leaves through `process`, which is where every other
+        per-item failure leaves, so it is recorded and logged the same way.
         """
-        try:
-            provider: ExtractionProvider = _BudgetedProvider(
-                self.provider_factory(item.images), self.budget
-            )
-        except Exception as exc:  # noqa: BLE001 - a provider that cannot even be constructed fails one item
-            try:
-                store_failure = _failure_for(exc, item.attempts)
-                self.store.fail(item.item_id, store_failure)
-            except Exception:  # noqa: BLE001 - recording the failure failed; nothing left to do but log
-                applog.error("batch_item_unrecorded", job_id=item.job_id, item_id=item.item_id)
-            return
-
+        provider = _BudgetedProvider(self.provider_factory, item.images, self.budget)
         process(item, self.store, self.config, provider, max_attempts=self.max_attempts)
 
     def drain(self, timeout: float = 60.0) -> bool:

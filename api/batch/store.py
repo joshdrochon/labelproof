@@ -27,6 +27,7 @@ and free; reading 1.2 GB into memory to write it out again is neither.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import shutil
@@ -35,11 +36,12 @@ import tempfile
 import threading
 import time
 import uuid
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from pathlib import Path
 
 from api.batch.models import (
+    TERMINAL_STATES,
     BatchItem,
     BatchJob,
     ItemFailure,
@@ -48,7 +50,7 @@ from api.batch.models import (
     JobState,
     RowError,
 )
-from api.models import Application, VerificationResult
+from api.models import AgentDecision, Application, FieldName, VerificationResult
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS jobs (
@@ -72,6 +74,7 @@ CREATE TABLE IF NOT EXISTS items (
     images      TEXT NOT NULL DEFAULT '[]',
     result      TEXT,
     failure     TEXT,
+    decisions   TEXT NOT NULL DEFAULT '{}',
     created_at  REAL NOT NULL,
     started_at  REAL,
     finished_at REAL
@@ -80,6 +83,39 @@ CREATE TABLE IF NOT EXISTS items (
 CREATE INDEX IF NOT EXISTS items_by_job   ON items(job_id, row);
 CREATE INDEX IF NOT EXISTS items_by_state ON items(state, created_at, row);
 """
+
+#: Columns added after a version of this store had already written a `jobs.db` somewhere.
+#:
+#: `_SCHEMA` above is `CREATE TABLE IF NOT EXISTS`, which does exactly nothing to a table
+#: that already exists — so editing it is invisible to every database that has ever been
+#: opened, including the one on the machine this deploys to. That file is the thing BATCH-6
+#: promises will survive a restart, and the failure is not a clean error: the new column is
+#: simply absent and every read of it raises `no such column` on a job an agent started
+#: before the deploy.
+#:
+#: SQLite has no `ADD COLUMN IF NOT EXISTS`, so `_migrate` reads `PRAGMA table_info` and
+#: adds what is missing. The statements are literals rather than assembled strings, because
+#: a migration list is exactly where a formatted SQL string would stop being reviewable.
+_ADDED_COLUMNS: tuple[tuple[str, str, str], ...] = (
+    (
+        "items",
+        "decisions",
+        "ALTER TABLE items ADD COLUMN decisions TEXT NOT NULL DEFAULT '{}'",
+    ),
+)
+
+
+class ItemStillRunning(Exception):
+    """A decision was recorded against an item that has no verdict for it yet.
+
+    A domain refusal rather than an HTTP one, because the check that produces it has to sit
+    inside the store's transaction to be worth anything, and the store has no business
+    choosing a status line. `api/routes/batch.py` turns it into a sentence.
+    """
+
+    def __init__(self, item_id: str):
+        super().__init__(f"{item_id} has not finished, so there is nothing to decide yet")
+        self.item_id = item_id
 
 
 def new_job_id() -> str:
@@ -161,8 +197,28 @@ class BatchStore:
             connection.close()
 
     def _migrate(self) -> None:
-        with self._conn() as connection:
+        """Create what is missing, add what a previous release did not have.
+
+        Under `_write_lock` and tolerant of losing the race, because two stores really can
+        be built at once against one volume: `api/retention.py` constructs its own from the
+        sweeper thread at boot, and the app builds one on the first batch request. The lock
+        only covers this process, so on the first deploy onto an existing database both can
+        see `decisions` absent and both issue the ALTER. The loser gets `duplicate column
+        name` out of `__init__` — a crash at startup, once per volume, for a migration that
+        in fact succeeded.
+        """
+        with self._write_lock, self._conn() as connection:
             connection.executescript(_SCHEMA)
+            for table, column, statement in _ADDED_COLUMNS:
+                present = {
+                    str(row["name"])
+                    for row in connection.execute(f"PRAGMA table_info({table})")
+                }
+                if column not in present:
+                    # Suppressed rather than checked again: another process adding the same
+                    # column is the only way this fails, and it is the outcome we wanted.
+                    with contextlib.suppress(sqlite3.OperationalError):
+                        connection.execute(statement)
 
     # --- writing ---------------------------------------------------------------------
 
@@ -300,11 +356,20 @@ class BatchStore:
     def complete(
         self, item_id: str, result: VerificationResult, *, now: float | None = None
     ) -> None:
+        """Store one item's verdict. Any decision recorded against an older one goes.
+
+        `set_decisions` refuses an item that is still running, so most of the time there is
+        nothing here to clear. This is the backstop for the window between the two: an agent
+        rules on a `failed` item at the same moment a retry requeues it, the ruling lands
+        just after the retry cleared it, and the worker then completes the item. Without
+        this line the agent's name ends up on a verdict produced after they gave it — the
+        exact failure the guard exists for, reached by a race instead of a bug.
+        """
         moment = time.time() if now is None else now
         with self._write_lock, self._conn() as connection:
             connection.execute(
-                "UPDATE items SET state = ?, result = ?, failure = NULL, finished_at = ? "
-                "WHERE item_id = ?",
+                "UPDATE items SET state = ?, result = ?, failure = NULL, decisions = '{}', "
+                "finished_at = ? WHERE item_id = ?",
                 (ItemState.DONE.value, result.model_dump_json(), moment, item_id),
             )
             _settle_job(connection, _job_of(connection, item_id), moment)
@@ -318,11 +383,85 @@ class BatchStore:
             )
             _settle_job(connection, _job_of(connection, item_id), moment)
 
+    def set_decisions(
+        self, item_id: str, updates: Mapping[FieldName, AgentDecision | None]
+    ) -> BatchItem | None:
+        """Merge the agent's rulings into one item, or None if that item is gone.
+
+        **Merge, not replace, and `None` clears.** An agent rules on one row at a time, so a
+        request carries the row they just decided — and a whole-map write would mean two
+        tabs, or an agent and the colleague they handed the queue to, each silently erasing
+        the other's work. A decision that quietly disappears is worse than one that was
+        never recorded, because the agent has already moved on believing it was kept.
+
+        **An item still in flight takes no decisions at all**, and that check lives here
+        rather than at the route because it has to be inside the same transaction to mean
+        anything. An item that is `queued` or `processing` has a verdict *coming*: record a
+        ruling on it, let the worker finish, and the item reaches `done` carrying the
+        agent's name on a judgement of a result produced after they made it — which then
+        goes into the printed report HITL-5 describes. That is the same failure
+        `retry_failed` guards against, arriving by the ordinary path rather than the rare
+        one. `TERMINAL_STATES` is the existing statement of "nothing more will happen to
+        this without an explicit retry", so it is the predicate, not a second list.
+
+        A `failed` item is terminal and does take decisions: "we could not check this, I
+        checked it by hand" is a real ruling, and it is why `retry_failed` has to clear
+        them.
+
+        Read and write are one `BEGIN IMMEDIATE` transaction for the same reason `claim` is:
+        two decisions arriving together would otherwise both read the old map and the second
+        would write the first one out of existence.
+        """
+        running = False
+        with self._write_lock, self._conn() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                row = connection.execute(
+                    "SELECT * FROM items WHERE item_id = ?", (item_id,)
+                ).fetchone()
+                if row is None or (
+                    running := ItemState(str(row["state"])) not in TERMINAL_STATES
+                ):
+                    connection.execute("ROLLBACK")
+                else:
+                    merged = dict(_decisions_of(row))
+                    for field, decision in updates.items():
+                        if decision is None:
+                            merged.pop(field, None)
+                        else:
+                            merged[field] = decision
+
+                    connection.execute(
+                        "UPDATE items SET decisions = ? WHERE item_id = ?",
+                        (json.dumps({f.value: d.value for f, d in merged.items()}), item_id),
+                    )
+                    connection.execute("COMMIT")
+            except Exception:
+                connection.execute("ROLLBACK")
+                raise
+
+        # Raised outside the transaction, so the refusal cannot roll back twice.
+        if running:
+            raise ItemStillRunning(item_id)
+        if row is None:
+            return None
+
+        item = _item_from_row(row)
+        item.decisions = merged
+        return item
+
     def requeue(self, item_id: str) -> None:
-        """Put an item back for another attempt. `attempts` is deliberately not reset."""
+        """Put an item back for another attempt. `attempts` is deliberately not reset.
+
+        Decisions go, for the reason `retry_failed` gives at length: whatever the agent
+        ruled on was about to be replaced. Every path that puts an item back on the queue
+        clears them — this one, `retry_failed` and `recover` — so there is no route by which
+        a ruling outlives the verdict it was made against.
+        """
         with self._write_lock, self._conn() as connection:
             connection.execute(
-                "UPDATE items SET state = ?, started_at = NULL WHERE item_id = ?",
+                "UPDATE items SET state = ?, decisions = '{}', started_at = NULL "
+                "WHERE item_id = ?",
                 (ItemState.QUEUED.value, item_id),
             )
 
@@ -333,12 +472,19 @@ class BatchStore:
         already cost real money and real minutes; re-running them because three failed is
         the behaviour this endpoint exists to avoid. `attempts` resets because a retry an
         agent asked for is a fresh decision, not a continuation of the automatic ones.
+
+        **The item's decisions go with the failure.** A retry produces a new result, and a
+        ruling recorded against the one it replaces is worse than no ruling at all: it is
+        the agent's name on a judgement of something they never saw, and HITL-5 puts it in
+        the report that gets printed. An agent who marked a failed item "overridden" to mean
+        "I checked this one by hand" and then retried it must be asked again.
         """
         moment = time.time() if now is None else now
         with self._write_lock, self._conn() as connection:
             cursor = connection.execute(
                 "UPDATE items SET state = ?, attempts = 0, failure = NULL, "
-                "started_at = NULL, finished_at = NULL WHERE job_id = ? AND state = ?",
+                "decisions = '{}', started_at = NULL, finished_at = NULL "
+                "WHERE job_id = ? AND state = ?",
                 (ItemState.QUEUED.value, job_id, ItemState.FAILED.value),
             )
             requeued = cursor.rowcount or 0
@@ -358,10 +504,16 @@ class BatchStore:
         Requeueing is safe because verification has no side effects outside this store —
         it reads images and writes a result, so doing it twice costs one extra call and
         changes nothing else.
+
+        Decisions go with it, like every other requeue. A `processing` item should not be
+        carrying any — `set_decisions` refuses one — but this runs at startup against a file
+        an older build or a crash may have left in any state, which is the one place where
+        assuming an invariant holds is least justified.
         """
         with self._write_lock, self._conn() as connection:
             cursor = connection.execute(
-                "UPDATE items SET state = ?, started_at = NULL WHERE state = ?",
+                "UPDATE items SET state = ?, decisions = '{}', started_at = NULL "
+                "WHERE state = ?",
                 (ItemState.QUEUED.value, ItemState.PROCESSING.value),
             )
             return cursor.rowcount or 0
@@ -450,11 +602,27 @@ class BatchStore:
         directory.mkdir(parents=True, exist_ok=True)
         source.replace(directory / stored_name(supplied_name))
 
-    def read_image(self, job_id: str, supplied_name: str) -> bytes | None:
-        path = self.images_root / job_id / stored_name(supplied_name)
-        if not path.is_file():
+    def image_path(self, job_id: str, supplied_name: str) -> Path | None:
+        """The stored file for one manifest name, or None if this job has no such file.
+
+        The containment check is the whole reason this is a method rather than two lines
+        at each call site. `stored_name` reduces the name to a digest, so today nothing a
+        manifest says can steer the path — but "it is already safe" is exactly how a guard
+        stops being written, and the next person to make stored names readable for
+        debugging would be handing a user-supplied string to `open` with no check anywhere
+        between the manifest and the filesystem. Resolving both sides and refusing anything
+        that is not under the job's own directory costs two syscalls and survives that
+        change (SEC-5).
+        """
+        directory = (self.images_root / job_id).resolve()
+        path = (directory / stored_name(supplied_name)).resolve()
+        if not path.is_relative_to(directory) or not path.is_file():
             return None
-        return path.read_bytes()
+        return path
+
+    def read_image(self, job_id: str, supplied_name: str) -> bytes | None:
+        path = self.image_path(job_id, supplied_name)
+        return path.read_bytes() if path is not None else None
 
     # --- staging ---------------------------------------------------------------------
 
@@ -575,6 +743,25 @@ def _job_from_row(row: sqlite3.Row) -> BatchJob:
     )
 
 
+def _decisions_of(row: sqlite3.Row) -> dict[FieldName, AgentDecision]:
+    """The stored rulings, validated on the way out rather than trusted.
+
+    A column is not a schema. Anything that wrote this file — an older build, a hand-run
+    UPDATE during an incident — could have left a field name or a decision this build does
+    not have, and a dict comprehension straight off the JSON would carry it into the
+    exported report as a word nobody can define. Validating each pair keeps the enum the
+    single statement of what a decision can be.
+    """
+    stored: dict[str, str] = json.loads(row["decisions"] or "{}")
+    out: dict[FieldName, AgentDecision] = {}
+    for field, decision in stored.items():
+        try:
+            out[FieldName(field)] = AgentDecision(decision)
+        except ValueError:
+            continue
+    return out
+
+
 def _item_from_row(row: sqlite3.Row) -> BatchItem:
     return BatchItem(
         item_id=str(row["item_id"]),
@@ -588,6 +775,7 @@ def _item_from_row(row: sqlite3.Row) -> BatchItem:
             VerificationResult.model_validate_json(row["result"]) if row["result"] else None
         ),
         failure=ItemFailure.model_validate_json(row["failure"]) if row["failure"] else None,
+        decisions=_decisions_of(row),
         created_at=float(row["created_at"]),
         started_at=row["started_at"],
         finished_at=row["finished_at"],

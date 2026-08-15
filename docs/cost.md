@@ -3,6 +3,29 @@
 Every figure here is measured on the deployed application, not estimated. Nothing is
 modelled from token-count guesses.
 
+> **READ THIS FIRST — the numbers below predate the shipped extraction mode.**
+>
+> Everything in this file was measured on 2026-08-12, when production ran
+> `LABELPROOF_EXTRACTION_MODE=single`. Production has run `split` since 2026-08-14, which
+> reads each image with two concurrent calls instead of one and therefore sends the
+> instruction prefix twice. It bought about 1.5 s of latency and it costs money, and this
+> file did not know that. Re-measured on the deployed URL on 2026-08-15:
+>
+> | | 2026-08-12, `single` | 2026-08-15, `split` | |
+> |---|--:|--:|---|
+> | One verification, two images | $0.0313 | **$0.0462** | 20 runs, [`perf-deployed.md`](perf-deployed.md); a separate 5-run sample the same day read $0.0530 |
+> | One label in a batch | $0.0179 *(two images)* | **$0.0220** *(one image)* | 300 items, [`batch-300.md`](batch-300.md) |
+>
+> The batch row is not a like-for-like comparison and is not presented as one: the newer
+> run sent half the artwork per label and still cost 23% more, so per *image* the increase
+> is larger than the totals suggest. The projections and the ROI section further down are
+> arithmetic on the old rates. **Multiply them by about 1.5 for single verifications and
+> about 1.2 for batch**, or re-run the two scripts, which is better.
+>
+> The rest of the file is left as it was measured rather than edited in place. It is a
+> record of what the system cost under a configuration it really ran, and rewriting the
+> numbers would destroy the only evidence of what the mode change actually bought.
+
 | | |
 |---|---|
 | Date | 2026-08-12 |
@@ -95,8 +118,12 @@ the vision tier that reads the government warning. Not a trade this product make
 
 **Concurrency ↔ throttling.** Batch runs 6 workers. Raising it does not raise cost per
 label, but it does raise the chance of provider rate limiting, which converts into retries
-and *does* cost money. 6 was chosen as a starting value and has not been tuned against a
-real 300-item job.
+and *does* cost money. 6 was chosen as a starting value. A real 300-item job has now been
+run at that setting — 300 applications, 291.9s, zero failures, and **`attempts = 1` on
+all 300 items**, which is what actually rules throttling out: a retried-and-recovered
+item carries no failure, so counting failures would call any run clean
+([`batch-300.md`](batch-300.md)). So 6 workers did not touch the ceiling. Where the
+ceiling is remains untested, and finding it costs another paid run.
 
 **Cache TTL ↔ traffic shape.** The 5-minute ephemeral cache is what makes batch cheap.
 An agent doing one verification every ten minutes pays the full input price every time —
@@ -113,6 +140,17 @@ so the paid calls were the model-tier spike (`scripts/spike_latency.py`,
 `scripts/spike_typography.py`, roughly 120 calls across three models), the Tier B
 photograph runs, the 20-sample p95 table ($0.63), and two 22-application batches ($0.79).
 The order of magnitude is tens of dollars, not hundreds.
+
+Since then, on 2026-08-15, and itemised because it is the largest single line in the
+project: the **300-application batch cost $6.59** and the two smaller calibration batches
+that sized it beforehand cost **$0.75** together. The cold-start investigation
+(`docs/coldstart-probe.txt`) added roughly **$0.75** across about fifteen single
+verifications, and the priority-lane probes inside the batch run another **$0.32**. Call
+it **$8.40 for the day**. The calibration batches are worth their line: a two-point
+estimate built from them predicted $3.49 for the 300, and the run came in at $6.59 —
+the estimate assumed a large fixed cost that the cache counters later showed was not
+there. Per-label from the 20-row run, $0.0219, would have predicted $6.57 and been right,
+which is the lesson: at this scale the simplest rate was the accurate one.
 
 `api/timing.cost_line` logs tokens and dollars for every verification from day one, so a
 production deployment has this per-request without further work.

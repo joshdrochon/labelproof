@@ -41,15 +41,19 @@ from __future__ import annotations
 import contextlib
 import csv
 import io
+import shutil
 import threading
+import time
 import zipfile
 from collections.abc import Awaitable, Callable, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Annotated, Final, cast
 
 from fastapi import APIRouter, FastAPI, File, Request, UploadFile
-from fastapi.responses import PlainTextResponse, Response
+from fastapi.responses import FileResponse, PlainTextResponse, Response
+from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 
 from api import errors
@@ -69,12 +73,14 @@ from api.batch.models import (
     summarize,
     worst_first,
 )
-from api.batch.store import BatchStore, is_expired
+from api.batch.store import BatchStore, ItemStillRunning, is_expired
 from api.batch.worker import ProviderBudget, WorkerPool
 from api.config import Config
-from api.models import FieldName
+from api.models import AgentDecision, FieldName
+from api.pipeline.ingest import sniff
 from api.provider.base import ExtractionProvider
 from api.routes import get_config, provider_for
+from api.routes import sample as sample_mod
 
 router = APIRouter()
 
@@ -680,11 +686,316 @@ def _nothing_queueable_message(
     )
 
 
+# --- the sample batch (UX-1, DEL-5) ---------------------------------------------------
+#
+# Verify Now has had one-click samples since LP-088 and batch has had nothing, so seeing
+# the batch half of this product at all meant hand-building a CSV, gathering label images,
+# and getting the pairing right first. A reviewer who has to do data entry before the demo
+# starts has already formed an opinion, and it is the opinion this tool exists to fix.
+
+
+@dataclass(frozen=True)
+class _SampleRow:
+    """One row of the sample manifest, described by what the reviewer will see.
+
+    `fixture` names a golden-set entry and the application is read from it — never restated
+    here, for the reason `api/routes/sample.py` gives about the single-check demo: a sample
+    that drifted from the set the suite gates on would be a demo of something this project
+    does not test.
+    """
+
+    fixture: str
+    artwork: tuple[Path, ...] = ()
+    """Overrides the fixture's own images. Used only by the unreadable row, whose photograph
+    is a degradation of its fixture rather than a fixture of its own."""
+
+
+_ROBUSTNESS = Path(__file__).resolve().parents[2] / "fixtures" / "robustness"
+
+#: The sample batch: seven rows that queue, covering the outcomes a reviewer needs to see,
+#: and an eighth that does not.
+#:
+#: Every expected outcome below is the fixture's own committed one — the golden set for the
+#: first six, `fixtures/robustness/manifest.json` for the seventh, which declares
+#: `tc14_blur_hopeless` "pregated". Nothing here is a guess about what the pipeline will
+#: say, because a demo that promises an outcome and produces another teaches a reviewer to
+#: distrust the ones that are right.
+#:
+#: **One product per row, as far as the committed fixtures allow.** This was five rows of
+#: OLD TOM DISTILLERY: five identical brand names down the Brand column with five different
+#: recommendations beside them, which reads as one application checked five times and
+#: disagreed with itself. Brand is the first column a reviewer scans to tell one row from
+#: another, so the defects are spread across the distinct products the set actually ships —
+#: and across commodities, since a sample of nothing but spirits shows none of the rules
+#: that turn on what is in the bottle.
+#:
+#: Old Tom carries four of the seven, and that is the set rather than a choice: the only
+#: two-image fixture is his, the only label with no warning at all is his, the blurred
+#: photograph IS his label, and **every mismatch fixture in the golden set is his** —
+#: `tc03`, `tc04`, `tc05`, `tc03b`, `tc05b`, `tc08`, without exception. Dropping the
+#: mismatch to buy a fifth brand was the wrong trade: "the label says 40%, the application
+#: says 45%" is the premise of the entire product, and a demo that shows three Missings, a
+#: judgment call and an unreadable photograph but never that has skipped the middle of its
+#: own argument. Four brands across seven rows still reads as different products, and the
+#: triage table names the driving field now, so two Old Tom rows with different defects no
+#: longer render as the same sentence.
+#:
+#: Ordered so the first row is a pass, like `sample.CASES` and for the same reason. It does
+#: not survive into the table — that is sorted worst-first, which is the batch view's whole
+#: point — but the manifest an agent could download reads in the order a person would write
+#: it.
+_SAMPLE_ROWS: Final[tuple[_SampleRow, ...]] = (
+    # A label that checks out, photographed front and back — so the sample also exercises
+    # the two-image case the evidence view has to handle. Spirits, OLD TOM DISTILLERY.
+    _SampleRow("tc16_front_back"),
+    # The label says 40% where the application says 45%. The case the product exists for,
+    # and the only tier no other fixture in the set can supply without Old Tom's artwork.
+    _SampleRow("tc08_abv_mismatch"),
+    # No government warning anywhere. The most serious thing a label can be missing, and
+    # the row the worst-first ordering has to put at the top. Spirits, OLD TOM DISTILLERY.
+    _SampleRow("tc07_missing_warning"),
+    # A wine above 14% with no alcohol content on the label. Carried by a WINE row on
+    # purpose: the same silence is Not applicable on a table wine and Missing here, so this
+    # is the row that shows the tool reading the commodity rather than one rule for
+    # everything. STONEHILL VINEYARD.
+    _SampleRow("tc26_wine_above_fourteen_needs_abv"),
+    # An import whose label never says where it came from. MAISON CLAIRE — a third brand,
+    # and the only row in the sample where `is_import` is true.
+    _SampleRow("tc19_import_missing_origin"),
+    # The judgment tier, which the sample showed nothing of at all: the label's brand is not
+    # character-for-character the application's, and it obviously means the same thing. An
+    # agent who never sees Acceptable variation in the demo does not learn that this tool
+    # asks rather than decides. Stone's Throw.
+    _SampleRow("tc02_stones_throw"),
+    # A photograph too blurred to read, refused before a token is spent. The application is
+    # Old Tom's because this photograph IS Old Tom's label: `fixtures/robustness/
+    # manifest.json` declares `base: tc01_old_tom_clean` and blurs it past recovery, which
+    # is why its expected outcome there is "pregated". The pre-gate answers it with no model
+    # call, in sample mode and against a real provider alike.
+    _SampleRow("tc01_old_tom_clean", artwork=(_ROBUSTNESS / "tc14_blur_hopeless.png",)),
+)
+
+#: The eighth row, and the reason it is here. Row-level validation is the part of batch
+#: mode that is hardest to believe without seeing it — 300 applications where three rows
+#: have a typo must queue 297, not refuse the file — and a reviewer cannot see it unless the
+#: manifest they were handed already contains one. A misspelled commodity is the typo a
+#: spreadsheet actually produces, and it names one row and one column.
+_MALFORMED_COMMODITY: Final[str] = "whisky"
+
+
+def _sample_artwork(spec: _SampleRow) -> list[Path]:
+    """The files this row's manifest names, in front-then-back order."""
+    if spec.artwork:
+        return list(spec.artwork)
+    entry = sample_mod.golden_entry(spec.fixture)
+    return [sample_mod.LABELS_DIR / name for name in entry.get("images", [])]
+
+
+def _sample_manifest(artwork: Sequence[tuple[_SampleRow, list[Path]]]) -> str:
+    """The manifest, written with the parser's own column list (LP-148, LP-168)."""
+    buffer = io.StringIO(newline="")
+    writer = csv.DictWriter(
+        buffer, fieldnames=manifest_mod.COLUMNS, lineterminator="\r\n", extrasaction="ignore"
+    )
+    writer.writeheader()
+
+    first_image = ""
+    for spec, files in artwork:
+        record = _sample_record(spec, files)
+        first_image = first_image or record["front_image"]
+        writer.writerow(record)
+
+    # The malformed row names an image an earlier row already uses, so the only thing wrong
+    # with the manifest is the thing that is meant to be wrong with it. Naming a file of its
+    # own would also report an unused upload, and two problems where one was intended reads
+    # as a broken sample rather than a demonstration.
+    broken = _sample_record(_SAMPLE_ROWS[0], [])
+    broken["commodity"] = _MALFORMED_COMMODITY
+    broken["front_image"] = first_image
+    broken["back_image"] = ""
+    writer.writerow(broken)
+
+    return buffer.getvalue()
+
+
+def _sample_record(spec: _SampleRow, files: Sequence[Path]) -> dict[str, str]:
+    application = sample_mod.golden_entry(spec.fixture)["application"]
+    record = {
+        column: "" if application.get(column) is None else str(application[column])
+        for column in manifest_mod.APPLICATION_COLUMNS
+    }
+    record["front_image"] = files[0].name if files else ""
+    record["back_image"] = files[1].name if len(files) > 1 else ""
+    return record
+
+
+#: Sample batches this server will start in an hour, across every caller.
+#:
+#: The per-client lane in `api/middleware/ratelimit.py` cannot bound the bill: it is keyed
+#: on the client, and a caller with more addresses simply gets more budget. This is the
+#: number that says what a day of being pointed at costs — forty clicks an hour is two
+#: hundred and eighty verifications an hour, which is a demo server, and anything above it
+#: is not a person looking at the product.
+#:
+#: It was twenty, and twenty was the wrong side of the trade. Two reviewers evaluating this
+#: at once, plus anyone testing, can reach twenty in an hour without trying — and a reviewer
+#: who presses the button and is told no has been shown a broken product, whatever the
+#: message says. The failure this bounds costs money; the failure it can cause costs the
+#: only thing this deployment exists for.
+SAMPLE_BATCHES_PER_HOUR = 40
+_SAMPLE_WINDOW_SECONDS = 3600.0
+
+
+class _SampleCeiling:
+    """How many sample batches have started recently, for the whole process.
+
+    A sliding window of start times rather than a token bucket, because the question this
+    answers is "how much has this server spent in the last hour", and a bucket that refills
+    continuously answers a different one. Twenty timestamps is the entire state.
+
+    Deliberately not in the rate limiter. That machinery is per-client by construction and
+    this cap exists precisely for the caller who is not one client.
+    """
+
+    def __init__(self, per_hour: int = SAMPLE_BATCHES_PER_HOUR):
+        self.per_hour = per_hour
+        self._starts: list[float] = []
+        self._lock = threading.Lock()
+
+    def take(self, *, now: float | None = None) -> bool:
+        """Claim a slot. False when the ceiling is reached and nothing was claimed."""
+        moment = time.monotonic() if now is None else now
+        with self._lock:
+            self._starts = [
+                start for start in self._starts if moment - start < _SAMPLE_WINDOW_SECONDS
+            ]
+            if len(self._starts) >= self.per_hour:
+                return False
+            self._starts.append(moment)
+            return True
+
+
+def get_sample_ceiling(request: Request) -> _SampleCeiling:
+    """One ceiling per process, built under the same guard as the store and the pool."""
+    ceiling: _SampleCeiling | None = getattr(request.app.state, "sample_ceiling", None)
+    if ceiling is not None:
+        return ceiling
+    with _WIRING:
+        ceiling = getattr(request.app.state, "sample_ceiling", None)
+        if ceiling is None:
+            # Two of these would be two ceilings, which is one ceiling of twice the height —
+            # the same class of bug LP-334 found in the store and the pool.
+            ceiling = _SampleCeiling()
+            request.app.state.sample_ceiling = ceiling
+        return ceiling
+
+
+@router.post("/batch/sample", response_model=BatchAccepted)
+async def create_sample_batch(request: Request) -> BatchAccepted:
+    """Queue a batch built from the committed fixtures. No body, same answer as `POST /batch`.
+
+    **Nothing here is a canned result.** The manifest is parsed by the manifest parser, the
+    pairing is done by the pairing rule, and the items go through the same worker pool and
+    the same pipeline as an uploaded dump — this endpoint only supplies the paperwork a
+    reviewer would otherwise have to assemble by hand. Sample mode replays the fixture
+    specs, exactly as the single-check demo does; a server with a key reads the pixels.
+    Neither one is told what the answer should be, which is the property that makes a demo
+    worth watching.
+
+    Eight rows, seven of which queue — four brands across two commodities, so the Brand
+    column tells one row from the next and the wine row shows a rule that turns on what is
+    in the bottle. The seventh is deliberately malformed so `row_errors` comes back
+    non-empty: a batch that refuses 300 applications over one typo is the failure TC-20
+    describes, and "297 queued, row 5 needs a fix" is not believable until it is seen.
+
+    **This is the only endpoint in the product that spends money on an empty body.** Every
+    other way to reach the model requires the caller to supply label artwork first, which is
+    its own brake; `GET /sample` looks similar and makes no model call at all. So it gets
+    two limits rather than one: its own rate-limit lane at two a minute per client, and the
+    hourly ceiling below across every caller — because a per-client limit is not a bill
+    limit when the caller has more than one address. Without them, ten submissions a minute
+    times seven verifications is roughly $210 an hour on a public URL with no authentication.
+
+    The refusal has to read as a full server, not a broken feature. A reviewer who meets it
+    should be told the tool works and how to see it working anyway.
+    """
+    config = get_config(request)
+    store = get_store(request)
+
+    if not get_sample_ceiling(request).take():
+        applog.warn("batch_sample_refused", count=SAMPLE_BATCHES_PER_HOUR, status=429)
+        raise errors.UserError(
+            f"The sample batch has already been started {SAMPLE_BATCHES_PER_HOUR} times "
+            f"on this server in the last hour, which is as many as it runs. Nothing is "
+            f"wrong — try again shortly, or upload a manifest and label images of your own "
+            f"to see the same thing on real applications.",
+            next_step="retry",
+            code="sample_ceiling_reached",
+            status_code=429,
+        )
+
+    if purged := store.purge_expired():
+        applog.log("batch_purged", count=len(purged))
+
+    with store.staging() as scratch:
+        landing = _Landing(scratch)
+        accepted = await run_in_threadpool(_assemble_sample, store, config, landing, scratch)
+
+    get_pool(request).start()
+
+    applog.log(
+        "batch_sample_queued",
+        job_id=accepted.job_id,
+        count=accepted.accepted,
+        status=len(accepted.row_errors),
+    )
+    return accepted
+
+
+def _assemble_sample(
+    store: BatchStore, config: Config, landing: _Landing, scratch: Path
+) -> BatchAccepted:
+    """Copy the fixtures into staging and hand them to the ordinary upload path.
+
+    Copied rather than adopted in place, because `_assemble` *renames* the files it keeps
+    into the job directory — pointing it at `fixtures/` would move the committed artwork out
+    of the source tree on the first click and break every later one.
+    """
+    artwork = [(spec, _sample_artwork(spec)) for spec in _SAMPLE_ROWS]
+
+    missing = [
+        path.name for _, files in artwork for path in files if not path.is_file()
+    ]
+    if missing or not all(files for _, files in artwork):
+        # The same refusal `api/routes/sample.py` makes, for the same reason: a demo whose
+        # artwork is not in the build must say so rather than queue rows it cannot check.
+        raise errors.InternalError(
+            "The sample label images are missing from this build, so the sample batch "
+            "cannot be started. Upload a manifest and label images of your own."
+        )
+
+    staged: list[tuple[str, Path]] = []
+    for _, files in artwork:
+        for source in files:
+            target = scratch / source.name
+            shutil.copyfile(source, target)
+            staged.append((source.name, target))
+
+    manifest_path = scratch / "labelproof-sample.csv"
+    manifest_path.write_text(_sample_manifest(artwork), encoding="utf-8")
+
+    return _assemble(store, config, landing, staged, manifest_path)
+
+
 # --- reading --------------------------------------------------------------------------
 
 
 def _require_job(
-    store: BatchStore, job_id: str, retention_hours: int, *, now: float | None = None
+    store: BatchStore,
+    job_id: str,
+    retention_hours: int,
+    *,
+    now: float | None = None,
 ) -> BatchJob:
     """The job, or the same refusal for "never existed" and "past its life".
 
@@ -707,6 +1018,13 @@ def _require_job(
 
     The predicate is imported, not written here. See `api.batch.store.is_expired`, and the
     merge note on it about where the canonical definition will live.
+
+    **404, on every batch endpoint.** This answered 400 until the item endpoints arrived
+    answering 404, and one fact with two status lines depending on which URL you asked is
+    worse than either choice made consistently. 404 is the correct one: the request is
+    well-formed and correctly addressed, the thing it names is not here — which is exactly
+    what `_STATUS` in `api/errors.py` says a status line is for, and why an error may carry
+    its own rather than inheriting the `user` default.
     """
     job = store.get_job(job_id)
     if job is not None and not is_expired(job.expires_at, now=now):
@@ -717,6 +1035,7 @@ def _require_job(
         f"expired. Upload the manifest again to start a new batch.",
         next_step="navigate",
         code="batch_not_found",
+        status_code=404,
     )
 
 
@@ -788,6 +1107,203 @@ def _status_message(state: JobState, counts: JobCounts) -> str:
     )
 
 
+def _require_item(store: BatchStore, job_id: str, item_id: str) -> BatchItem:
+    """One item of *this* job, or a 404.
+
+    The `job_id` comparison is not decoration. Item IDs are unguessable, but the URL still
+    carries both, and letting an item be fetched under any job's reference would mean the
+    expiry check two lines above it guarded nothing: an expired batch's artwork would come
+    back through a live batch's URL.
+    """
+    item = store.get_item(item_id)
+    if item is None or item.job_id != job_id:
+        raise _no_such_item()
+    return item
+
+
+def _no_such_item() -> errors.UserError:
+    return errors.UserError(
+        "That application is not in this batch. Open the batch again and pick a row "
+        "from the list.",
+        next_step="navigate",
+        code="batch_item_not_found",
+        status_code=404,
+    )
+
+
+@router.get("/batch/{job_id}/items/{item_id}/images/{index}")
+def batch_item_image(request: Request, job_id: str, item_id: str, index: int) -> Response:
+    """The stored artwork behind one batch item, so the evidence can be shown (HITL-3).
+
+    Batch had verdicts and no picture. HITL-3 asks for the extracted value *and* the image
+    region for every field, and the single-check screen has done that since LP-088 — the
+    batch item view showed the same findings with nothing to draw them on, so half the
+    product was reading rows and taking our word for them. This is the missing half of the
+    pair: `Extraction.image_index` numbers the images from zero, and so does `index` here,
+    so an evidence box can be placed without any translation step in between.
+
+    **These are the ORIGINAL uploaded bytes, and that has a visible consequence.** Deskew
+    and downscale run inside the pipeline and their output is never stored — the box
+    coordinates in `Evidence` are normalised against that preprocessed image, so drawn over
+    the original they are close but not exact, and the UI says as much next to them. The
+    alternative is storing a second copy of every photograph: a 300-item batch is roughly
+    600 more files under the same retention promise, held for the life of the job, to move
+    an outline a few pixels. That trade is not worth making, so anyone tempted to serve a
+    preprocessed copy from here should know they are also invalidating the note the UI
+    prints on every batch item.
+
+    Nothing about the batch is inferable from the answers. An unknown job, an expired one,
+    an item that belongs to some other job, and an index past the end are one 404 with one
+    sentence, because they are one fact for the caller — that URL names nothing here.
+
+    `private, no-store` because this is somebody's unpublished label artwork under
+    retention (SEC-2). A shared cache holding it past the TTL would make the deletion
+    promise false somewhere we cannot sweep.
+    """
+    config = get_config(request)
+    store = get_store(request)
+    _require_job(store, job_id, config.retention_hours)
+    item = _require_item(store, job_id, item_id)
+
+    path = (
+        store.image_path(job_id, item.images[index])
+        if 0 <= index < len(item.images)
+        else None
+    )
+    if path is None:
+        raise errors.UserError(
+            "That label image is not on this server. Open the batch again — its images "
+            "are deleted with the batch itself.",
+            next_step="navigate",
+            code="batch_image_not_found",
+            status_code=404,
+        )
+
+    return FileResponse(
+        path,
+        media_type=_stored_media_type(path),
+        headers={"Cache-Control": "private, no-store"},
+    )
+
+
+def _stored_media_type(path: Path) -> str:
+    """What the stored bytes actually are, read from the bytes.
+
+    Sniffed rather than taken from the manifest name, which is a caller's string and can
+    say `.png` over anything at all. `sniff` only ever names an image or a PDF, so the
+    worst an unrecognised file can be served as is `application/octet-stream` — never
+    `text/html`, which is the one answer that would turn an uploaded file into script
+    running on this origin.
+
+    Only the header is read. A batch holds hundreds of photographs and the body is streamed
+    from disk by `FileResponse`; loading a whole image to identify it would undo that for
+    no gain.
+    """
+    with path.open("rb") as handle:
+        head = handle.read(32)
+    try:
+        return str(sniff(head))
+    except errors.LabelProofError:
+        return "application/octet-stream"
+
+
+class DecisionPatch(BaseModel):
+    """The body of `PATCH .../decisions`: the rows the agent just ruled on.
+
+    Typed as plain strings rather than as `dict[FieldName, AgentDecision | None]` so the
+    refusal is ours. Pydantic would answer a misspelled field name with a 422 carrying
+    `Input should be 'brand_name', 'class_type', ...` and a `loc` path, which is a
+    validation dump, not a sentence an agent can act on — and every other refusal this app
+    makes is written for the person reading it (UX-6, OPS-5).
+    """
+
+    decisions: dict[str, str | None] = Field(default_factory=dict)
+
+
+def _read_decisions(patch: DecisionPatch) -> dict[FieldName, AgentDecision | None]:
+    """Read the body into the two enums, naming whichever half is wrong."""
+    out: dict[FieldName, AgentDecision | None] = {}
+    for name, value in patch.decisions.items():
+        try:
+            field = FieldName(name)
+        except ValueError as exc:
+            raise errors.UserError(
+                f"“{name}” is not one of the label elements this tool checks. "
+                f"Record a decision against one of: "
+                f"{', '.join(f.value for f in FieldName)}.",
+                next_step="fix_request",
+                code="unknown_field",
+            ) from exc
+        if value is None:
+            out[field] = None
+            continue
+        try:
+            out[field] = AgentDecision(value)
+        except ValueError as exc:
+            raise errors.UserError(
+                f"“{value}” is not a decision this tool records. A row is either "
+                f"confirmed or overridden — send null to take a decision back.",
+                next_step="fix_request",
+                code="unknown_decision",
+            ) from exc
+    return out
+
+
+@router.patch("/batch/{job_id}/items/{item_id}/decisions", response_model=BatchItem)
+def set_item_decisions(
+    request: Request, job_id: str, item_id: str, patch: DecisionPatch
+) -> BatchItem:
+    """Record what the agent decided about one item's rows (HITL-1, HITL-5).
+
+    The tool recommends and the agent decides; until now the batch half of the product had
+    nowhere to put the second part of that sentence, so the export promised in HITL-5 —
+    findings *and* agent decisions — could only ever carry half of what it names.
+
+    Only the fields named in the body change. Fields left out are untouched and `null`
+    clears one, so an agent working down a checklist sends the row they just ruled on
+    rather than the whole map. Sending the whole map is how one tab silently erases
+    another's work, and `BatchStore.set_decisions` says more about why.
+
+    An item that has not finished is refused. A ruling recorded while a verdict is still
+    coming would be attached to that verdict the moment it lands — the agent's name on a
+    judgement of something produced after they made it, in the report HITL-5 says gets
+    printed. The check is inside the store's transaction, because a check here would race
+    the worker that is about to complete the item.
+
+    No model call happens here, which is why this sits in the read rate-limit lane despite
+    being a write: it is a click, at click frequency, and putting it in the submit lane
+    would let an agent working quickly through a 300-row queue rate-limit themselves.
+    """
+    config = get_config(request)
+    store = get_store(request)
+    _require_job(store, job_id, config.retention_hours)
+    _require_item(store, job_id, item_id)
+
+    updates = _read_decisions(patch)
+    try:
+        item = store.set_decisions(item_id, updates)
+    except ItemStillRunning as exc:
+        raise errors.UserError(
+            "This application has not finished being checked, so there is nothing to "
+            "confirm or override on it yet. Wait for its result and decide then.",
+            next_step="retry",
+            code="item_not_checked",
+        ) from exc
+    if item is None:
+        # Swept between the check above and the write. Same answer as an item that was
+        # never there, because from the caller's seat it is the same fact.
+        raise _no_such_item()
+
+    applog.log(
+        "batch_decisions",
+        job_id=job_id,
+        item_id=item_id,
+        count=len(updates),
+        status=len(item.decisions),
+    )
+    return item
+
+
 @router.post("/batch/{job_id}/retry", response_model=BatchStatus)
 def retry_batch(request: Request, job_id: str) -> BatchStatus:
     """Requeue the failed items and nothing else (BATCH-8, LP-157)."""
@@ -823,6 +1339,11 @@ _EXPORT_HEADER: tuple[str, ...] = (
     *(f"verdict_{field.value}" for field in EXPORT_FIELDS),
     "findings",
     "rationale",
+    # HITL-5 asks for findings AND agent decisions in the same report. Second to last, next
+    # to `rationale`, because the two are read together: what the tool said, and what the
+    # agent did about it. Appending it after `images` would put the human half of the record
+    # after the file names, which is where a printed page stops being read.
+    "agent_decisions",
     "images",
 )
 
@@ -866,6 +1387,24 @@ def _findings_text(item: BatchItem) -> str:
     return " | ".join(parts)
 
 
+def _decisions_text(item: BatchItem) -> str:
+    """The agent's rulings, in the same shape as the `findings` cell beside it (HITL-5).
+
+    One cell rather than seven more columns. The export already carries a `verdict_*` column
+    per field and adding a `decision_*` beside each would double the width of a sheet that
+    is printed, for a map that is empty on most rows.
+
+    Fields with no ruling are left out rather than written as blank pairs, so a reader can
+    see at a glance which rows a human has been through — and `EXPORT_FIELDS` orders what is
+    there, so the same two decisions read the same way in every export.
+    """
+    return " | ".join(
+        f"{field.value}={item.decisions[field].value}"
+        for field in EXPORT_FIELDS
+        if field in item.decisions
+    )
+
+
 def _export_row(item: BatchItem) -> list[str]:
     verdicts: dict[FieldName, str] = {}
     if item.result:
@@ -895,6 +1434,7 @@ def _export_row(item: BatchItem) -> list[str]:
         *(verdicts.get(field, "") for field in EXPORT_FIELDS),
         _findings_text(item),
         rationale,
+        _decisions_text(item),
         " ".join(item.images),
     ]
 

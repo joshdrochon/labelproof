@@ -408,6 +408,21 @@ kbd {
    note sat in a column of its own, vertically centred against four stacked cards — and
    left a tall empty rectangle above and below it that was the first thing the eye found
    on the screen. The note is one line of context; it does not need a column. */
+/* The sample batch, sitting with the template link because they answer the same question.
+   Set in from the step's left edge so it reads as an aside to step 1 rather than a second
+   instruction competing with it. */
+.batch__sample {
+  margin: 0.75rem 0 1rem;
+  padding: 0.75rem 1rem;
+  background: var(--surface);
+  border-left: 3px solid var(--rule);
+}
+
+.batch__sample-note {
+  margin: 0 0 0.5rem;
+  color: var(--ink-soft);
+}
+
 .setup__sample {
   border-top: 1px solid var(--rule);
   padding-top: 1rem;
@@ -1374,8 +1389,15 @@ kbd {
   white-space: nowrap;
 }
 
+/* The base chip needs its own size, not just `flex: none`. Only `.chip--lg` and
+   `.chip--sm` ever set one, so a bare `.chip` — which is what the batch triage table
+   uses — left the SVG with no intrinsic dimensions and let it fill the cell: a 90px
+   verdict mark beside 13px of text, shipped and live. Sized here so every chip has a
+   floor and the two modifiers keep overriding it. */
 .chip .glyph {
   flex: none;
+  width: 1.25rem;
+  height: 1.25rem;
 }
 
 .chip--lg {
@@ -1532,6 +1554,17 @@ kbd {
   color: var(--ink-soft);
 }
 
+/* A ruling that did not save. Weightier than the state line it replaces, and marked by a
+   rule as well as by ink — the same reason no verdict on this screen is a colour alone. */
+.detail__decision-problem {
+  margin-top: 0.5rem;
+  font-size: 1rem;
+  font-weight: 600;
+  color: var(--ink);
+  border-left: 3px solid var(--rule-strong);
+  padding-left: 0.5rem;
+}
+
 /* ------------------------------------------------------------------- diff ----- */
 
 .diff {
@@ -1645,7 +1678,8 @@ kbd {
 
 @media (max-width: 62rem) {
   .setup__columns,
-  .checked__columns {
+  .checked__columns,
+  .drawer__columns {
     grid-template-columns: minmax(0, 1fr);
   }
 
@@ -1963,6 +1997,17 @@ kbd {
   background: var(--surface);
 }
 
+/* Visible, not `visually-hidden`. It explains why the leading numbers are out of order,
+   and that question is asked by everyone looking at the table, not only by the people
+   using a screen reader. Measure-limited like the notices above it, because it is a
+   sentence rather than a row. */
+.triage__caption {
+  text-align: left;
+  max-width: 72ex;
+  color: var(--ink-soft);
+  margin-bottom: 0.5rem;
+}
+
 .triage th,
 .triage td {
   text-align: left;
@@ -2032,7 +2077,11 @@ kbd {
 .drawer {
   background: var(--paper);
   border-radius: 4px;
-  width: min(60rem, 100%);
+  /* Was 60rem, which fitted a checklist and nothing else. The picture now sits beside it
+     (HITL-3), and at 60rem the four-column table lost enough width that "The application
+     says" and "The label shows" wrapped to two lines each on every row — the comparison
+     this dialog exists to make, made harder to read. */
+  width: min(74rem, 100%);
   padding: 1.5rem;
 }
 
@@ -2049,6 +2098,23 @@ kbd {
   font-size: 1.5rem;
   margin: 0;
   color: var(--navy);
+}
+
+/* The picture and the checklist, side by side — the same split as `.checked__columns`,
+   because the drill-in and the single-label screen are the same reading task. The evidence
+   column is narrower here: the dialog has less room than a full page and the checklist is
+   the thing being read, with the picture as the thing being consulted. */
+.drawer__columns {
+  display: grid;
+  grid-template-columns: minmax(15rem, 22rem) minmax(0, 1fr);
+  gap: var(--gutter);
+  align-items: start;
+}
+
+/* An item with no picture keeps the single column it always had, rather than leaving a
+   gap where a panel would have been. */
+.drawer__columns[data-evidence='false'] {
+  grid-template-columns: minmax(0, 1fr);
 }
 
 .drawer__failure {
@@ -2443,7 +2509,8 @@ kbd {
     page-break-inside: avoid;
   }
 
-  .checked__columns {
+  .checked__columns,
+  .drawer__columns {
     display: block;
   }
 

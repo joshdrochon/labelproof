@@ -40,6 +40,9 @@ jobs.db
 eval/out/
 playwright-report/
 test-results/
+# The Playwright JSON reporter's output. Written on every `npm run e2e`, so leaving it
+# untracked-but-not-ignored hands the next person a dirty tree for running the suite.
+web/e2e-results.json
 .coverage
 htmlcov/
 
