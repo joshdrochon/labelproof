@@ -44,11 +44,33 @@ Nothing below needs an API key. The suite and the demo both run offline.
 ```bash
 git clone <this repo> && cd labelproof
 python3.14 -m venv .venv && .venv/bin/pip install -e ".[dev]"
+(cd web && npm ci && npm run build)               # Node 22. THIS STEP IS NOT OPTIONAL — see below
 
-.venv/bin/python -m pytest                        # 3,693 tests, offline, ~5 min
+.venv/bin/python -m pytest                        # 3,700 tests, offline, ~5 min
 .venv/bin/python -m eval.run                      # the accuracy gate
 LABELPROOF_FAKE_PROVIDER=1 .venv/bin/uvicorn api.main:app --reload
 ```
+
+**Build the web app, or there is no web app.** `web/dist` is a build artifact and is not
+tracked in git, so a fresh clone does not contain it. `api/main.py` mounts the interface
+only if that directory exists; without it the API is fully working on port 8000 and `/`
+answers a short JSON banner instead of the product. That banner says what happened, but a
+reviewer who skipped the build would be reading it instead of using the tool, so the step
+is in the block above rather than in a footnote. Node 22 is what the `Dockerfile` and CI
+use; `npm ci` installs the committed lockfile exactly.
+
+**Or one command, no toolchains.** The `Dockerfile` is multi-stage and does both builds
+itself, so this needs only Docker:
+
+```bash
+docker build -t labelproof .
+docker run --rm -p 8000:8080 -e LABELPROOF_FAKE_PROVIDER=1 labelproof
+```
+
+Both routes were run from a clean `git clone` of this repository before this section was
+written, and the second one is why the image now ships `fixtures/generator/layout.py`:
+without it the container booted, passed both health checks, served every screen, and then
+answered `500` on the first sample click.
 
 Then open <http://localhost:8000> and click one of the samples. There are four, and
 between them they show every shape of answer the tool gives: a label that checks out, a

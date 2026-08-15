@@ -109,9 +109,16 @@ COPY --chown=labelproof:labelproof scripts/keepwarm.py ./scripts/keepwarm.py
 COPY --chown=labelproof:labelproof assets/samples/ ./assets/samples/
 COPY --chown=labelproof:labelproof golden/set.json ./golden/set.json
 COPY --chown=labelproof:labelproof fixtures/__init__.py ./fixtures/__init__.py
+# `layout.py` is here because `api/provider/fake.py` imports `FIELD_BANDS` from it to
+# place the demo's evidence boxes. It was left out when that import was added, and the
+# result was an image that boots, passes both health checks, serves the whole interface,
+# and then answers `500 ModuleNotFoundError` on the first sample click — the exact failure
+# this block's comment was written to prevent, one file later. Nothing caught it because
+# the deployed app runs with a real key and never imports the fake provider at all.
 COPY --chown=labelproof:labelproof fixtures/generator/__init__.py \
                                    fixtures/generator/spec.py \
                                    fixtures/generator/catalog.py \
+                                   fixtures/generator/layout.py \
                                    ./fixtures/generator/
 COPY --chown=labelproof:labelproof fixtures/labels/tc16_front_back_front.png \
                                    fixtures/labels/tc16_front_back_back.png \
