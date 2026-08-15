@@ -89,12 +89,15 @@ so filling it by hand is the least representative way to see the product.
 
 **Then look at the second tab.** *Batch check* is the other half of the product and it is
 easy to miss — a reviewer who only uses the first tab never sees the mode Janet actually
-asked for. **Try a sample batch** loads a six-row manifest and starts it, so it needs no
-spreadsheet and no images. Watch for three things: rows appear while the job is still
-running rather than all at the end, they arrive **worst first** — return-for-correction,
-then items that could not be checked, then needs-review, then clean — and one row is
-deliberately malformed, so it is reported by row number and column while the other five
-are checked anyway. Open any finished row for the same evidence the single-label view
+asked for. **Try a sample batch** loads an eight-row manifest and starts it, so it needs
+no spreadsheet and no images. The rows are eight different products across spirits and
+wine, between them covering every outcome the tool can reach: a clean label, a value that
+disagrees, a missing warning, an ABV a wine is required to state, a missing country of
+origin, a name that differs only in styling, and a photograph too blurry to read. Watch
+for three things: rows appear while the job is still running rather than all at the end,
+they arrive **worst first** — return-for-correction, then items that could not be checked,
+then needs-review, then clean — and one row is deliberately malformed, so it is reported
+by row number and column while the other seven are checked anyway. Open any finished row for the same evidence the single-label view
 shows. `Export CSV` writes the file that goes in the case file. To bring your own, `GET
 /batch/manifest-template.csv` is the blank spreadsheet and the page links it.
 
