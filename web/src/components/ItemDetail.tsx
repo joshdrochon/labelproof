@@ -96,7 +96,6 @@ export default function ItemDetail({
             <AggregateBanner
               aggregate={result.aggregate}
               fields={result.fields}
-              elapsedMs={result.timings_ms.total}
             />
 
             {/* A TABLE, not a list.

@@ -871,6 +871,11 @@ kbd {
   font-family: var(--font-mono);
 }
 
+.checked__elapsed {
+  margin-left: 0.75rem;
+  color: var(--ink-faint);
+}
+
 .checked__product {
   font-size: 1.875rem;
   margin-top: 0.25rem;

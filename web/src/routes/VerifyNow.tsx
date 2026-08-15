@@ -45,6 +45,8 @@ type Phase = 'setup' | 'working' | 'checked' | 'problem';
 interface Checked {
   result: VerificationResult;
   application: Application;
+  /** The client's wall clock, submit to render. Recorded, not displayed — the card
+   *  reports the server's total, which describes the work rather than the wait. */
   elapsedMs: number;
   imageUrls: string[];
   /** True when the outlines are drawn over the upload rather than a server-side copy. */
@@ -557,7 +559,7 @@ function ChecklistScreen({
   setImageIndex,
   onStartOver,
 }: ChecklistScreenProps) {
-  const { result, application, elapsedMs, imageUrls, approximateGeometry } = checked;
+  const { result, application, imageUrls, approximateGeometry } = checked;
   const attention = useMemo(() => attentionFields(result.fields), [result.fields]);
   const settled = useMemo(() => settledFields(result.fields), [result.fields]);
 
@@ -670,6 +672,16 @@ function ChecklistScreen({
           <p className="checked__reference">
             <span className="checked__reference-label">Check reference</span>
             <span className="checked__reference-value">{result.request_id || '—'}</span>
+            {/* OPS-1 asks for elapsed time on every result card, and it stays — but here,
+                with the reference, rather than beside the recommendation. Once the label
+                is read while the form is filled the number stops describing anything the
+                agent waited for, and a verdict is not the place for a statistic nobody
+                acted on. It is the WORK, never the wait. */}
+            {result.timings_ms.total ? (
+              <span className="checked__elapsed" data-testid="elapsed">
+                Checked in {(result.timings_ms.total / 1000).toFixed(1)}s
+              </span>
+            ) : null}
           </p>
           <h1 className="checked__product">{productName}</h1>
         </div>
@@ -692,8 +704,6 @@ function ChecklistScreen({
       <AggregateBanner
         aggregate={result.aggregate}
         fields={result.fields}
-        elapsedMs={elapsedMs}
-        workMs={result.timings_ms.total ?? undefined}
         onJumpToField={jumpToField}
       />
 

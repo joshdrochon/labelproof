@@ -38,7 +38,6 @@ describe('aggregate banner', () => {
         <AggregateBanner
           aggregate={aggregate({ recommendation })}
           fields={FIELDS}
-          elapsedMs={3800}
         />,
       );
       const heading = screen.getByRole('heading', { level: 2 });
@@ -59,7 +58,6 @@ describe('aggregate banner', () => {
       <AggregateBanner
         aggregate={aggregate()}
         fields={FIELDS}
-        elapsedMs={3800}
         onJumpToField={() => undefined}
       />,
     );
@@ -78,15 +76,18 @@ describe('aggregate banner', () => {
       <AggregateBanner
         aggregate={aggregate({ recommendation: 'ready_to_approve' })}
         fields={clean}
-        elapsedMs={900}
       />,
     );
     expect(screen.getByText(/no row needs a second look/i)).toBeInTheDocument();
   });
 
-  it('shows how long the check took', () => {
-    render(<AggregateBanner aggregate={aggregate()} fields={FIELDS} elapsedMs={3800} />);
-    expect(screen.getByTestId('elapsed')).toHaveTextContent('Checked in 3.8 seconds');
+  it('does not put a timing beside the recommendation', () => {
+    // OPS-1 still wants elapsed time on the result card and it is still there — beside
+    // the check reference, with the provenance. Not here: once the label is read while
+    // the form is filled, the number describes nothing the agent waited for, and the
+    // verdict is not the place for a statistic nobody acts on.
+    render(<AggregateBanner aggregate={aggregate()} fields={FIELDS} />);
+    expect(screen.queryByTestId('elapsed')).toBeNull();
   });
 
   it('phrases a sub-second check without a misleading 0.0', () => {
@@ -100,7 +101,6 @@ describe('aggregate banner', () => {
       <AggregateBanner
         aggregate={aggregate()}
         fields={FIELDS}
-        elapsedMs={3800}
         onJumpToField={onJump}
       />,
     );
