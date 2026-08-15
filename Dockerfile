@@ -10,7 +10,7 @@
 # What the runtime image deliberately does NOT contain:
 #   - the Node toolchain (stage `web` builds the SPA; only `dist/` is copied forward)
 #   - the golden set, the eval harness, and the test suite (excluded in .dockerignore)
-#   - the fixture generator's rendering code, and 14 of the 16 fixture labels
+#   - the fixture generator's rendering code, and 36 of the 45 fixture images
 #   - any secret. `ANTHROPIC_API_KEY` arrives at runtime from the platform secret
 #     store (LP-128) and is never a build argument, because build arguments are
 #     recorded in image history.
@@ -96,16 +96,18 @@ WORKDIR /app
 COPY --chown=labelproof:labelproof api/ ./api/
 COPY --chown=labelproof:labelproof scripts/keepwarm.py ./scripts/keepwarm.py
 
-# --- the one-click demo (UX-1, LP-088) -------------------------------------------------
-# `GET /sample` serves four demos, and reads their applications out of `golden/set.json`
+# --- the one-click demos (UX-1, LP-088) ------------------------------------------------
+# Two demos serve artwork: `GET /sample` with its four single checks, and `POST
+# /batch/sample` with its seven rows. Both read their applications out of `golden/set.json`
 # rather than restating them. These files are PRODUCT SURFACE, not test material: without
 # any one of them a reviewer's first click returns an error while every health check stays
 # green. Everything else under fixtures/ and golden/ stays out.
 #
-# `tests/test_deploy_config.py` derives this list from `api.routes.sample`, so adding a
-# fifth demo fails a test here instead of failing in front of a reviewer — which is what
-# happened when the picker went from one sample to four and this block still named two
-# images and no manifest.
+# `tests/test_deploy_config.py` derives this list from `api.routes.sample` AND
+# `api.routes.batch`, so adding a demo fails a test here instead of failing in front of a
+# reviewer — which is what happened twice: once when the picker went from one sample to
+# four and this block still named two images and no manifest, and again when the batch
+# sample was reworked onto seven products and four of the files it needs were never added.
 COPY --chown=labelproof:labelproof assets/samples/ ./assets/samples/
 COPY --chown=labelproof:labelproof golden/set.json ./golden/set.json
 COPY --chown=labelproof:labelproof fixtures/__init__.py ./fixtures/__init__.py
@@ -129,12 +131,22 @@ COPY --chown=labelproof:labelproof fixtures/generator/__init__.py \
                                    fixtures/generator/catalog.py \
                                    fixtures/generator/layout.py \
                                    ./fixtures/generator/
+# The artwork both demos name. The first five are the single-check picker's; the four
+# after them belong to the batch sample, which checks seven products rather than four.
 COPY --chown=labelproof:labelproof fixtures/labels/tc16_front_back_front.png \
                                    fixtures/labels/tc16_front_back_back.png \
                                    fixtures/labels/tc08_abv_mismatch.png \
                                    fixtures/labels/tc03_title_case_warning.png \
                                    fixtures/labels/tc07_missing_warning.png \
+                                   fixtures/labels/tc02_stones_throw.png \
+                                   fixtures/labels/tc19_import_missing_origin.png \
+                                   fixtures/labels/tc26_wine_above_fourteen_needs_abv.png \
                                    ./fixtures/labels/
+# The batch sample's unreadable row is a photograph, not a label: `fixtures/robustness/`
+# holds the degraded renders, and this one file is the only thing shipped code reaches for
+# in that tree. The rest of the tree is evidence about accuracy and stays out.
+COPY --chown=labelproof:labelproof fixtures/robustness/tc14_blur_hopeless.png \
+                                   ./fixtures/robustness/
 
 # --- the built SPA ---------------------------------------------------------------------
 # `api/main.py` resolves this as `<repo root>/web/dist`, so the path must mirror the
