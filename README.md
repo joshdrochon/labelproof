@@ -10,7 +10,7 @@ recommendation. **It recommends — the agent decides.**
 | **Requirements** | [`PRD.md`](PRD.md) **v1.0** — 2026-08-10. Source of truth; requirement IDs (Appendix A) are cited throughout the code and tests. |
 | **Regulatory canon** | `PRD.md` Appendix B, verified against GPO CFR XML and Cornell LII, with retrieval dates recorded per item in `api/canon.py` |
 | **Developer log** | [`CHANGES.md`](CHANGES.md) — deploy, roll back, operate |
-| **Execution plan** | [`TICKETS.md`](TICKETS.md) — 332 tickets, each traced to a requirement ID |
+| **Execution plan** | [`TICKETS.md`](TICKETS.md) — 338 tickets, each traced to a requirement ID |
 | **Start here (reviewers)** | [`docs/evaluation.md`](docs/evaluation.md) — the brief's criteria, each with something to open |
 | **PRD audit** | [`docs/prd-audit.md`](docs/prd-audit.md) — both PRD checklists, line by line — MVP 14/15, Final 7/11 |
 | **Accuracy** | [`docs/accuracy.md`](docs/accuracy.md) — Tier A 100% on 175 rows, Tier B 71.4% on 21, confusion matrices, every miss explained |
@@ -82,6 +82,17 @@ verdict in one click.
 agent is confirming it against submitted artwork — they are not typing it in. The manual
 form on that screen stands in for a record this prototype does not fetch (see Assumptions),
 so filling it by hand is the least representative way to see the product.
+
+**Then look at the second tab.** *Batch check* is the other half of the product and it is
+easy to miss — a reviewer who only uses the first tab never sees the mode Janet actually
+asked for. **Try a sample batch** loads six applications and starts them, so it needs no
+spreadsheet and no images. Watch for three things: rows appear while the job is still
+running rather than all at the end, they arrive **worst first** — return-for-correction,
+then items that could not be checked, then needs-review, then clean — and one row is
+deliberately malformed, so it is reported by row number and column while the other five
+are checked anyway. Open any finished row for the same evidence the single-label view
+shows. `Export CSV` writes the file that goes in the case file. To bring your own, `GET
+/batch/manifest-template.csv` is the blank spreadsheet and the page links it.
 
 To run it against the real model, put a key in `.env` (gitignored, see `.env.example`):
 
@@ -773,21 +784,28 @@ by `scripts/spike_latency.py` and pinned in `api.config.MEASURED_EXTRACTION_MS`:
 | `claude-haiku-4-5` | ~5,500 ms | ~4,700 ms | $1 / $5 | **Per-request: no, 400s it. Workspace-level: yes** |
 
 Our own non-provider work — ingest, quality scoring, preprocessing, rules, serialization
-— is about **1,120 ms**, measured on the deployed app: ingest ~260, quality ~300,
-preprocess ~570, compare ~1, against an extract of ~6,800. That is roughly **14%** of the
-request, and `api.config._OVERHEAD_MS` reserves 1,500 ms against it.
+— is about **570 ms**, and the way to get that number without argument is
+`timings_ms.total` minus `timings_ms.extract`, which is everything in the request that is
+not the model. Measured that way on the deployed app across seven warm runs on
+2026-08-15: **504, 505, 506, 510, 511, 579, 582 ms**, against extracts of 4,730–6,254 ms.
+That is roughly **9%** of the request, and `api.config._OVERHEAD_MS` reserves 1,500 ms
+against it. Itemised, the parts are ingest ~260 and quality ~300 — which *are* the
+`preprocess` row, not additions to it — plus a compare that measures 1–3 ms. On the first
+request after a restart the same figure is 749–769 ms; that extra ~180 ms is first-touch
+import cost and it happens once ([`docs/coldstart-probe.txt`](docs/coldstart-probe.txt)).
 
-This number has now been wrong twice, both times too small, and both corrections are
-recorded rather than quietly applied. It first said **130 ms**, which was a single-image
-figure while production sends two. It was then corrected to **570 ms** — which is the
-`preprocess` row alone, mistaken for the total, by someone reading their own table too
-fast. The itemisation was printed correctly beside it both times and sums to ~1,120.
+This number has now been wrong three times and this is the third correction, so read it
+with that in mind. It first said **130 ms**, a single-image figure while production sends
+two. It was corrected to **570 ms**. It was then "corrected" again to **1,120 ms** by
+adding `ingest + quality + preprocess + compare` — and `preprocess` is the roll-up of the
+first two, so that sum counts the same work twice. The [Timings](#timings) section warns
+in bold not to add that column up; this paragraph did it anyway, one screen further down.
+The 570 ms it overwrote had been right all along.
 
-The conclusion does not move: dedicated cores might halve our share, taking perhaps 560 ms
-off a 6.4 s p95 for a higher machine price, and the model is still the large majority of
-the request. What
-does move is how confidently the figure should be quoted — twice wrong in the same
-direction is a pattern, not an accident, and the per-stage table in
+The conclusion does not move: dedicated cores might halve our share, taking perhaps 280 ms
+off a 6.4 s p95 for a higher machine price, and the model is the overwhelming majority of
+the request. What does move is how confidently the figure should be quoted — three wrong
+values for one measurement is a pattern, not an accident, and the per-stage table in
 [`docs/perf-deployed.md`](docs/perf-deployed.md) is the thing to read rather than this
 sentence.
 
