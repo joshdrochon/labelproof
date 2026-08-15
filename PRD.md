@@ -186,7 +186,7 @@ left unticked because they describe intent at the time of writing.
 
 | Requirement | Shipped reality | Why |
 |---|---|---|
-| **PERF-1** — p95 ≤ 5s | **9.6s**, measured over 20 runs on the deployed URL | The only model that meets 5s cannot pin US inference and got the government warning's typography wrong 10 times in 20, always toward a false pass. Data residency is a procurement condition; the gate is a stakeholder's quote about adoption |
+| **PERF-1** — p95 ≤ 5s | **6.4s**, measured over 20 runs on the deployed URL | The only model that meets 5s got the government warning's typography wrong 10 times in 20, always toward a false pass, on the one field with a zero-false-pass gate. Was 9.6s before the extraction was split and the machine moved to `performance-1x` |
 | **IMG-1, IMG-2** — perspective and rotation correction | Written, tested, **not in the request path** | The skew estimator was returning -45° on square-on photographs; `correct()` acts at 1.5°, so wiring it would have rotated compliant labels on an invented number. The vision model handles rotation natively — a sideways warning sticker reads at 0.95 with no correction |
 | **MATCH-6** — confidence routing on every field | Wired for the **government warning only** | The warning gets a floor that can refuse to certify. Ordinary fields do not route on confidence yet; `thresholds.CONFIDENCE_FLOOR` is defined and says in the source that it has no call site |
 | **MATCH-4** — Tier 3 adjudication | Built, tested, **not switched on** | `adjudicator=None` in production, so gray cases fall to Mismatch. Turning a judgement tier on without a scored accuracy subset behind it would be trusting an opinion nobody has measured |
