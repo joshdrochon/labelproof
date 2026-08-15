@@ -39,6 +39,23 @@ class Recommendation(StrEnum):
     RETURN_FOR_CORRECTION = "return_for_correction"
 
 
+class AgentDecision(StrEnum):
+    """What the agent did with one row. The tool recommends; this records the ruling.
+
+    Exactly two values, and the absence of one is the third state. A row the agent has not
+    reached yet has no decision — naming that "pending" would put a word in the exported
+    report that reads as a judgement about the label rather than as a gap in the review,
+    and HITL-5 says that report is what gets printed and handed upward.
+
+    Kept next to `Verdict` and `Recommendation` because it is the same taxonomy from the
+    other side: those two are what the tool concluded, this is what the human concluded
+    about it (HITL-1).
+    """
+
+    CONFIRMED = "confirmed"
+    OVERRIDDEN = "overridden"
+
+
 class FieldName(StrEnum):
     """The seven mandatory label elements, per the brief."""
 

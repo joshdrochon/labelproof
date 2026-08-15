@@ -35,7 +35,7 @@ import tempfile
 import threading
 import time
 import uuid
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -48,7 +48,7 @@ from api.batch.models import (
     JobState,
     RowError,
 )
-from api.models import Application, VerificationResult
+from api.models import AgentDecision, Application, FieldName, VerificationResult
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS jobs (
@@ -72,6 +72,7 @@ CREATE TABLE IF NOT EXISTS items (
     images      TEXT NOT NULL DEFAULT '[]',
     result      TEXT,
     failure     TEXT,
+    decisions   TEXT NOT NULL DEFAULT '{}',
     created_at  REAL NOT NULL,
     started_at  REAL,
     finished_at REAL
@@ -80,6 +81,26 @@ CREATE TABLE IF NOT EXISTS items (
 CREATE INDEX IF NOT EXISTS items_by_job   ON items(job_id, row);
 CREATE INDEX IF NOT EXISTS items_by_state ON items(state, created_at, row);
 """
+
+#: Columns added after a version of this store had already written a `jobs.db` somewhere.
+#:
+#: `_SCHEMA` above is `CREATE TABLE IF NOT EXISTS`, which does exactly nothing to a table
+#: that already exists — so editing it is invisible to every database that has ever been
+#: opened, including the one on the machine this deploys to. That file is the thing BATCH-6
+#: promises will survive a restart, and the failure is not a clean error: the new column is
+#: simply absent and every read of it raises `no such column` on a job an agent started
+#: before the deploy.
+#:
+#: SQLite has no `ADD COLUMN IF NOT EXISTS`, so `_migrate` reads `PRAGMA table_info` and
+#: adds what is missing. The statements are literals rather than assembled strings, because
+#: a migration list is exactly where a formatted SQL string would stop being reviewable.
+_ADDED_COLUMNS: tuple[tuple[str, str, str], ...] = (
+    (
+        "items",
+        "decisions",
+        "ALTER TABLE items ADD COLUMN decisions TEXT NOT NULL DEFAULT '{}'",
+    ),
+)
 
 
 def new_job_id() -> str:
@@ -163,6 +184,13 @@ class BatchStore:
     def _migrate(self) -> None:
         with self._conn() as connection:
             connection.executescript(_SCHEMA)
+            for table, column, statement in _ADDED_COLUMNS:
+                present = {
+                    str(row["name"])
+                    for row in connection.execute(f"PRAGMA table_info({table})")
+                }
+                if column not in present:
+                    connection.execute(statement)
 
     # --- writing ---------------------------------------------------------------------
 
@@ -318,6 +346,51 @@ class BatchStore:
             )
             _settle_job(connection, _job_of(connection, item_id), moment)
 
+    def set_decisions(
+        self, item_id: str, updates: Mapping[FieldName, AgentDecision | None]
+    ) -> BatchItem | None:
+        """Merge the agent's rulings into one item, or None if that item is gone.
+
+        **Merge, not replace, and `None` clears.** An agent rules on one row at a time, so a
+        request carries the row they just decided — and a whole-map write would mean two
+        tabs, or an agent and the colleague they handed the queue to, each silently erasing
+        the other's work. A decision that quietly disappears is worse than one that was
+        never recorded, because the agent has already moved on believing it was kept.
+
+        Read and write are one `BEGIN IMMEDIATE` transaction for the same reason `claim` is:
+        two decisions arriving together would otherwise both read the old map and the second
+        would write the first one out of existence.
+        """
+        with self._write_lock, self._conn() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                row = connection.execute(
+                    "SELECT * FROM items WHERE item_id = ?", (item_id,)
+                ).fetchone()
+                if row is None:
+                    connection.execute("ROLLBACK")
+                    return None
+
+                merged = dict(_decisions_of(row))
+                for field, decision in updates.items():
+                    if decision is None:
+                        merged.pop(field, None)
+                    else:
+                        merged[field] = decision
+
+                connection.execute(
+                    "UPDATE items SET decisions = ? WHERE item_id = ?",
+                    (json.dumps({f.value: d.value for f, d in merged.items()}), item_id),
+                )
+                connection.execute("COMMIT")
+            except Exception:
+                connection.execute("ROLLBACK")
+                raise
+
+        item = _item_from_row(row)
+        item.decisions = merged
+        return item
+
     def requeue(self, item_id: str) -> None:
         """Put an item back for another attempt. `attempts` is deliberately not reset."""
         with self._write_lock, self._conn() as connection:
@@ -333,12 +406,19 @@ class BatchStore:
         already cost real money and real minutes; re-running them because three failed is
         the behaviour this endpoint exists to avoid. `attempts` resets because a retry an
         agent asked for is a fresh decision, not a continuation of the automatic ones.
+
+        **The item's decisions go with the failure.** A retry produces a new result, and a
+        ruling recorded against the one it replaces is worse than no ruling at all: it is
+        the agent's name on a judgement of something they never saw, and HITL-5 puts it in
+        the report that gets printed. An agent who marked a failed item "overridden" to mean
+        "I checked this one by hand" and then retried it must be asked again.
         """
         moment = time.time() if now is None else now
         with self._write_lock, self._conn() as connection:
             cursor = connection.execute(
                 "UPDATE items SET state = ?, attempts = 0, failure = NULL, "
-                "started_at = NULL, finished_at = NULL WHERE job_id = ? AND state = ?",
+                "decisions = '{}', started_at = NULL, finished_at = NULL "
+                "WHERE job_id = ? AND state = ?",
                 (ItemState.QUEUED.value, job_id, ItemState.FAILED.value),
             )
             requeued = cursor.rowcount or 0
@@ -591,6 +671,25 @@ def _job_from_row(row: sqlite3.Row) -> BatchJob:
     )
 
 
+def _decisions_of(row: sqlite3.Row) -> dict[FieldName, AgentDecision]:
+    """The stored rulings, validated on the way out rather than trusted.
+
+    A column is not a schema. Anything that wrote this file — an older build, a hand-run
+    UPDATE during an incident — could have left a field name or a decision this build does
+    not have, and a dict comprehension straight off the JSON would carry it into the
+    exported report as a word nobody can define. Validating each pair keeps the enum the
+    single statement of what a decision can be.
+    """
+    stored: dict[str, str] = json.loads(row["decisions"] or "{}")
+    out: dict[FieldName, AgentDecision] = {}
+    for field, decision in stored.items():
+        try:
+            out[FieldName(field)] = AgentDecision(decision)
+        except ValueError:
+            continue
+    return out
+
+
 def _item_from_row(row: sqlite3.Row) -> BatchItem:
     return BatchItem(
         item_id=str(row["item_id"]),
@@ -604,6 +703,7 @@ def _item_from_row(row: sqlite3.Row) -> BatchItem:
             VerificationResult.model_validate_json(row["result"]) if row["result"] else None
         ),
         failure=ItemFailure.model_validate_json(row["failure"]) if row["failure"] else None,
+        decisions=_decisions_of(row),
         created_at=float(row["created_at"]),
         started_at=row["started_at"],
         finished_at=row["finished_at"],

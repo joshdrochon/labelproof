@@ -52,6 +52,7 @@ from api.batch.worker import MAX_ATTEMPTS, ProviderBudget, WorkerPool, process
 from api.config import Config
 from api.main import create_app
 from api.models import (
+    AgentDecision,
     Aggregate,
     Application,
     Cost,
@@ -1957,6 +1958,244 @@ def test_stored_bytes_nobody_can_identify_are_never_served_as_markup(
 def _write(path: Path, data: bytes) -> Path:
     path.write_bytes(data)
     return path
+
+
+# --- HTTP: agent decisions (HITL-1, HITL-5) -------------------------------------------
+#
+# The tool recommends and the agent decides. Batch had nowhere to put the second half of
+# that sentence, so the HITL-5 export — findings AND agent decisions — could only ever
+# carry one of the two things it names.
+
+
+def decide(
+    client: TestClient, job_id: str, item_id: str, decisions: dict[str, str | None]
+) -> Any:
+    return client.patch(
+        f"/batch/{job_id}/items/{item_id}/decisions", json={"decisions": decisions}
+    )
+
+
+def test_a_decision_is_recorded_against_the_row_the_agent_ruled_on(tmp_path: Path) -> None:
+    client = make_client(tmp_path, provider=spec_provider())
+    job_id = post_batch(client, [row()]).json()["job_id"]
+    drain(client)
+    item = one_item(client, job_id)
+
+    response = decide(client, job_id, item["item_id"], {"brand_name": "confirmed"})
+    assert response.status_code == 200
+    assert response.json()["decisions"] == {"brand_name": "confirmed"}
+    assert response.json()["item_id"] == item["item_id"]
+
+
+def test_a_decision_is_still_there_after_the_page_is_reloaded(tmp_path: Path) -> None:
+    """The failure this feature exists to prevent is "it looked saved but wasn't".
+
+    A decisions map served only by the endpoint that wrote it is exactly that failure: the
+    agent rules on a row, the table refreshes on the next poll, and their work is gone from
+    the screen while sitting in the database. So the item carries it on every read.
+    """
+    client = make_client(tmp_path, provider=spec_provider())
+    job_id = post_batch(client, [row()]).json()["job_id"]
+    drain(client)
+    item = one_item(client, job_id)
+
+    decide(client, job_id, item["item_id"], {"alcohol_content": "overridden"})
+
+    reloaded = one_item(client, job_id)
+    assert reloaded["decisions"] == {"alcohol_content": "overridden"}
+
+
+def test_rows_the_patch_does_not_mention_are_left_alone(tmp_path: Path) -> None:
+    """An agent rules on one row at a time, so a request carries one row.
+
+    Replacing the whole map instead of merging is how two tabs — or an agent and whoever
+    they handed the queue to — each silently erase the other's work.
+    """
+    client = make_client(tmp_path, provider=spec_provider())
+    job_id = post_batch(client, [row()]).json()["job_id"]
+    drain(client)
+    item_id = one_item(client, job_id)["item_id"]
+
+    decide(client, job_id, item_id, {"brand_name": "confirmed"})
+    body = decide(client, job_id, item_id, {"net_contents": "overridden"}).json()
+
+    assert body["decisions"] == {
+        "brand_name": "confirmed",
+        "net_contents": "overridden",
+    }
+
+
+def test_null_takes_a_decision_back(tmp_path: Path) -> None:
+    client = make_client(tmp_path, provider=spec_provider())
+    job_id = post_batch(client, [row()]).json()["job_id"]
+    drain(client)
+    item_id = one_item(client, job_id)["item_id"]
+
+    decide(client, job_id, item_id, {"brand_name": "confirmed", "producer": "overridden"})
+    body = decide(client, job_id, item_id, {"brand_name": None}).json()
+
+    assert body["decisions"] == {"producer": "overridden"}
+
+
+def test_an_item_with_no_decisions_says_so_rather_than_omitting_the_field(
+    tmp_path: Path,
+) -> None:
+    """A client that has to tell "no decisions" from "this build has no decisions" by the
+    absence of a key will get it wrong once and then stop trusting the field."""
+    client = make_client(tmp_path, provider=spec_provider())
+    job_id = post_batch(client, [row()]).json()["job_id"]
+    drain(client)
+
+    assert one_item(client, job_id)["decisions"] == {}
+
+
+@pytest.mark.parametrize("name", ["brandname", "vintage", "", "BRAND_NAME"])
+def test_a_field_this_tool_does_not_check_is_refused_in_a_sentence(
+    tmp_path: Path, name: str
+) -> None:
+    """Not a pydantic dump. Every other refusal this app makes is written for a person."""
+    client = make_client(tmp_path, provider=spec_provider())
+    job_id = post_batch(client, [row()]).json()["job_id"]
+    drain(client)
+    item_id = one_item(client, job_id)["item_id"]
+
+    response = decide(client, job_id, item_id, {name: "confirmed"})
+    assert response.status_code == 400
+    error = response.json()["error"]
+    assert error["code"] == "unknown_field"
+    assert "government_warning" in error["message"], "the message lists what is accepted"
+
+
+@pytest.mark.parametrize("value", ["approved", "rejected", "pending", "Confirmed", ""])
+def test_a_ruling_that_is_not_one_of_the_two_is_refused(tmp_path: Path, value: str) -> None:
+    """Two values and the absence of one. A third would reach the printed report as a word
+    nobody can define."""
+    client = make_client(tmp_path, provider=spec_provider())
+    job_id = post_batch(client, [row()]).json()["job_id"]
+    drain(client)
+    item_id = one_item(client, job_id)["item_id"]
+
+    response = decide(client, job_id, item_id, {"brand_name": value})
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "unknown_decision"
+    assert one_item(client, job_id)["decisions"] == {}, "a refused patch changes nothing"
+
+
+def test_decisions_on_an_expired_batch_are_refused(tmp_path: Path) -> None:
+    """SEC-2 — a batch we say is deleted must not still accept writes."""
+    client = make_client(tmp_path, provider=spec_provider())
+    job_id = post_batch(client, [row()]).json()["job_id"]
+    drain(client)
+    item_id = one_item(client, job_id)["item_id"]
+    expire(client, job_id)
+
+    response = decide(client, job_id, item_id, {"brand_name": "confirmed"})
+    assert response.status_code == 404
+
+
+def test_an_unknown_item_cannot_be_ruled_on(tmp_path: Path) -> None:
+    client = make_client(tmp_path, provider=spec_provider())
+    job_id = post_batch(client, [row()]).json()["job_id"]
+    drain(client)
+
+    assert decide(client, job_id, "itm_nope", {"brand_name": "confirmed"}).status_code == 404
+
+
+def test_a_retry_clears_the_decisions_on_the_item_it_requeues(tmp_path: Path) -> None:
+    """A ruling recorded against the verdict a retry replaces is worse than none at all.
+
+    An agent who marks a failed item "overridden" to mean "I checked this one by hand" and
+    then retries it has to be asked again — otherwise their name sits on a judgement of a
+    result they never saw, in the report HITL-5 says gets printed and handed upward.
+    """
+    provider = PoisonProvider(spec_provider())
+    client = make_client(tmp_path, provider=provider)
+    job_id = post_batch(
+        client,
+        [row(), row(front=POISON_IMAGE)],
+        images={GOOD_IMAGE: GOOD_BYTES, POISON_IMAGE: POISON_BYTES},
+    ).json()["job_id"]
+    drain(client)
+
+    items = client.get(f"/batch/{job_id}?include_pending=true").json()["items"]
+    failed = next(i for i in items if i["state"] == ItemState.FAILED.value)
+    survivor = next(i for i in items if i["state"] == ItemState.DONE.value)
+    decide(client, job_id, failed["item_id"], {"brand_name": "overridden"})
+    decide(client, job_id, survivor["item_id"], {"brand_name": "confirmed"})
+
+    client.post(f"/batch/{job_id}/retry")
+    drain(client)
+
+    after = {
+        item["item_id"]: item["decisions"]
+        for item in client.get(f"/batch/{job_id}?include_pending=true").json()["items"]
+    }
+    assert after[failed["item_id"]] == {}, "the retried item kept a stale ruling"
+    assert after[survivor["item_id"]] == {"brand_name": "confirmed"}, (
+        "retry touched an item it was not asked to rerun"
+    )
+
+
+def test_decisions_survive_a_restart(tmp_path: Path) -> None:
+    """BATCH-6 — the review an agent did before lunch is still there after a deploy."""
+    store = BatchStore(tmp_path)
+    job_id = seed(store, count=1)
+    item_id = store.items(job_id)[0].item_id
+    store.set_decisions(item_id, {FieldName.BRAND_NAME: AgentDecision.CONFIRMED})
+
+    reopened = BatchStore(tmp_path)
+    reloaded = reopened.get_item(item_id)
+    assert reloaded is not None
+    assert reloaded.decisions == {FieldName.BRAND_NAME: AgentDecision.CONFIRMED}
+
+
+def test_a_database_written_before_decisions_existed_gains_the_column(
+    tmp_path: Path,
+) -> None:
+    """`CREATE TABLE IF NOT EXISTS` does nothing to a table that already exists.
+
+    So a schema change made only in `_SCHEMA` is invisible to the one database that
+    matters — the file on the deployed machine, holding the jobs BATCH-6 promises will
+    survive a restart. Without the `ALTER TABLE`, the first read after the deploy raises
+    `no such column: decisions` on every job an agent started before it.
+    """
+    store = BatchStore(tmp_path)
+    job_id = seed(store, count=1)
+    item_id = store.items(job_id)[0].item_id
+    with store._conn() as connection:
+        connection.execute("ALTER TABLE items DROP COLUMN decisions")
+        assert "decisions" not in {
+            str(r["name"]) for r in connection.execute("PRAGMA table_info(items)")
+        }
+
+    reopened = BatchStore(tmp_path)
+    item = reopened.get_item(item_id)
+    assert item is not None and item.decisions == {}
+    assert reopened.set_decisions(item_id, {FieldName.PRODUCER: AgentDecision.CONFIRMED})
+
+
+def test_a_decision_this_build_cannot_name_is_dropped_rather_than_served(
+    tmp_path: Path,
+) -> None:
+    """A column is not a schema, and the export is printed.
+
+    Anything that wrote this file — an older build, a hand-run UPDATE during an incident —
+    could leave a word here that this build has no definition for. Carrying it through to a
+    case file is how an undefined term ends up in front of a reviewer.
+    """
+    store = BatchStore(tmp_path)
+    job_id = seed(store, count=1)
+    item_id = store.items(job_id)[0].item_id
+    with store._conn() as connection:
+        connection.execute(
+            "UPDATE items SET decisions = ? WHERE item_id = ?",
+            (json.dumps({"brand_name": "escalated", "vintage": "confirmed",
+                         "producer": "overridden"}), item_id),
+        )
+
+    item = store.get_item(item_id)
+    assert item is not None
+    assert item.decisions == {FieldName.PRODUCER: AgentDecision.OVERRIDDEN}
 
 
 # --- HTTP: retry (BATCH-8) ------------------------------------------------------------

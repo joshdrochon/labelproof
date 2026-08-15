@@ -51,6 +51,10 @@ LANES = lanes_for(30)
         # on top of the polling the status endpoint is already doing, so it has to sit in
         # the generous read lane rather than anywhere near the verification budget.
         ("GET", "/batch/job_abc/items/itm_abc/images/0", "batch_read"),
+        # A write, and still the read lane: recording a decision makes no model call. It is
+        # a click at click frequency, and the submit lane's ten a minute would rate-limit an
+        # agent working briskly down a 300-row queue against themselves.
+        ("PATCH", "/batch/job_abc/items/itm_abc/decisions", "batch_read"),
         ("GET", "/batch/manifest-template.csv", "batch_read"),
         ("GET", "/sample", "default"),
         ("GET", "/", "default"),

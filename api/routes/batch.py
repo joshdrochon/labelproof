@@ -50,6 +50,7 @@ from typing import Annotated, Final, cast
 
 from fastapi import APIRouter, FastAPI, File, Request, UploadFile
 from fastapi.responses import FileResponse, PlainTextResponse, Response
+from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 
 from api import errors
@@ -72,7 +73,7 @@ from api.batch.models import (
 from api.batch.store import BatchStore, is_expired
 from api.batch.worker import ProviderBudget, WorkerPool
 from api.config import Config
-from api.models import FieldName
+from api.models import AgentDecision, FieldName
 from api.pipeline.ingest import sniff
 from api.provider.base import ExtractionProvider
 from api.routes import get_config, provider_for
@@ -812,14 +813,18 @@ def _require_item(store: BatchStore, job_id: str, item_id: str) -> BatchItem:
     """
     item = store.get_item(item_id)
     if item is None or item.job_id != job_id:
-        raise errors.UserError(
-            "That application is not in this batch. Open the batch again and pick a row "
-            "from the list.",
-            next_step="navigate",
-            code="batch_item_not_found",
-            status_code=404,
-        )
+        raise _no_such_item()
     return item
+
+
+def _no_such_item() -> errors.UserError:
+    return errors.UserError(
+        "That application is not in this batch. Open the batch again and pick a row "
+        "from the list.",
+        next_step="navigate",
+        code="batch_item_not_found",
+        status_code=404,
+    )
 
 
 @router.get("/batch/{job_id}/items/{item_id}/images/{index}")
@@ -896,6 +901,89 @@ def _stored_media_type(path: Path) -> str:
         return str(sniff(head))
     except errors.LabelProofError:
         return "application/octet-stream"
+
+
+class DecisionPatch(BaseModel):
+    """The body of `PATCH .../decisions`: the rows the agent just ruled on.
+
+    Typed as plain strings rather than as `dict[FieldName, AgentDecision | None]` so the
+    refusal is ours. Pydantic would answer a misspelled field name with a 422 carrying
+    `Input should be 'brand_name', 'class_type', ...` and a `loc` path, which is a
+    validation dump, not a sentence an agent can act on — and every other refusal this app
+    makes is written for the person reading it (UX-6, OPS-5).
+    """
+
+    decisions: dict[str, str | None] = Field(default_factory=dict)
+
+
+def _read_decisions(patch: DecisionPatch) -> dict[FieldName, AgentDecision | None]:
+    """Read the body into the two enums, naming whichever half is wrong."""
+    out: dict[FieldName, AgentDecision | None] = {}
+    for name, value in patch.decisions.items():
+        try:
+            field = FieldName(name)
+        except ValueError as exc:
+            raise errors.UserError(
+                f"“{name}” is not one of the label elements this tool checks. "
+                f"Record a decision against one of: "
+                f"{', '.join(f.value for f in FieldName)}.",
+                next_step="fix_request",
+                code="unknown_field",
+            ) from exc
+        if value is None:
+            out[field] = None
+            continue
+        try:
+            out[field] = AgentDecision(value)
+        except ValueError as exc:
+            raise errors.UserError(
+                f"“{value}” is not a decision this tool records. A row is either "
+                f"confirmed or overridden — send null to take a decision back.",
+                next_step="fix_request",
+                code="unknown_decision",
+            ) from exc
+    return out
+
+
+@router.patch("/batch/{job_id}/items/{item_id}/decisions", response_model=BatchItem)
+def set_item_decisions(
+    request: Request, job_id: str, item_id: str, patch: DecisionPatch
+) -> BatchItem:
+    """Record what the agent decided about one item's rows (HITL-1, HITL-5).
+
+    The tool recommends and the agent decides; until now the batch half of the product had
+    nowhere to put the second part of that sentence, so the export promised in HITL-5 —
+    findings *and* agent decisions — could only ever carry half of what it names.
+
+    Only the fields named in the body change. Fields left out are untouched and `null`
+    clears one, so an agent working down a checklist sends the row they just ruled on
+    rather than the whole map. Sending the whole map is how one tab silently erases
+    another's work, and `BatchStore.set_decisions` says more about why.
+
+    No model call happens here, which is why this sits in the read rate-limit lane despite
+    being a write: it is a click, at click frequency, and putting it in the submit lane
+    would let an agent working quickly through a 300-row queue rate-limit themselves.
+    """
+    config = get_config(request)
+    store = get_store(request)
+    _require_job(store, job_id, config.retention_hours, status_code=404)
+    _require_item(store, job_id, item_id)
+
+    updates = _read_decisions(patch)
+    item = store.set_decisions(item_id, updates)
+    if item is None:
+        # Swept between the check above and the write. Same answer as an item that was
+        # never there, because from the caller's seat it is the same fact.
+        raise _no_such_item()
+
+    applog.log(
+        "batch_decisions",
+        job_id=job_id,
+        item_id=item_id,
+        count=len(updates),
+        status=len(item.decisions),
+    )
+    return item
 
 
 @router.post("/batch/{job_id}/retry", response_model=BatchStatus)
