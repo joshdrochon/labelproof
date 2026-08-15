@@ -192,9 +192,13 @@ Two things to settle before applying it:
   the renderer puts it at 0.450-0.540 - inside `layout.BLANK_BAND`, the region defined as
   having nothing printed in it. Feeding that to `assess_region` would have scored `blank`
   and read as legible, a false pass waiting for this wiring; it also drew the demo's own
-  evidence outline on bare paper. It now takes `fixtures/generator/layout.FIELD_BANDS`
-  directly, and `tests/test_sample_regions.py` asserts every box lands on print and none
-  overlaps the blank band. Any other provider supplying boxes needs the same check.
+  evidence outline on bare paper. It now takes its bands from
+  `fixtures/generator/layout.BANDS_BY_FACE`, picking the table for the face the image's
+  `role` names and supplying no box at all for a face nobody measured - a wrong region fed
+  to `assess_region` is a verdict about the wrong pixels, so "unknown" has to stay
+  expressible. `tests/test_sample_regions.py` asserts every box lands on print on the face
+  it describes and none overlaps the blank band. Any other provider supplying boxes needs
+  the same check.
 * Forcing a verdict after aggregation means the aggregate must be recomputed, or the
   recommendation can disagree with the rows it is derived from.
 ```
