@@ -12,7 +12,7 @@ recommendation. **It recommends — the agent decides.**
 | **Developer log** | [`CHANGES.md`](CHANGES.md) — deploy, roll back, operate |
 | **Execution plan** | [`TICKETS.md`](TICKETS.md) — 338 tickets, each traced to a requirement ID |
 | **Start here (reviewers)** | [`docs/evaluation.md`](docs/evaluation.md) — the brief's criteria, each with something to open |
-| **PRD audit** | [`docs/prd-audit.md`](docs/prd-audit.md) — both PRD checklists, line by line — MVP 14/15, Final 7/11 |
+| **PRD audit** | [`docs/prd-audit.md`](docs/prd-audit.md) — both PRD checklists, line by line — MVP 14/15, Final 8/11 |
 | **Accuracy** | [`docs/accuracy.md`](docs/accuracy.md) — Tier A 100% on 175 rows, Tier B 71.4% on 21, confusion matrices, every miss explained |
 | **Cost** | [`docs/cost.md`](docs/cost.md) — $0.046 a verification, $0.022 a label in batch, measured on the shipped `split` configuration |
 | **Latency** | [`docs/perf-deployed.md`](docs/perf-deployed.md) — 20 timed runs on the deployed URL |
@@ -30,6 +30,7 @@ The brief's sha is quoted from the PRD's front matter; the `.docx` is not commit
 
 - [Run it](#run-it) · [What it checks](#what-it-checks) · [Approach](#approach) · [Checking a batch](#checking-a-batch) · [Assumptions](#assumptions) · [What is not done](#what-is-not-done)
 - [Observability](#observability) — the log, the fields, the timings, and what the numbers actually are
+  - [How fast it actually is](#how-fast-it-actually-is-and-where-that-leaves-perf-1) · [There is no standing cold start](#there-is-no-standing-cold-start-and-here-is-what-was-actually-measured)
 - [Ops runbook](#ops-runbook) — read the log, the timings, the cost; the honesty check
 - [Network egress](#network-egress) — every external domain, allowlist-ready (NET-1)
 - [Security, privacy, and data retention](#security-privacy-and-data-retention) — SEC-1…SEC-10
@@ -43,10 +44,10 @@ Nothing below needs an API key. The suite and the demo both run offline.
 
 ```bash
 git clone <this repo> && cd labelproof
-python3.14 -m venv .venv && .venv/bin/pip install -e ".[dev]"
+python3 -m venv .venv && .venv/bin/pip install -e ".[dev]"   # 3.12 or newer; CI uses 3.14
 (cd web && npm ci && npm run build)               # Node 22. THIS STEP IS NOT OPTIONAL — see below
 
-.venv/bin/python -m pytest                        # 3,700 tests, offline, ~5 min
+.venv/bin/python -m pytest                        # 3,702 tests, offline, ~5 min
 .venv/bin/python -m eval.run                      # the accuracy gate
 LABELPROOF_FAKE_PROVIDER=1 .venv/bin/uvicorn api.main:app --reload
 ```
@@ -69,8 +70,11 @@ docker run --rm -p 8000:8080 -e LABELPROOF_FAKE_PROVIDER=1 labelproof
 
 Both routes were run from a clean `git clone` of this repository before this section was
 written, and the second one is why the image now ships `fixtures/generator/layout.py`:
-without it the container booted, passed both health checks, served every screen, and then
-answered `500` on the first sample click.
+without it the container booted, served every screen, and then answered `500` on the first
+sample click. `/health` stayed green throughout — it touches nothing — while `/ready`
+answered `503`, because it constructs the provider and the provider was the thing that
+would not import. So the image was not silently broken; it was loudly broken on the one
+endpoint nobody looks at when the page renders.
 
 Then open <http://localhost:8000> and click one of the samples. There are four, and
 between them they show every shape of answer the tool gives: a label that checks out, a
@@ -117,24 +121,35 @@ closed.
 
 ### What to expect on <https://labelproof.fly.dev>
 
-The page itself answers in about **0.1s**. A verification takes about **6 seconds**,
-first click and every click after it, and the number on the screen is the one that was
-measured. There is **no warm-up period and no cold start to wait out** — the first
-request is not meaningfully slower than the tenth, and the reason is in
-[Keeping it warm](#keeping-it-warm) below.
+The page answers in about **0.1s**. Clicking a sample puts a verdict on the screen in
+**6 to 8 seconds** — median 6.6s over five runs in a real browser, worst 8.0s — and the
+first click was not distinguishable from the fifth. **That is over the 5-second gate the
+brief sets**, by a second or more, and it is the model's time rather than a start-up cost:
+see [How fast it actually is](#how-fast-it-actually-is-and-where-that-leaves-perf-1).
 
-That is stated as a measurement rather than as a configuration claim, because it was
-reported as a 12-second first request and 3–5 second ones afterwards, and neither number
-reproduced. What the deployed URL actually does is in
-[How fast it actually is](#how-fast-it-actually-is-and-where-that-leaves-perf-1), with
-the cold-start table. **6 seconds is over the 5-second gate the brief sets** and this
-build does not meet it; that gap is the model's, it is not a start-up cost, and it is not
-something a second click improves.
+Note that the result card says "Checked in 5.6s" for a click that took 7.4s of wall
+clock. The card times the request; the difference is the browser fetching the two sample
+images and re-encoding them to WebP before upload. **The card under-reports the wait by up
+to 1.7s**, so the 6–8s above is the number to hold this to, not the one on the screen.
 
-One exception, and it is the only slow path we found: a request that arrives **while the
-machine is restarting** — during a deploy — waits for the new process instead of failing.
-Measured at **20.2s**, answered 200. Nothing schedules a restart, so a reviewer will only
-see this if they click during a deployment.
+Two things a reviewer might otherwise wait for and does not need to:
+
+- **There is no warm-up to sit through.** A first verification on a machine that had just
+  booted measured 5.9–6.1s against a warm 5.5–7.0s. This was investigated because a
+  12-second first request was reported, with 3–5 second requests afterwards, and
+  **neither reproduced** — the slowest thing measured all afternoon, restarts aside, was
+  8.0s. That is *not reproduced*, which is weaker than *does not happen*: the sample is
+  three cold observations against a wide warm spread, on one afternoon, on one network.
+  The full scope of what was and was not tested is in
+  [`docs/coldstart-probe.txt`](docs/coldstart-probe.txt), and the summary is
+  [below](#there-is-no-standing-cold-start-and-here-is-what-was-actually-measured).
+- **The read-ahead is not something to wait for either.** If you upload artwork and fill
+  the form, the label is read while you type, and pressing the button then costs about a
+  second (measured 1.0 and 1.5s of wall clock, 0.6s on the wire).
+
+One genuinely slow path exists: a request arriving **while the machine is restarting**,
+during a deploy, waits for the new process rather than failing. Measured at **20.2s**,
+answered 200. Nothing schedules a restart, so this needs a deployment to happen at all.
 
 ---
 
@@ -169,7 +184,15 @@ an adoption gate rather than a nice-to-have.
 one field of the application — `commodity`, which selects the rule text in the prompt — so
 it can start the moment the pictures arrive rather than when the button is pressed. By the
 time six fields are filled the reading is usually done, and submitting costs the
-comparison alone: **9,795 ms → 176 ms**, measured, same verdict.
+comparison alone. Measured in a browser against the deployed URL: the read-ahead runs
+**5.6 s** in the background, and pressing the button then costs **0.6 s on the wire, 1.0
+to 1.5 s of wall clock**, same verdict
+([`docs/coldstart-probe.txt`](docs/coldstart-probe.txt), path B).
+
+This sentence used to claim **9,795 ms → 176 ms**. Both numbers are gone because no
+artifact in the repository produces either of them, and the first is a single-call figure
+from before extraction was split — inflated, unsourced, and sitting in the most-read
+section of the document.
 
 That is a claim about the *wait*, not about the work. Reading the label still takes the
 same six seconds and the result card still reports them; PERF-1 asks for p95 upload-to-
@@ -286,24 +309,32 @@ the driving field, the findings and the rationale — the file that goes in the 
 and gets printed. Cells that a spreadsheet would execute are neutralised.
 
 **Measured on the deployed URL, at the size the brief asks for: 300 applications in
-291.9 seconds — 4.9 minutes — with 0 failures, 0 items rate-limited, and $6.59 of model
-spend, $0.0220 a label.** The first result was visible **8.3 seconds** after submit. Both
-PRD numbers are met: PERF-4's ten minutes and BATCH-2's ten seconds to something on the
-screen. Six malformed rows were sent alongside the 300 and came back reported by row
-number and column while all 300 good ones were queued anyway (TC-20). The whole run,
+291.9 seconds — 4.9 minutes — with 0 failures, no item retried even once, and $6.59 of
+model spend, $0.0220 a label.** The first result was visible **8.3 seconds** after submit. Both
+PRD numbers are met, and both are PERF-4's: ten minutes end to end, and ten seconds to
+something on the screen. Six malformed rows were sent alongside the 300; **five came back reported by row number
+and column** and all 300 good ones were queued anyway (TC-20). The sixth is entirely
+blank, which `api/batch/manifest.py` skips on purpose — a blank line between blocks is
+not an error — so it demonstrates that rule rather than the row-numbering one. The whole run,
 including the polling trace, is in [`docs/batch-300.md`](docs/batch-300.md), and
 `scripts/batch_300.py` will do it again.
 
 **And Verify Now kept its lane.** Five real single verifications were fired during that
-batch, one every 45 seconds with 6 workers and 300 items in flight: 5,477–6,352 ms,
-median **5,854 ms**, against **5,574 ms** on the same service with nothing running. About
-**280 ms**, which is the priority-lane promise in BATCH-9 and PERF-5 measured rather than
-asserted — before this it was only checked in tests, against a stub budget.
+batch, one every 45 seconds with 6 workers and 300 items in flight: **5,477–6,352 ms**,
+every one of them inside the service's ordinary warm spread of 5,493–7,031 ms. So the
+honest reading is that **Verify Now under a full batch is indistinguishable from Verify
+Now idle** — which is what BATCH-9 and PERF-5 promise, measured on the deployed service
+instead of against a stub budget. It is *not* a quantified cost: the idle control was a
+single request, and an earlier version of this paragraph turned that into "+280 ms",
+which the run-to-run spread swallows whole.
 
-Two honest qualifications. The 300 applications carried **one image each**, where the
-22-item run carried two; that halves the artwork per label and is why the wall clock
-should not be compared with the older run's directly. And no rate limiting appeared **at
-six workers on this account** — that is a fact about this run, not a ceiling.
+Three honest qualifications. The 300 applications carried **one image each**, where the
+22-item run carried two; that halves the artwork per label, so the wall clocks are not
+comparable. **Nothing was rate-limited, and that is derived from `attempts`, not from
+failures** — a throttled item that succeeds on retry carries no failure at all, so
+counting failures would have called any run clean. All 300 items show `attempts = 1`, and
+the SDK client is built with `max_retries=0`, so nothing was absorbed underneath either.
+And six workers plainly did not reach the account's ceiling, which stays untested.
 
 ---
 
@@ -427,7 +458,9 @@ here.
   keyboard navigation, a focus ring that is visibly painted rather than merely present,
   no keyboard trap, and the accessibility tree — accessible names, landmarks, heading
   order, `aria-describedby` resolving to a real node, focus landing on the first invalid
-  field. 75 checks. Those gates are newer than the claims they check: the type gate
+  field. That file is 42 of the checks; **75** is the whole `web/e2e` suite — 25 tests
+  across three Playwright projects, `a11y.spec.ts` and `errors.spec.ts` together — and
+  this sentence used to credit all 75 to the accessibility file alone. Those gates are newer than the claims they check: the type gate
   shipped enforcing 15px while its own docstring said 16, and nothing checked the 44px
   rule at all until the evidence chips were found at 27px — see
   [`docs/prd-audit.md`](docs/prd-audit.md).
@@ -802,25 +835,28 @@ by `scripts/spike_latency.py` and pinned in `api.config.MEASURED_EXTRACTION_MS`:
 | `claude-haiku-4-5` | ~5,500 ms | ~4,700 ms | $1 / $5 | **Per-request: no, 400s it. Workspace-level: yes** |
 
 Our own non-provider work — ingest, quality scoring, preprocessing, rules, serialization
-— is about **570 ms**, and the way to get that number without argument is
+— is about **510 ms**, and the way to get that number without argument is
 `timings_ms.total` minus `timings_ms.extract`, which is everything in the request that is
 not the model. Measured that way on the deployed app across seven warm runs on
-2026-08-15: **504, 505, 506, 510, 511, 579, 582 ms**, against extracts of 4,730–6,254 ms.
-That is roughly **9%** of the request, and `api.config._OVERHEAD_MS` reserves 1,500 ms
-against it. Itemised, the parts are ingest ~260 and quality ~300 — which *are* the
+2026-08-15: **504, 505, 506, 510, 511, 579, 582 ms** — **median 510, mean 528** — against
+extracts of 4,730–6,254 ms. Call it **510 ms**, which is the median of the printed sample
+rather than a rounder number near it; in a paragraph about having been wrong three times,
+quoting a figure the data underneath does not produce would be the fourth. That is roughly
+**9%** of the request, and `api.config._OVERHEAD_MS` reserves 1,500 ms against it. Itemised, the parts are ingest ~260 and quality ~300 — which *are* the
 `preprocess` row, not additions to it — plus a compare that measures 1–3 ms. On the first
 request after a restart the same figure is 749–769 ms; that extra ~180 ms is first-touch
 import cost and it happens once ([`docs/coldstart-probe.txt`](docs/coldstart-probe.txt)).
 
 This number has now been wrong three times and this is the third correction, so read it
 with that in mind. It first said **130 ms**, a single-image figure while production sends
-two. It was corrected to **570 ms**. It was then "corrected" again to **1,120 ms** by
+two. It was corrected to **570 ms**, close but quoted from a different day's sample. It was
+then "corrected" again to **1,120 ms** by
 adding `ingest + quality + preprocess + compare` — and `preprocess` is the roll-up of the
 first two, so that sum counts the same work twice. The [Timings](#timings) section warns
 in bold not to add that column up; this paragraph did it anyway, one screen further down.
-The 570 ms it overwrote had been right all along.
+The 570 ms it overwrote had been the right order of magnitude all along.
 
-The conclusion does not move: dedicated cores might halve our share, taking perhaps 280 ms
+The conclusion does not move: dedicated cores might halve our share, taking perhaps 255 ms
 off a 6.4 s p95 for a higher machine price, and the model is the overwhelming majority of
 the request. What does move is how confidently the figure should be quoted — three wrong
 values for one measurement is a pattern, not an accident, and the per-stage table in
@@ -859,19 +895,25 @@ The honest reading:
   [`docs/perf-deployed.md`](docs/perf-deployed.md) — the file rather than this sentence is
   the evidence.
 
-### There is no cold start, and here is the measurement
+### There is no standing cold start, and here is what was actually measured
 
 This was investigated because a 12-second first request was reported against the deployed
-URL, with 3–5 second requests afterwards. **Neither number reproduced.** Everything below
-is `POST /verify` against <https://labelproof.fly.dev> with the two-image *clean* sample,
-on 2026-08-15, commit `0037a56`; the raw sample, including the runs this table summarises,
-is [`docs/coldstart-probe.txt`](docs/coldstart-probe.txt):
+URL, with 3–5 second requests afterwards. **Neither number reproduced**, and the claim
+this section makes is exactly that — not that the reported event never happened, which
+three cold observations cannot establish. Everything below is against
+<https://labelproof.fly.dev> with the two-image *clean* sample, on 2026-08-15; the raw
+sample and the full scope statement are in
+[`docs/coldstart-probe.txt`](docs/coldstart-probe.txt):
 
-| Condition | n | Client stopwatch | What it tells you |
+| Condition | n | Measured | What it tells you |
 |---|--:|---|---|
 | Static page, `GET /` | 3 | 94–115 ms | Serving the interface costs nothing |
-| Warm verification | 8 | 5,493–7,031 ms | The ordinary case |
-| **First verification on a process that had just booted** | 3 | 5,863 / 6,062 / 6,128 ms | **No cold-start penalty worth a note** |
+| All four assets, cold HTTP cache | 1 | ~230 ms, 258 KB bundle | The download is not a factor |
+| Warm `POST /verify` | 8 | 5,493–7,031 ms | The ordinary case |
+| **First `/verify` on a process that had just booted** | 3 | 5,863 / 6,062 / 6,128 ms | **No cold-start penalty worth a note** |
+| **Sample click to verdict, in a browser** | 5 | 6,016–8,025 ms, median 6,616 | What a reviewer's wall clock shows |
+| Submit after the read-ahead finished | 2 | 1,027 / 1,512 ms | The form path, working as designed |
+| Submit *while* the read-ahead runs | 6 | 6,208–7,038 ms | The collision, bounded |
 | A request arriving *during* a machine restart | 1 | 20,178 ms, HTTP 200 | The one slow path, and it needs a deploy |
 
 The cold rows were taken by restarting the machine with `fly machine restart` and sending
@@ -889,11 +931,21 @@ with a worst first hit of 0.17s. The provider's prompt cache is kept warm every 
 minutes and, as `scripts/keepwarm.py` says at length, it was never worth latency anyway —
 it is a cost optimisation. And our own start-up cost is the 180 ms above.
 
-Two things this does **not** claim. It does not explain the original observation — it
-contradicts it, and the honest position is that we could not reproduce a 12-second request
-in any state we could put the service into except mid-restart. And a request that lands
-during a deploy is genuinely slow: Fly holds the connection rather than refusing it, so it
-answers correctly and late.
+**The one mechanism that could stack was chased down and bounded.** `POST /prepare` reads
+the label while the agent types; fire the submit before it finishes and two extractions
+contend for one vCPU. Six of those, at true simultaneity: 6,208–7,038 ms, with
+`preprocess` roughly doubling to ~1,050 ms and `extract` untouched. It costs about half a
+second, not six. It also cannot be produced through the interface — six fields have to be
+typed first, and driving the form as fast as automation allows still clicked 9.7s after
+the read-ahead started, against a read-ahead that finishes in 5.7s.
+
+Three things this does **not** claim. It does not explain the original observation — it
+contradicts it, and the honest position is that a 12-second request could not be
+reproduced in any state the service could be put into except mid-restart. It does not
+prove the reported event never happened; n=3 against a 5,493–7,031 ms warm spread cannot.
+And the cold rows went out 13–20s after the restart, so `scripts/keepwarm.py` had already
+made its first provider call — they are cold in the process, not necessarily cold at the
+provider.
 
 The latency target is reported, never enforced. `LABELPROOF_LATENCY_TARGET_MS` (5000) is
 what the product is *held to*; the request budget and the provider timeout default from

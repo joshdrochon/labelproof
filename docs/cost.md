@@ -119,10 +119,11 @@ the vision tier that reads the government warning. Not a trade this product make
 **Concurrency ↔ throttling.** Batch runs 6 workers. Raising it does not raise cost per
 label, but it does raise the chance of provider rate limiting, which converts into retries
 and *does* cost money. 6 was chosen as a starting value. A real 300-item job has now been
-run at that setting — 300 applications, 291.9s, zero failures, zero retries, no rate
-limiting anywhere in the run ([`batch-300.md`](batch-300.md)) — so 6 workers is proven
-safe and proven *not* to be the ceiling. Where the ceiling actually is remains untested,
-and finding it costs another paid run.
+run at that setting — 300 applications, 291.9s, zero failures, and **`attempts = 1` on
+all 300 items**, which is what actually rules throttling out: a retried-and-recovered
+item carries no failure, so counting failures would call any run clean
+([`batch-300.md`](batch-300.md)). So 6 workers did not touch the ceiling. Where the
+ceiling is remains untested, and finding it costs another paid run.
 
 **Cache TTL ↔ traffic shape.** The 5-minute ephemeral cache is what makes batch cheap.
 An agent doing one verification every ten minutes pays the full input price every time —

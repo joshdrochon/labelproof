@@ -62,13 +62,16 @@ footnote:
 
 # Final checklist
 
-`PRD.md` §Final Requirements, every item. **7 complete, 3 partial, 1 not done.** The one
+`PRD.md` §Final Requirements, every item. **8 complete, 2 partial, 1 not done.** Row 1
+moved to complete when the 300-item batch was actually run on 2026-08-15
+([`batch-300.md`](batch-300.md)); row 9 stays partial because that run proved the load and
+did not locate the throttling ceiling, which is the other half of what it asks. The one
 not done needs people rather than time, and each partial names what is missing in the row
 itself rather than in a footnote.
 
 | # | Item | | Evidence |
 |--:|---|---|---|
-| 1 | Batch end-to-end, proven with 300 on the deployed URL | ⚠️ | Everything but the 300. Manifest, progressive results, worst-first triage, per-item retry, CSV export — all live, and **22 applications in 42s with 0 failures** measured on the deployed URL. 300 has not been run; the extrapolation is ~9.5 min against a 10-min goal and an extrapolation cannot see rate limiting |
+| 1 | Batch end-to-end, proven with 300 on the deployed URL | ✅ | **300 applications on the deployed URL in 291.9s, 0 failures, no item retried** ([`batch-300.md`](batch-300.md)). Manifest, progressive results (first result at 8.3s), worst-first triage, per-item retry and CSV export all live. One image per application, not two |
 | 2 | Image robustness: angled, dim, glare, blur → correct verdicts or honest Unreadable, zero fabrication | ✅ | [`robustness.md`](robustness.md); the fabrication sweep is in `tests/test_robustness.py`. Note the limitation in the README: geometric CORRECTION does not run in production, so these are verdicts on uncorrected images |
 | 3 | Warning deep checks: tokenized diff, caps + bold header, non-bold body, title-case regression, prominence, type-size caveat | ✅ | `api/rules/warning.py` and `api/rules/typography.py`, 560 tests |
 | 4 | Tier 3 live with rationale + confidence routing; fixtures in CI | ⚠️ | Built, wired, 27 tests, 100% coverage, three fakes in CI, and the real adapter written with its prompt. **No adjudicator is passed in production** — `adjudicator=None` is the default, so gray cases still fall to Mismatch, which is the safe direction. The tier exists; it is not switched on |
@@ -76,7 +79,7 @@ itself rather than in a footnote.
 | 6 | Accessibility: WCAG 2.1 AA / 508 — automated audit + keyboard + screen reader | ✅ | axe clean on all five screens, contrast gated as data (worst pair 5.41:1), both UX-3 floors gated (16px type, 44px targets), no colour-only state. `web/e2e/a11y.spec.ts` drives keyboard navigation and the accessibility tree — accessible names, landmarks, heading order, `aria-describedby` resolution, focus landing on the first invalid field — in Chromium, Firefox and a tablet viewport, 75/75 |
 | 7 | ≥3 cold users complete a verification with zero instructions | ❌ | Not run. Needs three people |
 | 8 | E2E in CI (single, batch, unreadable, provider-down); red CI blocks deploy | ✅ | All four flows are covered by tests that drive the real app through the real HTTP stack, and CI runs them offline. "Red CI blocks deploy" is **drilled, not merely configured**: a deliberately failing commit was pushed, the check went red, `mergeStateStatus` went BLOCKED, and `gh pr merge` was refused by the base branch policy — no deploy ran ([`ci-gate-drill.txt`](ci-gate-drill.txt)). The rollback direction is drilled too ([`rollback-drill.txt`](rollback-drill.txt)) |
-| 9 | Load: 300-item batch, throttling behaviour, Verify Now p95 during a batch | ⚠️ | The priority lane is measured and holds — verify during a running batch is indistinguishable from idle. The 300-item run and the throttling observation have not been done |
+| 9 | Load: 300-item batch, throttling behaviour, Verify Now p95 during a batch | ⚠️ | The 300-item run is **done** — 291.9s, 0 failures, and no item requeued, so nothing was throttled ([`batch-300.md`](batch-300.md)). Verify Now during that batch measured 5,477–6,352 ms, inside the idle spread, so the priority lane holds. Still ⚠️ because six workers did not reach the provider's ceiling: **where throttling begins is untested**, and that is what this row asks for |
 | 10 | Cost analysis with measured per-label cost and projections | ✅ | [`cost.md`](cost.md) — $0.046 single, $0.022 batch-amortised on the shipped `split` mode (the $0.031 / $0.0179 pair in that file predates it and is flagged there), projections at 130/600/1,200 a day with the arithmetic shown |
 | 11 | Submission package: README, deployed URL, downloadable sample set | ✅ | This repository, <https://labelproof.fly.dev>, four one-click samples |
 
@@ -84,7 +87,7 @@ itself rather than in a footnote.
 
 Nothing here is unbuilt because it was forgotten. The four incomplete rows are:
 
-- **two measurements that need scale or people** — a 300-item batch and three cold users;
+- **one measurement that needs people** — three cold users — and one that needs more scale than a single account should spend finding: where provider throttling starts;
 - **one feature built but not switched on** — Tier 3, deliberately, because turning it on
   in production without a live accuracy subset behind it would be trusting a judgement
   nobody has scored;

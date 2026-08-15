@@ -21,7 +21,7 @@ presented as if it were.
 | Goal | Requirement | Measured | |
 |---|---|--:|---|
 | 300 applications end to end | PERF-4 / BATCH-2, 10 min | **291.9s** (4.9 min) | **MET** |
-| First visible result | BATCH-2, 10s | **8.3s** | **MET** |
+| First visible result | PERF-4, 10s | **8.3s** | **MET** |
 
 ## Items
 
@@ -30,7 +30,7 @@ presented as if it were.
 | Queued | 300 |
 | Completed | 300 |
 | Failed | 0 |
-| Rate-limited | 0 |
+| Items requeued (attempts > 1) | 0 |
 | Total cost | $6.5861 |
 | Cost per application | $0.0220 |
 | Input tokens | 998,460 |
@@ -48,7 +48,28 @@ written, so the keep-warm loop paid for the entry and the batch never did.
 
 No item failed.
 
-**No provider rate limiting appeared** in any item failure. That is a statement about this run at this concurrency, not a guarantee about the account's ceiling.
+### Was anything rate-limited?
+
+**Not answerable from failures, so this was re-derived from `attempts`.** The generating
+script originally inspected `item["failure"]`, and `api/batch/worker.py` requeues a
+retryable provider error up to `MAX_ATTEMPTS` — an item throttled once and served on the
+retry carries no failure object at all. The first version of this report printed
+"0 rate-limited" about a run in which it could not have seen otherwise.
+
+Re-read from the live job with `GET /batch/{job_id}?limit=1000`:
+
+| attempts | items |
+|--:|--:|
+| 1 | 300 |
+
+**All 300 items succeeded on their first attempt.** No item was ever requeued, so no
+retryable provider error — 429 and 529 included — reached any of them. The claim holds all
+the way down because `api/provider/anthropic_adapter.py` builds the SDK client with
+`max_retries=0` and says why ("retries are ours"), so the SDK cannot have absorbed a 429
+below this counter either.
+
+What this does **not** say: where the ceiling is. Six workers did not touch it, nothing
+here locates it, and finding it costs another paid run.
 
 **What the batch recommended**, from the job's own `summary.by_recommendation` over all
 300 items:
@@ -74,7 +95,18 @@ which is the behaviour those rows were put in to check.
 
 ## Row-level validation (TC-20)
 
-24 row(s) refused by the manifest parser, and the other 300 were queued anyway — a bad row does not reject the upload.
+**5 rows** were refused by the manifest parser, carrying **24 errors** between them — one
+per bad column, which is why the entry count is nearly five times the row count. The
+manifest was 306 rows and 300 were queued anyway, because a bad row does not reject the
+upload.
+
+**Six malformed rows went up and five came back reported by row number.** The sixth is
+entirely blank, and `api/batch/manifest.py:322` skips wholly-empty lines on purpose —
+*"a blank line between blocks is not an error"* — so it is dropped silently, and
+correctly. It demonstrates that behaviour rather than the row-numbering behaviour. An
+earlier version of this file said "24 rows refused ... and the other 300 queued" against a
+306-row manifest, which does not add up, and the README claimed all six malformed rows
+were reported, which the table below already contradicted.
 
 | Row | Column | Problem |
 |--:|---|---|
@@ -111,7 +143,25 @@ A real `POST /verify` every probe interval while the batch ran. The promise is t
 | 198s | 200 | 5701 | 5515 |
 | 249s | 200 | 5477 | 5305 |
 
-Median **5854ms** under load against **5574ms** on the same service with nothing running — +280ms.
+Under load: 5,477-6,352 ms, median **5,854 ms** over 5 probes. Idle control: **one**
+request, 5,574 ms.
+
+> **The control is a single request and cannot carry a difference.** The service's own
+> warm spread is 5,493-7,031 ms across 8 runs on the same afternoon
+> ([`coldstart-probe.txt`](coldstart-probe.txt)), and all five loaded probes sit inside
+> it. The honest reading is that **Verify Now under a 300-item batch is indistinguishable
+> from Verify Now idle** — not that it is 280 ms slower, which is what the first version
+> of this file said by taking `statistics.median` of a one-element list.
+>
+> Two further caveats. The generating script polls `GET /batch/{id}?limit=1000` every two
+> seconds throughout the probe window and not at all during the control, so some of the
+> load during the probes is the measurement's own. And what BATCH-9 and PERF-5 actually
+> promise is that the batch does not *starve* the single-label lane; five probes that all
+> answered 200 well inside the ordinary range support that, and they do not support a
+> quantified cost.
+>
+> `scripts/batch_300.py` now takes three idle verifications as the control by default
+> (`--baseline-runs`), so the next run of this can say more than "indistinguishable".
 
 ## Progress, as polled
 

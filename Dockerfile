@@ -111,10 +111,19 @@ COPY --chown=labelproof:labelproof golden/set.json ./golden/set.json
 COPY --chown=labelproof:labelproof fixtures/__init__.py ./fixtures/__init__.py
 # `layout.py` is here because `api/provider/fake.py` imports `FIELD_BANDS` from it to
 # place the demo's evidence boxes. It was left out when that import was added, and the
-# result was an image that boots, passes both health checks, serves the whole interface,
-# and then answers `500 ModuleNotFoundError` on the first sample click — the exact failure
-# this block's comment was written to prevent, one file later. Nothing caught it because
-# the deployed app runs with a real key and never imports the fake provider at all.
+# result was an image that boots, serves the whole interface, and then answers
+# `500 ModuleNotFoundError` on the first sample click. `/health` stayed green — it touches
+# nothing — and `/ready` went `503`, because `/ready` constructs the provider and the
+# provider was what would not import. So the platform would have refused to promote this
+# release; what it would not have done is tell anyone why, and the page rendered fine.
+#
+# Nothing caught it in CI because the deployed app runs with a real key and never imports
+# the fake provider at all.
+#
+# `tests/test_docker_imports.py` now walks this COPY list against the import closure of
+# `api/`, so the next `from fixtures.…` added to shipped code fails a test here instead of
+# on a reviewer's first click. That test knows about Python imports only — a file read at
+# runtime by path, rather than imported, is still on trust.
 COPY --chown=labelproof:labelproof fixtures/generator/__init__.py \
                                    fixtures/generator/spec.py \
                                    fixtures/generator/catalog.py \

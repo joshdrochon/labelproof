@@ -82,24 +82,103 @@ call after boot: 5274 / 5152 / 5197 ms client, preprocess 220 / 190 / 187. A loc
 not slower on its first call either, so the 12 seconds is not a "the deployed one is
 special" effect in the other direction.
 
-The read-ahead racing the submit. `POST /prepare` and `POST /verify` fired at the same
-instant with the same artwork — what happens when an agent presses the button before the
-head start finishes. Verify answered in 7038 ms with `preprocess` at 1354 ms: the two
-requests contend for one vCPU on the image work, `extract` is untouched at 5364 ms, and
-the result is a second slower, not six.
+The read-ahead racing the submit. Measured properly at n=6 further down, under PATH B';
+the single observation this section used to carry is the last row of that table.
+
+--------------------------------------------------------------------------------------
+THE REVIEWER'S PATH, IN A REAL BROWSER
+--------------------------------------------------------------------------------------
+Everything above times `POST /verify` from a script with the payload already on disk. The
+owner clicked in a browser, which is not the same thing: that also loads a 258 KB bundle,
+fetches `/sample`, fetches two images, re-encodes both to WebP on a canvas before upload,
+and renders the result. So the whole sequence was measured against the deployed URL in
+Chrome. Wall clock is button-press to verdict-on-screen.
+
+PATH A - click a sample card. This is what README "Run it" tells a reviewer to do.
+n=5, fresh page load before each, warm HTTP cache:
+
+    click->verdict   page load   /verify on the wire   what the card says
+    6016 ms           70 ms      5844 ms               "Checked in 5.7s"
+    6326 ms           70 ms      5689 ms               "Checked in 5.6s"
+    6616 ms          174 ms      6185 ms               "Checked in 6.1s"
+    7396 ms           73 ms      5707 ms               "Checked in 5.6s"
+    8025 ms            -         7156 ms               "Checked in 7.0s"
+
+    median 6616 ms, max 8025 ms.
+
+The gap between the wall clock and `/verify` is 172-1689 ms and it is the client's: two
+image fetches, the canvas WebP re-encode in `shrinkForUpload`, and the render. THE CARD
+UNDER-REPORTS THE WAIT, by up to 1.7 s, because it times the request rather than the
+interaction. Worth knowing before quoting the card's number as the product's.
+
+First load with a genuinely cold HTTP cache, fetched with `cache: 'no-store'`:
+`/` 1 KB in 59 ms, the JS bundle 258 KB in 61 ms, CSS 30 KB in 56 ms, favicon in 57 ms.
+About 230 ms serial, once. Assets are not a factor.
+
+PATH B - upload the artwork and use the form. `POST /prepare` fires on file selection.
+n=2, pressed after the read-ahead had finished:
+
+    prepare (background)   submit->verdict   /verify on the wire   card says
+    5612 ms                1512 ms            584 ms              "Checked in 0.5s"
+    5716 ms                1027 ms            621 ms              "Checked in 0.6s"
+
+The read-ahead works: about 5.6 s of reading moves off the wait, and pressing the button
+then costs ~0.6 s on the wire and 1.0-1.5 s of wall clock, the difference again being the
+WebP re-encode.
+
+PATH B' - press the button WHILE the read-ahead is still running. This is the only
+mechanism in any of this data that stacks two extractions onto one machine, so it was
+bounded rather than left as a curiosity. n=6, fired programmatically at true
+simultaneity, which is worse than a person can manage:
+
+    verify client   preprocess   extract     (warm control: preprocess ~505, extract ~5400)
+    6208 ms         1095 ms      4910 ms
+    6453 ms         1007 ms      5175 ms
+    6479 ms         1015 ms      5218 ms
+    6768 ms         1024 ms      5498 ms
+    6769 ms         1114 ms      5452 ms
+    7038 ms         1354 ms      5364 ms
+
+    range 6208-7038 ms.
+
+`preprocess` roughly doubles - two requests contending for one vCPU on the image work -
+and `extract` is untouched, because that is the provider's clock and the two calls run
+concurrently at the provider. The collision costs about half a second and the worst
+observation is 7.0 s.
+
+AND IT CANNOT BE REACHED THROUGH THE INTERFACE. Six application fields have to be typed
+between dropping the files and the button being worth pressing. Driving the form as fast
+as the automation allows, the click still landed 9689 ms after `/prepare` started, against
+a read-ahead that finishes in 5612-5716 ms. Nobody types six fields in under six seconds.
+The collision is real, it is bounded at ~7 s, and a reviewer will not produce it.
 
 --------------------------------------------------------------------------------------
 RESULT
 --------------------------------------------------------------------------------------
-NOT REPRODUCED. Cold first verification 5.9-6.1s against a warm 5.5-7.0s. No cold start,
-no warm-up window, and no 3-5 second regime to fall back to afterwards — 6 seconds is
-simply what a verification costs on the configured model, and it misses PERF-1 by about
-a second and a half whether it is the first request or the hundredth.
+NOT REPRODUCED, and that is the whole of the claim.
 
-Scope: three cold observations, one restart-collision observation, one deployment,
-one model, one payload, one afternoon. It does not prove the reported 12 seconds never
-happened; it proves it is not the ordinary behaviour of this service, and that the
-ordinary behaviour is not 3-5 seconds either.
+The slowest thing observed today, other than a request landing inside a machine restart,
+was 8025 ms - a browser wall clock on the sample path. Nothing approached 12 seconds. A
+reviewer clicking a sample should expect 6 to 8 seconds, and the first click is not
+distinguishable from the tenth.
+
+WHAT WAS TESTED: `POST /verify` warm (n=8) and on a just-booted process (n=3); the browser
+sample path end to end (n=5); the form path with the read-ahead complete (n=2) and
+colliding with it (n=6); a request arriving during a restart (n=1); cold-cache asset
+loads; the same verification against a local server for comparison.
+
+WHAT WAS NOT: any observation of the reported event itself; two-image batch items; the
+form driven by a human at human speed; any browser other than Chrome; any network other
+than this one; more than one afternoon. Three cold observations against a warm spread of
+5493-7031 ms is a small sample against a wide one, and it cannot establish absence - it
+can only say the effect is not large and not ordinary. The cold rows also went out 13-20 s
+after the restart, by which time `scripts/keepwarm.py` had already made its first provider
+call, so they are cold in the process and not necessarily cold at the provider.
+
+So: not reproduced, and not the ordinary behaviour of this service. It does not prove the
+reported 12 seconds never happened, and nothing here should be read as saying so. What it
+does rule out is a standing warm-up cost a reviewer would meet: there is no regime in
+which this service answers in 3-5 seconds, and none, restarts aside, in which it takes 12.
 
 Reproduce:
     fly machine restart <id>

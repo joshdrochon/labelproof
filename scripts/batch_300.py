@@ -80,9 +80,13 @@ DEFAULT_MALFORMED = 6
 DEFAULT_POLL_S = 2.0
 DEFAULT_PROBE_INTERVAL_S = 45.0
 
-#: PERF-4 / BATCH-2. Both are goals quoted from the PRD, and both are reported against
-#: rather than enforced — a script that exits non-zero on a slow batch would tempt whoever
-#: runs it to shrink the batch until it passes.
+#: Both goals are PERF-4's (PRD.md, Appendix A) — 300 applications inside ten minutes and
+#: the first result inside ten seconds. An earlier version of this file credited the
+#: ten-second one to BATCH-2, which is the requirement that results appear *while the job
+#: runs* rather than the requirement that says how fast.
+#:
+#: Reported against rather than enforced: a script that exits non-zero on a slow batch
+#: tempts whoever runs it to shrink the batch until it passes.
 GOAL_WALL_S = 600.0
 GOAL_FIRST_RESULT_S = 10.0
 
@@ -110,6 +114,10 @@ MANIFEST_COLUMNS = (
 #: name this more than one way and a rate limit that goes unrecognised is the exact thing
 #: this run exists to catch.
 RATE_LIMIT_MARKERS = ("rate_limit", "rate-limit", "429", "overloaded", "too_many")
+
+#: How many row errors the report prints before truncating. Truncation is announced —
+#: a table that silently stops is a table that under-reports.
+_ROW_ERROR_TABLE_LIMIT = 20
 
 #: `GET /batch/{id}` pages its item list and defaults to 100. Left at the default, a
 #: 300-item report counts the recommendations of the worst 100 items and silently calls
@@ -177,8 +185,13 @@ def build_rows(count: int, malformed: int) -> list[Row]:
         name = f"batch{i:03d}.png"
 
         if i % 10 == 7:
-            # The artwork is fine; the application disagrees with it. Return for
-            # correction is the expected answer.
+            # The artwork is fine; the application disagrees with it — 45% on the label
+            # against 40% filed. The expected answer is **Needs review**, not Return for
+            # correction: `api/rules/aggregate.py` reserves return-for-correction for a
+            # bad or absent government warning and for a missing mandatory element, and a
+            # field that disagrees is a thing for the agent to look at (PRD.md §69). This
+            # comment used to say return-for-correction and the run scored 0/300 against
+            # it, which was the comment being wrong rather than the product.
             rows.append(
                 Row(
                     kind="mismatch",
@@ -472,8 +485,37 @@ def run_job(
 # --------------------------------------------------------------------------------------
 
 
+def retry_histogram(final: dict[str, Any]) -> Counter[int]:
+    """`attempts` across every item — the only place a *survived* throttle is visible.
+
+    This is the correction to a real hole. The first version of this script counted rate
+    limiting by reading `item["failure"]`, and `api/batch/worker.py` requeues a retryable
+    provider error up to `MAX_ATTEMPTS`: an item that was throttled, backed off and then
+    succeeded carries no failure object at all, so the report said "0 rate-limited" about
+    a run in which it could not have seen otherwise.
+
+    `attempts` is incremented in `api/batch/store.py` every time an item is claimed for
+    processing, so `attempts == 1` on every item means no item was ever requeued, which
+    means no retryable provider error — 429 included — reached any of them.
+
+    The claim is only airtight because `api/provider/anthropic_adapter.py` constructs the
+    SDK client with `max_retries=0` and says why: retries are the application's, so the
+    SDK cannot silently absorb a 429 below this counter. If that ever changes, this
+    measurement goes blind again and this docstring is where to start.
+    """
+    histogram: Counter[int] = Counter()
+    for item in final.get("items", []) or []:
+        if isinstance(item, dict):
+            histogram[int(item.get("attempts", 0) or 0)] += 1
+    return histogram
+
+
 def failure_reasons(final: dict[str, Any]) -> tuple[Counter[str], int]:
-    """Reason code -> count, and how many of those look like provider rate limiting."""
+    """Reason code -> count, and how many of those *failed* on something rate-limit-like.
+
+    Only counts items that ended failed. Retried-and-survived throttling is invisible
+    here by construction; `retry_histogram` is what sees that.
+    """
     reasons: Counter[str] = Counter()
     throttled = 0
     for item in final.get("items", []) or []:
@@ -537,6 +579,8 @@ def render_report(
     failed = int(counts.get("failed", 0))
     total = int(counts.get("total", 0)) or outcome.accepted
     reasons, throttled = failure_reasons(final)
+    retries = retry_histogram(final)
+    requeued = sum(n for attempts, n in retries.items() if attempts > 1)
     mix = recommendation_mix(final)
     kinds = Counter(row.kind for row in rows)
 
@@ -569,13 +613,13 @@ def render_report(
         f"**{outcome.wall_s:.1f}s** ({outcome.wall_s / 60:.1f} min) | {wall_verdict} |"
     )
     if outcome.first_result_s is None:
-        add("| First visible result | BATCH-2, 10s | never | **MISSED** |")
+        add("| First visible result | PERF-4, 10s | never | **MISSED** |")
     else:
         first_verdict = (
             "**MET**" if outcome.first_result_s <= GOAL_FIRST_RESULT_S else "**MISSED**"
         )
         add(
-            f"| First visible result | BATCH-2, {GOAL_FIRST_RESULT_S:.0f}s | "
+            f"| First visible result | PERF-4, {GOAL_FIRST_RESULT_S:.0f}s | "
             f"**{outcome.first_result_s:.1f}s** | {first_verdict} |"
         )
     add("")
@@ -592,7 +636,8 @@ def render_report(
     add(f"| Queued | {total} |")
     add(f"| Completed | {done} |")
     add(f"| Failed | {failed} |")
-    add(f"| Rate-limited | {throttled} |")
+    add(f"| Items requeued (attempts > 1) | {requeued} |")
+    add(f"| Failed on a rate limit | {throttled} |")
     add(f"| Total cost | ${usd:.4f} |")
     if done + failed:
         add(f"| Cost per application | ${usd / (done + failed):.4f} |")
@@ -622,17 +667,38 @@ def render_report(
     else:
         add("No item failed.\n")
 
-    if throttled:
+    add("**Was anything rate-limited?**\n")
+    add(
+        "Answered from `attempts`, not from failures. `api/batch/store.py` increments it "
+        "each time an item is claimed, and `api/batch/worker.py` requeues retryable "
+        "provider errors, so an item throttled once and served on the retry shows "
+        "`attempts = 2` and no failure at all. Counting only failures would call that "
+        "run clean.\n"
+    )
+    if retries:
+        add("| attempts | items |")
+        add("|--:|--:|")
+        for attempts, n in sorted(retries.items()):
+            add(f"| {attempts} | {n} |")
+        add("")
+    if requeued or throttled:
         add(
-            f"**Provider rate limiting was observed**: {throttled} item failure(s) name a "
-            f"429, a rate limit or an overload. This is the finding an extrapolation from "
-            f"22 items could not have produced.\n"
+            f"**{requeued} item(s) were requeued** and {throttled} failed on something "
+            f"rate-limit-shaped. The ceiling was touched.\n"
+        )
+    elif retries and set(retries) == {1}:
+        add(
+            "**Every item succeeded on its first attempt**, so no retryable provider "
+            "error — 429 included — reached any of them. The SDK client is built with "
+            "`max_retries=0` (`api/provider/anthropic_adapter.py`), so nothing was "
+            "absorbed below this counter either. That is a statement about this run at "
+            "this concurrency; it does not locate the account's ceiling, which remains "
+            "untested.\n"
         )
     else:
         add(
-            "**No provider rate limiting appeared** in any item failure. That is a "
-            "statement about this run at this concurrency, not a guarantee about the "
-            "account's ceiling.\n"
+            "**Retry data was not available** for this run, so whether anything was "
+            "throttled and recovered is unknown and is not claimed either way.\n"
         )
 
     if mix:
@@ -644,18 +710,31 @@ def render_report(
         add("")
 
     row_errors = outcome.row_errors
+    # ENTRIES ARE NOT ROWS. One bad line raises one error per bad column, so a manifest
+    # with five bad rows produced twenty-four entries — and the first version of this
+    # report printed "24 rows refused ... and the other 300 queued" against a 306-row
+    # manifest, which does not add up and was published that way.
+    bad_rows = sorted({int(e.get("row", 0) or 0) for e in row_errors})
     add("## Row-level validation (TC-20)\n")
     add(
-        f"{len(row_errors)} row(s) refused by the manifest parser, and the other "
-        f"{outcome.accepted} were queued anyway — a bad row does not reject the upload.\n"
+        f"**{len(bad_rows)} row(s)** refused by the manifest parser, carrying "
+        f"{len(row_errors)} error(s) between them — one per bad column, so the entry "
+        f"count is larger than the row count. The other {outcome.accepted} rows were "
+        f"queued anyway: a bad row does not reject the upload.\n"
     )
     if row_errors:
         add("| Row | Column | Problem |")
         add("|--:|---|---|")
-        for error in row_errors[:20]:
+        for error in row_errors[:_ROW_ERROR_TABLE_LIMIT]:
             add(
                 f"| {error.get('row', '?')} | `{error.get('column') or '—'}` | "
                 f"{str(error.get('message', '')).replace('|', '/')} |"
+            )
+        if len(row_errors) > _ROW_ERROR_TABLE_LIMIT:
+            add(
+                f"\n…and {len(row_errors) - _ROW_ERROR_TABLE_LIMIT} more error(s), across "
+                f"rows {bad_rows[0]} to {bad_rows[-1]}. The table is truncated; the count "
+                f"above is not."
             )
         add("")
     if outcome.unmatched:
@@ -682,10 +761,22 @@ def render_report(
         idle = [p.client_ms for p in baseline if p.status == 200]
         if during and idle:
             add(
-                f"Median **{statistics.median(during):.0f}ms** under load against "
-                f"**{statistics.median(idle):.0f}ms** on the same service with nothing "
-                f"running — {statistics.median(during) - statistics.median(idle):+.0f}ms.\n"
+                f"Under load: {min(during)}-{max(during)}ms, median "
+                f"**{statistics.median(during):.0f}ms** over {len(during)} probe(s). "
+                f"Idle control: {min(idle)}-{max(idle)}ms over **{len(idle)}** "
+                f"request(s).\n"
             )
+            if len(idle) < 5:
+                add(
+                    f"> **The control is {len(idle)} request(s) and cannot carry a "
+                    f"difference.** The service's own warm spread is about 5.5-7.0s "
+                    f"across 8 runs, and every probe above sits inside it, so the honest "
+                    f"reading is that Verify Now under batch load is **indistinguishable "
+                    f"from idle** — not that it is some specific number slower. Note also "
+                    f"that this script polls the job every couple of seconds throughout "
+                    f"the probes and not during the control, so what load there is is not "
+                    f"all the batch's.\n"
+                )
         failures = [p for p in probes if p.status != 200]
         if failures:
             add(
@@ -742,6 +833,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--poll", type=float, default=DEFAULT_POLL_S)
     parser.add_argument("--probe-interval", type=float, default=DEFAULT_PROBE_INTERVAL_S)
     parser.add_argument("--no-probes", action="store_true", help="skip the Verify Now lane")
+    parser.add_argument(
+        "--baseline-runs",
+        type=int,
+        default=3,
+        help="idle verifications to take as the control before submitting (each costs)",
+    )
     parser.add_argument("--timeout", type=float, default=180.0)
     parser.add_argument("--out", default="", help="write the Markdown report here")
     parser.add_argument("--note", default="", help="what you arranged")
@@ -789,19 +886,24 @@ def main(argv: list[str] | None = None) -> int:
     # are a number with nothing to be compared against.
     baseline: list[Probe] = []
     if not args.no_probes:
-        print("baseline verify (idle)…", file=sys.stderr)
+        # More than one, because the probes it is compared against are a distribution and
+        # a single request is not. One idle request against five loaded ones produced a
+        # "+280 ms" in the first version of this report that the service's own run-to-run
+        # spread swallows whole.
+        print(f"baseline verify (idle) x{args.baseline_runs}…", file=sys.stderr)
         post = poster_for(args.url, args.timeout)
-        content_type, body = build_multipart(application, images)
-        started = time.perf_counter()
-        reply = post("/verify", content_type, body)
-        baseline.append(
-            Probe(
-                at_s=0.0,
-                client_ms=round((time.perf_counter() - started) * 1000),
-                status=reply.status,
+        for _ in range(max(1, args.baseline_runs)):
+            content_type, body = build_multipart(application, images)
+            started = time.perf_counter()
+            reply = post("/verify", content_type, body)
+            baseline.append(
+                Probe(
+                    at_s=0.0,
+                    client_ms=round((time.perf_counter() - started) * 1000),
+                    status=reply.status,
+                )
             )
-        )
-        print(f"  {baseline[0].client_ms}ms  http={reply.status}", file=sys.stderr)
+            print(f"  {baseline[-1].client_ms}ms  http={reply.status}", file=sys.stderr)
 
     print(f"submitting to {args.url}/batch …", file=sys.stderr)
     started = time.perf_counter()
