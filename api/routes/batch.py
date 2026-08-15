@@ -833,10 +833,16 @@ def _sample_record(spec: _SampleRow, files: Sequence[Path]) -> dict[str, str]:
 #:
 #: The per-client lane in `api/middleware/ratelimit.py` cannot bound the bill: it is keyed
 #: on the client, and a caller with more addresses simply gets more budget. This is the
-#: number that says what a day of being pointed at costs — twenty clicks an hour is a
-#: hundred and forty verifications an hour, which is a demo server, and anything above it
+#: number that says what a day of being pointed at costs — forty clicks an hour is two
+#: hundred and eighty verifications an hour, which is a demo server, and anything above it
 #: is not a person looking at the product.
-SAMPLE_BATCHES_PER_HOUR = 20
+#:
+#: It was twenty, and twenty was the wrong side of the trade. Two reviewers evaluating this
+#: at once, plus anyone testing, can reach twenty in an hour without trying — and a reviewer
+#: who presses the button and is told no has been shown a broken product, whatever the
+#: message says. The failure this bounds costs money; the failure it can cause costs the
+#: only thing this deployment exists for.
+SAMPLE_BATCHES_PER_HOUR = 40
 _SAMPLE_WINDOW_SECONDS = 3600.0
 
 
