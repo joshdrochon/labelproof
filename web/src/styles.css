@@ -515,14 +515,22 @@ kbd {
   font-size: 1.0625rem;
 }
 
-/* No field on this form carries placeholder text, and that is a decision rather than an
-   omission. GOV.UK: "Do not use placeholder text in place of a label, or for hints or
-   examples, as: it vanishes when the user starts typing... not all screen readers read it
-   out; its browser default styles often do not meet WCAG 2.2 success criterion 1.4.3".
-   USWDS says the same. Every example lives in the hint above the box, where it survives
-   being typed over and gets read aloud. This rule exists to make a stray one obvious. */
+/* Placeholders carry the examples here, against GOV.UK and USWDS guidance, which both
+   rule them out for exactly this use — they vanish on typing, are not reliably announced,
+   and default to poor contrast. Two of those three are answered deliberately:
+
+   - Every example is prefixed "e.g." so a greyed value cannot be mistaken for content
+     already in the field, which is the failure mode most often reported.
+   - The colour is set explicitly. The browser's own placeholder measures around 2.8:1 on
+     white, under the 4.5:1 floor; `--ink-faint` is 4.82:1 and `opacity: 1` stops the
+     default from applying its own on top.
+
+   The third is not answered and is the real cost: the example is gone once typing
+   starts. So nothing that is needed WHILE typing is a placeholder — alcohol content keeps
+   "Leave empty if the application does not state it" as hint text above the box. */
 .field__input::placeholder {
-  color: transparent;
+  color: var(--ink-faint);
+  opacity: 1;
 }
 
 .field__hint {
