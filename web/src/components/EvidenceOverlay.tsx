@@ -203,7 +203,13 @@ export default function EvidenceOverlay({
           marker: hovering or focusing either highlights the region on the picture. */}
       {imageUrl && tags.length > 0 ? (
         <ul className="evidence__legend">
-          {tags.map(({ region }) => (
+          {/* Numeric order. `placeTags` sorts by vertical position because that is how
+              markers have to be stacked, and rendering the legend from the same array
+              printed 1, 3, 2, 4 — a numbered list out of numerical order, which reads as
+              a mistake before anyone works out it is the label's layout. */}
+          {[...tags]
+            .sort((a, b) => (a.region.number ?? 0) - (b.region.number ?? 0))
+            .map(({ region }) => (
             <li key={region.field}>
               <button
                 type="button"
@@ -219,8 +225,8 @@ export default function EvidenceOverlay({
                 <span className="evidence__legend-number">{region.number ?? '•'}</span>
                 <span>{region.label}</span>
               </button>
-            </li>
-          ))}
+              </li>
+            ))}
         </ul>
       ) : null}
 
