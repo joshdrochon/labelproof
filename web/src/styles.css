@@ -408,6 +408,21 @@ kbd {
    note sat in a column of its own, vertically centred against four stacked cards — and
    left a tall empty rectangle above and below it that was the first thing the eye found
    on the screen. The note is one line of context; it does not need a column. */
+/* The sample batch, sitting with the template link because they answer the same question.
+   Set in from the step's left edge so it reads as an aside to step 1 rather than a second
+   instruction competing with it. */
+.batch__sample {
+  margin: 0.75rem 0 1rem;
+  padding: 0.75rem 1rem;
+  background: var(--surface);
+  border-left: 3px solid var(--rule);
+}
+
+.batch__sample-note {
+  margin: 0 0 0.5rem;
+  color: var(--ink-soft);
+}
+
 .setup__sample {
   border-top: 1px solid var(--rule);
   padding-top: 1rem;

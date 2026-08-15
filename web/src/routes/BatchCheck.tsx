@@ -29,8 +29,10 @@ import {
   batchExportUrl,
   batchStatus,
   createBatch,
+  createSampleBatch,
   retryBatch,
 } from '../api';
+import type { BatchAccepted } from '../types';
 import { RECOMMENDATIONS, VERDICTS } from '../copy';
 import { VerdictGlyph } from '../components/VerdictCard';
 import type {
@@ -96,6 +98,9 @@ export default function BatchCheck() {
   const [filter, setFilter] = useState<Filter>('all');
   const [openItem, setOpenItem] = useState<string | null>(null);
   const [retrying, setRetrying] = useState(false);
+  // Whether the job on screen is the demonstration one. It changes exactly one sentence —
+  // the explanation beside the bad manifest row — and nothing about how the job is run.
+  const [isSample, setIsSample] = useState(false);
 
   const abort = useRef<AbortController | null>(null);
   const jobId = status?.job_id ?? null;
@@ -145,45 +150,69 @@ export default function BatchCheck() {
     };
   }, [jobId, running]);
 
+  /**
+   * Straight into the running screen with the counts we already know, so the agent sees
+   * the batch exists before the first poll comes back.
+   *
+   * Shared by the upload and the sample on purpose. A demonstration that took a different
+   * path through this screen would demonstrate the path, not the product — the sample has
+   * to queue, poll, order and export exactly as an uploaded batch does, or it is worth
+   * nothing to the person deciding whether to trust it.
+   */
+  const beginJob = useCallback((accepted: BatchAccepted, sample: boolean) => {
+    setIsSample(sample);
+    setStatus({
+      job_id: accepted.job_id,
+      state: 'queued',
+      counts: {
+        total: accepted.accepted,
+        queued: accepted.accepted,
+        processing: 0,
+        done: 0,
+        failed: 0,
+      },
+      eta_seconds: null,
+      summary: { by_recommendation: {}, by_verdict: {}, worst_first: [], headline: '' },
+      items: [],
+      cost: {
+        input_tokens: 0,
+        output_tokens: 0,
+        cache_read_tokens: 0,
+        cache_creation_tokens: 0,
+        usd: 0,
+      },
+      row_errors: accepted.row_errors,
+      unmatched_files: accepted.unmatched_files,
+      expires_at: 0,
+      message: accepted.message,
+    });
+  }, []);
+
   const submit = useCallback(async () => {
     if (!manifest || submitting) return;
     setSubmitting(true);
     setProblem(null);
     try {
-      const accepted = await createBatch(manifest, images);
-      // Straight into the running screen with the counts we already know, so the agent
-      // sees the batch exists before the first poll comes back.
-      setStatus({
-        job_id: accepted.job_id,
-        state: 'queued',
-        counts: {
-          total: accepted.accepted,
-          queued: accepted.accepted,
-          processing: 0,
-          done: 0,
-          failed: 0,
-        },
-        eta_seconds: null,
-        summary: { by_recommendation: {}, by_verdict: {}, worst_first: [], headline: '' },
-        items: [],
-        cost: {
-          input_tokens: 0,
-          output_tokens: 0,
-          cache_read_tokens: 0,
-          cache_creation_tokens: 0,
-          usd: 0,
-        },
-        row_errors: accepted.row_errors,
-        unmatched_files: accepted.unmatched_files,
-        expires_at: 0,
-        message: accepted.message,
-      });
+      beginJob(await createBatch(manifest, images), false);
     } catch (err) {
       setProblem(err instanceof ApiFailure ? err.detail : null);
     } finally {
       setSubmitting(false);
     }
-  }, [manifest, images, submitting]);
+  }, [manifest, images, submitting, beginJob]);
+
+  const startSample = useCallback(async () => {
+    if (submitting) return;
+    setSubmitting(true);
+    setProblem(null);
+    try {
+      beginJob(await createSampleBatch(), true);
+    } catch (err) {
+      setProblem(err instanceof ApiFailure ? err.detail : null);
+    } finally {
+      setSubmitting(false);
+    }
+  }, [submitting, beginJob]);
 
   const onRetry = useCallback(async () => {
     if (!jobId || retrying) return;
@@ -205,6 +234,7 @@ export default function BatchCheck() {
     setProblem(null);
     setFilter('all');
     setOpenItem(null);
+    setIsSample(false);
   }, []);
 
   if (status === null) {
@@ -215,6 +245,7 @@ export default function BatchCheck() {
         onManifest={setManifest}
         onImages={setImages}
         onSubmit={submit}
+        onSample={startSample}
         submitting={submitting}
         problem={problem}
       />
@@ -224,6 +255,7 @@ export default function BatchCheck() {
   return (
     <BatchResults
       status={status}
+      isSample={isSample}
       filter={filter}
       onFilter={setFilter}
       openItem={openItem}
@@ -246,6 +278,7 @@ function BatchUpload({
   onManifest,
   onImages,
   onSubmit,
+  onSample,
   submitting,
   problem,
 }: {
@@ -254,6 +287,7 @@ function BatchUpload({
   onManifest: (file: File | null) => void;
   onImages: (files: File[]) => void;
   onSubmit: () => void;
+  onSample: () => void;
   submitting: boolean;
   problem: ApiError | null;
 }) {
@@ -280,6 +314,27 @@ function BatchUpload({
             </a>{' '}
             if you do not have one.
           </p>
+
+          {/* Beside the template, because it answers the same question — "I do not have a
+              spreadsheet yet" — and answers it harder. Verify Now's samples set the
+              register: say what it loads and that there is nothing to fill in, then get
+              out of the way. It runs the real queue on a real manifest; the only thing it
+              saves the reviewer is assembling one. */}
+          <div className="batch__sample">
+            <p className="batch__sample-note">
+              Or try a sample batch. Six applications and their labels, checked right away
+              — nothing to upload.
+            </p>
+            <button
+              type="button"
+              className="btn btn--secondary"
+              onClick={onSample}
+              disabled={submitting}
+            >
+              Try a sample batch
+            </button>
+          </div>
+
           <label className="file-input">
             <span className="file-input__label">Spreadsheet (.csv)</span>
             <input
@@ -343,6 +398,7 @@ function BatchUpload({
 
 function BatchResults({
   status,
+  isSample,
   filter,
   onFilter,
   openItem,
@@ -353,6 +409,7 @@ function BatchResults({
   problem,
 }: {
   status: BatchStatus;
+  isSample: boolean;
   filter: Filter;
   onFilter: (filter: Filter) => void;
   openItem: string | null;
@@ -426,7 +483,9 @@ function BatchResults({
         ) : null}
       </dl>
 
-      {status.row_errors.length > 0 ? <RowErrors status={status} /> : null}
+      {status.row_errors.length > 0 ? (
+        <RowErrors status={status} isSample={isSample} />
+      ) : null}
       {status.unmatched_files.length > 0 ? (
         <details className="batch__notice">
           <summary>
@@ -513,15 +572,23 @@ function Count({
   );
 }
 
-function RowErrors({ status }: { status: BatchStatus }) {
+function RowErrors({ status, isSample }: { status: BatchStatus; isSample: boolean }) {
+  const many = status.row_errors.length !== 1;
   return (
     <details className="batch__notice" data-tone="serious" open>
       <summary>
-        {status.row_errors.length} row{status.row_errors.length === 1 ? '' : 's'} in the
-        spreadsheet could not be used
+        {isSample
+          ? `The sample includes ${status.row_errors.length} row${many ? 's' : ''} that cannot be used`
+          : `${status.row_errors.length} row${many ? 's' : ''} in the spreadsheet could not be used`}
       </summary>
+      {/* The sample's bad row is deliberate — it is there to show what a bad row looks
+          like before a reviewer meets one in their own file. Telling them to "fix these
+          rows" would be blaming them for a mistake we planted, and the first thing they
+          would do is go looking for a spreadsheet they never uploaded. */}
       <p className="batch__notice-help">
-        Everything else was queued. Fix these rows and upload them as a second batch.
+        {isSample
+          ? 'That is on purpose, so you can see how a bad row is reported: it is named by row number and everything else was queued anyway. Nothing here is your mistake.'
+          : 'Everything else was queued. Fix these rows and upload them as a second batch.'}
       </p>
       <table className="rowerrors">
         <thead>
