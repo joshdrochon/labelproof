@@ -484,7 +484,14 @@ function BatchResults({
 
       <BatchTable items={visible} total={ordered.length} onOpen={onOpenItem} />
 
-      {open ? <ItemDetail item={open} onClose={() => onOpenItem(null)} /> : null}
+      {/* Keyed by item. The dialog seeds its decision state from the item ONCE and then
+          trusts its own writes over the poll, which is what stops a stale poll from
+          flipping a button back. That is only correct if opening a different application
+          gives it a fresh instance — without the key React would reuse the one it has and
+          the second row would open showing the first row's rulings. */}
+      {open ? (
+        <ItemDetail key={open.item_id} item={open} onClose={() => onOpenItem(null)} />
+      ) : null}
     </div>
   );
 }

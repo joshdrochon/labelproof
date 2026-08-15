@@ -25,15 +25,27 @@
  * is a table half the users cannot use (UX-4).
  */
 
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import AggregateBanner from './AggregateBanner';
 import EvidenceOverlay from './EvidenceOverlay';
 import FieldRow from './FieldRow';
-import { batchItemImageUrl } from '../api';
+import { ApiFailure, batchItemImageUrl, setItemDecision } from '../api';
 import { evidenceRegions } from '../evidence';
 import { attentionFields, settledFields } from '../triage';
 import type { AgentDecision, BatchItem, FieldName } from '../types';
+
+/**
+ * What an agent is told when their ruling did not reach the server.
+ *
+ * Deliberately says the row is UNCHANGED rather than "try again" alone. The button has
+ * just sprung back to where it was, and an agent who reads only "could not save" is left
+ * unsure whether the queue now holds a half-written decision. Ambiguity about what was
+ * recorded is the expensive failure here, not the lost click.
+ */
+const SAVE_FAILED =
+  'That did not save, so this row is unchanged. Press it again — nothing else on this ' +
+  'application was affected.';
 
 export default function ItemDetail({
   item,
@@ -45,9 +57,84 @@ export default function ItemDetail({
   const dialog = useRef<HTMLDivElement | null>(null);
   const heading = useRef<HTMLHeadingElement | null>(null);
   const [expanded, setExpanded] = useState<FieldName | null>(null);
-  const [decisions, setDecisions] = useState<Partial<Record<FieldName, AgentDecision>>>({});
   const [activeField, setActiveField] = useState<FieldName | null>(null);
   const [imageIndex, setImageIndex] = useState(0);
+
+  /**
+   * Three pieces of state, because "what the server holds" and "what the agent just
+   * clicked" are different facts and the screen has to be able to tell them apart.
+   *
+   *   saved    the last answer the server gave for this item. Seeded from the polled
+   *            item and thereafter replaced only by a PATCH response — never re-seeded
+   *            from props. A poll that left the browser BEFORE a write can land AFTER
+   *            it, and re-seeding would make the button flip back to a value the server
+   *            no longer holds.
+   *   pending  the optimistic value for a row whose write is in flight, so pressing a
+   *            button feels immediate on a queue being worked at speed.
+   *   problem  the row whose write failed. Clearing `pending` on failure drops the
+   *            display back to `saved`, which is the truth, and this says why.
+   */
+  const [saved, setSaved] = useState<Partial<Record<FieldName, AgentDecision>>>(
+    () => item.decisions ?? {},
+  );
+  const [pending, setPending] = useState<Partial<Record<FieldName, AgentDecision | null>>>({});
+  const [problem, setProblem] = useState<Partial<Record<FieldName, string>>>({});
+
+  /**
+   * One counter per row, so a slow write cannot overwrite a fast one that followed it.
+   * Agree-then-disagree in quick succession is two requests, and without this the row
+   * ends up showing whichever the network happened to deliver last.
+   */
+  const writes = useRef<Partial<Record<FieldName, number>>>({});
+
+  const decisionFor = (field: FieldName): AgentDecision | null =>
+    field in pending ? (pending[field] ?? null) : (saved[field] ?? null);
+
+  const decide = useCallback(
+    (field: FieldName, next: AgentDecision | null) => {
+      const seq = (writes.current[field] ?? 0) + 1;
+      writes.current[field] = seq;
+
+      setPending((current) => ({ ...current, [field]: next }));
+      setProblem((current) => {
+        if (!(field in current)) return current;
+        const rest = { ...current };
+        delete rest[field];
+        return rest;
+      });
+
+      const settle = (apply: () => void) => {
+        // A later click on the same row has already won. Landing this response would
+        // undo a ruling the agent made after this one.
+        if (writes.current[field] !== seq) return;
+        apply();
+        setPending((current) => {
+          const rest = { ...current };
+          delete rest[field];
+          return rest;
+        });
+      };
+
+      // Deliberately NOT aborted when the dialog closes. The agent asked for this row to
+      // be recorded; cancelling the write because they moved on to the next application
+      // would discard the very thing they clicked for. The response lands on an unmounted
+      // component, which React treats as a no-op, and the next poll carries the truth.
+      void setItemDecision(item.job_id, item.item_id, field, next)
+        .then((updated) => settle(() => setSaved(updated.decisions)))
+        .catch((error: unknown) =>
+          settle(() =>
+            setProblem((current) => ({
+              ...current,
+              [field]:
+                error instanceof ApiFailure && error.detail.message
+                  ? `${error.detail.message} This row is unchanged.`
+                  : SAVE_FAILED,
+            })),
+          ),
+        );
+    },
+    [item.item_id, item.job_id],
+  );
 
   useEffect(() => {
     const previous = document.activeElement as HTMLElement | null;
@@ -231,10 +318,9 @@ export default function ItemDetail({
                           setExpanded((current) => (current === field.field ? null : field.field))
                         }
                         onActivate={(on) => setActiveField(on ? field.field : null)}
-                        decision={decisions[field.field] ?? null}
-                        onDecide={(decision) =>
-                          setDecisions((current) => ({ ...current, [field.field]: decision ?? undefined }))
-                        }
+                        decision={decisionFor(field.field)}
+                        onDecide={(decision) => decide(field.field, decision)}
+                        decisionProblem={problem[field.field] ?? null}
                         isFocused={activeField === field.field}
                       />
                     ))}
@@ -253,10 +339,9 @@ export default function ItemDetail({
                           setExpanded((current) => (current === field.field ? null : field.field))
                         }
                         onActivate={(on) => setActiveField(on ? field.field : null)}
-                        decision={decisions[field.field] ?? null}
-                        onDecide={(decision) =>
-                          setDecisions((current) => ({ ...current, [field.field]: decision ?? undefined }))
-                        }
+                        decision={decisionFor(field.field)}
+                        onDecide={(decision) => decide(field.field, decision)}
+                        decisionProblem={problem[field.field] ?? null}
                         isFocused={activeField === field.field}
                       />
                     ))}

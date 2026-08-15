@@ -45,6 +45,16 @@ interface FieldRowProps {
   onActivate: (active: boolean) => void;
   decision: AgentDecision | null;
   onDecide: (decision: AgentDecision | null) => void;
+  /**
+   * Why the last ruling on this row did not stick.
+   *
+   * Only the batch drill-in passes it, because only there does a decision leave the
+   * browser. It sits with the two buttons rather than at the top of the screen on
+   * purpose: by the time an agent has scrolled a seven-row checklist, a banner above the
+   * fold saying "something did not save" names neither the row nor the ruling, and the
+   * button they are looking at has already sprung back to un-pressed with no explanation.
+   */
+  decisionProblem?: string | null;
   isFocused: boolean;
 }
 
@@ -75,6 +85,7 @@ export default function FieldRow({
   onActivate,
   decision,
   onDecide,
+  decisionProblem = null,
   isFocused,
 }: FieldRowProps) {
   const meta = VERDICTS[result.verdict];
@@ -279,7 +290,15 @@ export default function FieldRow({
                   I disagree
                 </button>
               </div>
-              {decision ? (
+              {/* The failure comes FIRST and the state line is suppressed while it
+                  stands. Printing "You agreed with this row" above "that was not saved"
+                  is two sentences that contradict each other, and the reassuring one is
+                  the one people read. */}
+              {decisionProblem ? (
+                <p className="detail__decision-problem" role="alert">
+                  {decisionProblem}
+                </p>
+              ) : decision ? (
                 <p className="detail__decision-state">
                   {decision === 'confirmed'
                     ? 'You agreed with this row.'

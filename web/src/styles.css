@@ -1532,6 +1532,17 @@ kbd {
   color: var(--ink-soft);
 }
 
+/* A ruling that did not save. Weightier than the state line it replaces, and marked by a
+   rule as well as by ink — the same reason no verdict on this screen is a colour alone. */
+.detail__decision-problem {
+  margin-top: 0.5rem;
+  font-size: 1rem;
+  font-weight: 600;
+  color: var(--ink);
+  border-left: 3px solid var(--rule-strong);
+  padding-left: 0.5rem;
+}
+
 /* ------------------------------------------------------------------- diff ----- */
 
 .diff {

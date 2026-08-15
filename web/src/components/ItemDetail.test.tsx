@@ -12,8 +12,8 @@
  *     into a result that is not there. That path is the one an agent hits on a bad day.
  */
 
-import { describe, expect, it } from 'vitest';
-import { render, screen, within } from '@testing-library/react';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 
 import ItemDetail from './ItemDetail';
@@ -87,6 +87,17 @@ function item(overrides: Partial<BatchItem> = {}): BatchItem {
   };
 }
 
+afterEach(() => {
+  vi.unstubAllGlobals();
+  vi.restoreAllMocks();
+});
+
+/** Open the reasoning panel for a row, where the two decision buttons live. */
+async function openRow(user: ReturnType<typeof userEvent.setup>, testId: string) {
+  const row = screen.getByTestId(testId);
+  await user.click(within(row).getByRole('button', { name: /why this verdict/i }));
+}
+
 describe('the label picture', () => {
   it('shows the item image, fetched by job and item rather than by filename', () => {
     render(<ItemDetail item={item()} onClose={() => undefined} />);
@@ -141,6 +152,146 @@ describe('the label picture', () => {
     // the picture as submitted would be a false trust signal, so the panel admits it.
     render(<ItemDetail item={item()} onClose={() => undefined} />);
     expect(screen.getByText(/can sit a little off/i)).toBeInTheDocument();
+  });
+});
+
+describe('decisions outlive the dialog', () => {
+  it('shows the rulings the server already holds, rather than starting blank', async () => {
+    const user = userEvent.setup();
+    render(
+      <ItemDetail
+        item={item({ decisions: { government_warning: 'overridden' } })}
+        onClose={() => undefined}
+      />,
+    );
+    await openRow(user, 'row-government_warning');
+
+    expect(screen.getByRole('button', { name: 'I disagree' })).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    );
+  });
+
+  it('sends the ruling to the server instead of keeping it in the modal', async () => {
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body ?? '{}'));
+      return new Response(
+        JSON.stringify({ ...item(), decisions: body.decisions }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      );
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const user = userEvent.setup();
+    render(<ItemDetail item={item()} onClose={() => undefined} />);
+    await openRow(user, 'row-government_warning');
+    await user.click(screen.getByRole('button', { name: 'I agree' }));
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe('/batch/job_1/items/item_1/decisions');
+    expect(init.method).toBe('PATCH');
+    expect(JSON.parse(String(init.body))).toEqual({
+      decisions: { government_warning: 'confirmed' },
+    });
+  });
+
+  it('clears a ruling with an explicit null, so it can be taken back', async () => {
+    const sent: string[] = [];
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      sent.push(String(init?.body ?? ''));
+      return new Response(JSON.stringify({ ...item(), decisions: {} }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const user = userEvent.setup();
+    render(
+      <ItemDetail
+        item={item({ decisions: { government_warning: 'confirmed' } })}
+        onClose={() => undefined}
+      />,
+    );
+    await openRow(user, 'row-government_warning');
+    await user.click(screen.getByRole('button', { name: 'I agree' }));
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    // Omitting the key would mean "change nothing", and a ruling could never be undone.
+    expect(JSON.parse(sent[0]!)).toEqual({ decisions: { government_warning: null } });
+  });
+
+  it('never leaves a failed write looking saved', async () => {
+    // The expensive failure is not the lost click. It is an agent walking away from a
+    // queue believing a row was recorded when the server never heard about it.
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(JSON.stringify({ error: { kind: 'internal', code: 'boom', message: 'x' } }), {
+            status: 500,
+            headers: { 'content-type': 'application/json' },
+          }),
+      ),
+    );
+
+    const user = userEvent.setup();
+    render(<ItemDetail item={item()} onClose={() => undefined} />);
+    await openRow(user, 'row-government_warning');
+
+    const agree = screen.getByRole('button', { name: 'I agree' });
+    await user.click(agree);
+
+    await waitFor(() => expect(screen.getByRole('alert')).toBeInTheDocument());
+    expect(screen.getByRole('alert')).toHaveTextContent(/unchanged/i);
+    // Sprung back, because that is what the server holds.
+    expect(agree).toHaveAttribute('aria-pressed', 'false');
+    expect(screen.queryByText(/you agreed with this row/i)).not.toBeInTheDocument();
+  });
+
+  it('keeps the last ruling when two writes on one row land out of order', async () => {
+    // Agree, then disagree, with the first response deliberately slower. Without the
+    // per-row sequence guard the row ends up showing whichever the network delivered last.
+    const responses: (() => void)[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        (_input: RequestInfo | URL, init?: RequestInit) =>
+          new Promise<Response>((resolve) => {
+            const body = JSON.parse(String(init?.body ?? '{}'));
+            responses.push(() =>
+              resolve(
+                new Response(JSON.stringify({ ...item(), decisions: body.decisions }), {
+                  status: 200,
+                  headers: { 'content-type': 'application/json' },
+                }),
+              ),
+            );
+          }),
+      ),
+    );
+
+    const user = userEvent.setup();
+    render(<ItemDetail item={item()} onClose={() => undefined} />);
+    await openRow(user, 'row-government_warning');
+    await user.click(screen.getByRole('button', { name: 'I agree' }));
+    await user.click(screen.getByRole('button', { name: 'I disagree' }));
+
+    await waitFor(() => expect(responses).toHaveLength(2));
+    responses[1]!(); // the later write answers first
+    responses[0]!(); // the earlier one straggles in behind it
+
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: 'I disagree' })).toHaveAttribute(
+        'aria-pressed',
+        'true',
+      ),
+    );
+    expect(screen.getByRole('button', { name: 'I agree' })).toHaveAttribute(
+      'aria-pressed',
+      'false',
+    );
   });
 });
 
