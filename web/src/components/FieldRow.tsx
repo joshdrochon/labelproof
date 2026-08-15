@@ -199,7 +199,14 @@ export default function FieldRow({
         <td colSpan={4} className="row__detail" id={detailId}>
           <div className="detail">
             <div className="detail__main">
-              <h4 className="detail__heading">Why this verdict</h4>
+              {/* h3, not h4. The nearest heading above this is always an h2 — the
+                  recommendation banner on Verify Now, the row identity in the batch
+                  drill-in — so h4 skipped a level, and a screen-reader user navigating by
+                  heading gets no signal that a level was jumped, only a structure that
+                  does not line up with what they are hearing. It was invisible until the
+                  drill-in started opening these rows by default; the same skip has been
+                  on the Verify Now checklist the whole time. */}
+              <h3 className="detail__heading">Why this verdict</h3>
               <p className="detail__text">{result.rationale || meta.meaning}</p>
 
               {/* MATCH-5, HITL-4. A row settled by Tier 3 came from a model's JUDGEMENT
@@ -247,7 +254,7 @@ export default function FieldRow({
                 />
               ) : null}
 
-              <h4 className="detail__heading">What to do</h4>
+              <h3 className="detail__heading">What to do</h3>
               <p className="detail__text">{meta.whatToDo}</p>
 
               {!hasRegion ? (
