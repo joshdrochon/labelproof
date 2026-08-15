@@ -427,27 +427,3 @@ def test_the_clamp_is_optional_so_a_region_can_be_scored_alone(clean: np.ndarray
     )
     assert alone.blur == clamped.blur
     assert clamped.verdict == "hopeless"
-
-
-# --- a hazard this wave cannot fix, pinned so it cannot be forgotten -----------------------
-
-def test_the_fake_providers_evidence_bands_do_not_match_the_renderer() -> None:
-    """A live trap for whoever wires region readability into the route.
-
-    `api/provider/fake.py` places the government warning at y 0.66–0.88. The renderer puts
-    it at 0.450–0.540, and everything below 0.62 is bare stock — so feeding the fake's box
-    to `assess_region` lands on blank label, scores `blank`, and reads as legible. That is
-    a false pass waiting for the wiring.
-
-    This wave does not own `api/provider/**`, so this asserts the mismatch rather than
-    fixing it. When the bands are corrected this test goes red, which is the point: it is
-    a note that cannot be lost, and deleting it is a deliberate act.
-    """
-    from api.provider.fake import _APPROX_REGIONS
-
-    fake = _APPROX_REGIONS[FieldName.GOVERNMENT_WARNING]
-    real = REGIONS[FieldName.GOVERNMENT_WARNING]
-    assert fake.y0 > real.y1, (
-        "api/provider/fake.py now agrees with the renderer — delete this test and the "
-        "warning beside it in api/pipeline/limitations.py::WIRING"
-    )
