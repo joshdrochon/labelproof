@@ -267,13 +267,18 @@ describe('the label picture', () => {
     ).not.toBeInTheDocument();
   });
 
-  /** A two-sided item whose only outlined row has its evidence on the BACK. */
+  /**
+   * A two-sided item with one outlined row per face — brand name on the front, government
+   * warning on the back. Both are needed: a hover test can only prove anything if it ends
+   * on a row pointing at the picture that is NOT showing.
+   */
   function twoSided() {
     return item({
       images: ['front.png', 'back.png'],
       result: {
         ...result([imageReport(0, 'front'), imageReport(1, 'back')]),
         fields: [
+          fieldResult('brand_name', 'mismatch'),
           fieldResult('government_warning', 'mismatch', {
             evidence: { image_index: 1, bbox: { x0: 0.1, y0: 0.7, x1: 0.9, y1: 0.9 } },
           }),
@@ -310,18 +315,20 @@ describe('the label picture', () => {
     const user = userEvent.setup();
     render(<ItemDetail item={twoSided()} onClose={() => undefined} onDecisions={() => undefined} />);
 
+    // Opening on the front, brushing the row outlined on the back must not turn the page.
     await user.hover(screen.getByTestId('row-government_warning'));
     expect(screen.getByRole('img', { name: /front/i })).toBeInTheDocument();
     await user.unhover(screen.getByTestId('row-government_warning'));
     expect(screen.getByRole('img', { name: /front/i })).toBeInTheDocument();
 
-    // And the agent's own choice survives a sweep across the rows.
+    // And once the agent has chosen the back, reading a row outlined on the FRONT must
+    // not pull it away. Hovering a back row here would prove nothing.
     await user.click(
       within(screen.getByRole('group', { name: /which picture/i })).getByRole('button', {
         name: 'back',
       }),
     );
-    await user.hover(screen.getByTestId('row-government_warning'));
+    await user.hover(screen.getByTestId('row-brand_name'));
     expect(screen.getByRole('img', { name: /back/i })).toBeInTheDocument();
   });
 
