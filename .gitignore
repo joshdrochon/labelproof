@@ -16,6 +16,10 @@ dist/
 
 # Node / web
 node_modules/
+# ...and as a plain entry, because the trailing slash matches a DIRECTORY only. A worktree
+# that symlinks node_modules to a sibling checkout creates a *link*, which slipped past
+# the pattern above and was committed by a `git add -A`.
+node_modules
 web/dist/
 web/.vite/
 

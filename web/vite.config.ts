@@ -34,7 +34,12 @@ export default defineConfig({
     proxy: API
       ? {
           '/verify': API,
+          // The read-ahead call. Absent from this list it 404s against the dev server
+          // while working perfectly against the API, which looks exactly like a broken
+          // feature and is a missing line of proxy config.
+          '/prepare': API,
           '/sample': API,
+          '/batch': API,
           '/health': API,
           '/ready': API,
         }

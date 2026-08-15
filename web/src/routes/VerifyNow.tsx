@@ -23,8 +23,8 @@ import type {
   FieldResult,
   VerificationResult,
 } from '../types';
-import { ApiFailure, listSamples, loadSample, verify } from '../api';
-import type { SampleCase } from '../api';
+import { ApiFailure, listSamples, loadSample, prepareReading, verify } from '../api';
+import type { PreparedReading, SampleCase } from '../api';
 import { NEXT_STEP_LABELS, STAGES, fieldLabel } from '../copy';
 import { attentionFields, settledFields } from '../triage';
 import AggregateBanner from '../components/AggregateBanner';
@@ -45,6 +45,8 @@ type Phase = 'setup' | 'working' | 'checked' | 'problem';
 interface Checked {
   result: VerificationResult;
   application: Application;
+  /** The client's wall clock, submit to render. Recorded, not displayed — the card
+   *  reports the server's total, which describes the work rather than the wait. */
   elapsedMs: number;
   imageUrls: string[];
   /** True when the outlines are drawn over the upload rather than a server-side copy. */
@@ -74,6 +76,17 @@ export default function VerifyNow() {
   // can try before they commit to a click. Empty until it answers, and empty forever if
   // it fails — manual entry is the rest of the screen and does not depend on this.
   const [samples, setSamples] = useState<SampleCase[]>([]);
+  // A reading taken while the form was still being filled (LP-346). Null whenever there
+  // is nothing usable — no files yet, still reading, or the attempt came back empty.
+  // Every path that reaches `runCheck` works with or without it.
+  //   null      — no attempt has finished for the current files
+  //   {token}   — the label has been read and the reading is usable
+  //   'none'    — an attempt finished and produced nothing usable
+  //
+  // One piece of state, written only when an attempt SETTLES. An earlier version kept a
+  // separate in-flight boolean written around the call, and the effect's own cleanup
+  // reset it faster than any render could show it.
+  const [reading, setReading] = useState<PreparedReading | 'none' | null>(null);
 
   const abortRef = useRef<AbortController | null>(null);
   const localUrlsRef = useRef<string[]>([]);
@@ -163,7 +176,14 @@ export default function VerifyNow() {
     setEntries({});
     setPhase('working');
     try {
-      const result = await verify({ application, files }, controller.signal);
+      const result = await verify(
+        {
+          application,
+          files,
+          preparedToken: reading && reading !== 'none' ? reading.token : undefined,
+        },
+        controller.signal,
+      );
       settle(result, application, previews);
     } catch (error) {
       if ((error as Error)?.name === 'AbortError') return;
@@ -179,13 +199,39 @@ export default function VerifyNow() {
       );
       setPhase('problem');
     }
-  }, [draft, files, localPreviewUrls, settle]);
+  }, [draft, files, localPreviewUrls, settle, reading]);
 
   useEffect(() => {
     const controller = new AbortController();
     void listSamples(controller.signal).then(setSamples);
     return () => controller.abort();
   }, []);
+
+  // Read the label as soon as there is one, and re-read if the pictures or the kind of
+  // product change — a reading is of specific bytes under a specific rule set, and the
+  // server refuses a token that does not match on both. Aborting on change matters: a
+  // superseded read must not land after the one that replaced it.
+  useEffect(() => {
+    setReading(null);
+    if (files.length === 0 || phase === 'working') return undefined;
+    const controller = new AbortController();
+    // A flag per run, rather than reading `controller.signal.aborted` back. React runs
+    // effects twice in development — setup, cleanup, setup — so the signal belonging to
+    // a superseded run is aborted while the run that replaced it is the live one. Keying
+    // the state update to the signal meant the surviving request's result was discarded
+    // and the panel never said anything, in development only.
+    let live = true;
+    void prepareReading(files, draft.commodity, controller.signal).then((prepared) => {
+      if (live) setReading(prepared ?? 'none');
+    });
+    return () => {
+      live = false;
+      controller.abort();
+    };
+    // `phase` is deliberately absent: re-reading because the screen moved to `checked`
+    // would spend a model call on a label that has already been answered.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [files, draft.commodity]);
 
   const runSample = useCallback(async (slug?: string) => {
     abortRef.current?.abort();
@@ -361,6 +407,17 @@ export default function VerifyNow() {
                   {problems.images}
                 </p>
               ) : null}
+              {/* Quiet on purpose. The agent did not ask for this and cannot act on it;
+                  it is here so a head start is visible rather than mysterious, and so a
+                  fast result later is not surprising. `role="status"` and not `alert` —
+                  nothing here needs interrupting. */}
+              {files.length > 0 && reading !== 'none' ? (
+                <p className="reading-ahead" role="status">
+                  {reading === null
+                    ? 'Reading the label while you fill in the details…'
+                    : 'Label read. Checking will be quick.'}
+                </p>
+              ) : null}
             </>
           )}
         </div>
@@ -502,7 +559,7 @@ function ChecklistScreen({
   setImageIndex,
   onStartOver,
 }: ChecklistScreenProps) {
-  const { result, application, elapsedMs, imageUrls, approximateGeometry } = checked;
+  const { result, application, imageUrls, approximateGeometry } = checked;
   const attention = useMemo(() => attentionFields(result.fields), [result.fields]);
   const settled = useMemo(() => settledFields(result.fields), [result.fields]);
 
@@ -615,6 +672,16 @@ function ChecklistScreen({
           <p className="checked__reference">
             <span className="checked__reference-label">Check reference</span>
             <span className="checked__reference-value">{result.request_id || '—'}</span>
+            {/* OPS-1 asks for elapsed time on every result card, and it stays — but here,
+                with the reference, rather than beside the recommendation. Once the label
+                is read while the form is filled the number stops describing anything the
+                agent waited for, and a verdict is not the place for a statistic nobody
+                acted on. It is the WORK, never the wait. */}
+            {result.timings_ms.total ? (
+              <span className="checked__elapsed" data-testid="elapsed">
+                Checked in {(result.timings_ms.total / 1000).toFixed(1)}s
+              </span>
+            ) : null}
           </p>
           <h1 className="checked__product">{productName}</h1>
         </div>
@@ -637,7 +704,6 @@ function ChecklistScreen({
       <AggregateBanner
         aggregate={result.aggregate}
         fields={result.fields}
-        elapsedMs={elapsedMs}
         onJumpToField={jumpToField}
       />
 

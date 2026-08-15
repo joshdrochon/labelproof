@@ -1127,9 +1127,10 @@ def test_every_control_a_person_clicks_is_at_least_forty_four_pixels() -> None:
     """UX-3's other floor — and until now, the untested half of it.
 
     The stylesheet's header has said "click targets never drop below 44px" since the
-    first commit, and nothing checked it. `.evidence__tag` — the numbered chip that ties
-    a finding to a region on the photograph, and the control most likely to be tapped on
-    a tablet — measured about 27px tall. A claim of Section 508 conformance that no test
+    first commit, and nothing checked it. `.evidence__marker` — the numbered mark that
+    ties a finding to a region on the photograph, and the control most likely to be
+    tapped on a tablet — is drawn at 24px, because a bigger circle would cover the text
+    it points at. A claim of Section 508 conformance that no test
     exercises is a claim about intent.
 
     The floor counts the TARGET, not the drawn box: an `::after` that extends the hit

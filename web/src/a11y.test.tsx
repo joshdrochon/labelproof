@@ -106,7 +106,7 @@ describe('axe, over each screen', () => {
       fieldResult('brand_name', 'match'),
     ];
     const { container } = render(
-      <AggregateBanner aggregate={aggregate()} fields={fields} elapsedMs={8400} />,
+      <AggregateBanner aggregate={aggregate()} fields={fields} />,
     );
     expectClean(await auditOf(container));
   });

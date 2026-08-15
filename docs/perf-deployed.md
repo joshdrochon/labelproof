@@ -3,15 +3,15 @@
 | | |
 |---|---|
 | URL | `https://labelproof.fly.dev` |
-| Started | 2026-08-12 17:21:45Z |
+| Started | 2026-08-15 00:38:08Z |
 | Runs | 20 requested, 20 succeeded |
 | Server mode | ready |
 | Model reported | claude-sonnet-5 |
 | PERF-1 target | 5000ms |
 | Enforced deadline | 20700ms |
 | Payload | 2 image(s), 73 KB total |
-| Commit | `9b04ed7` |
-| Note | fly iad, shared-cpu-2x, auto_stop off, keepwarm on, warm |
+| Commit | `e360dc0` |
+| Note | fly iad, performance-1x, split mode, auto_stop off, keepwarm on, warm |
 
 Run 1 is labelled **first-hit**, not *cold*: it is the first request this script made, which is only a genuine cold start if the server had just started or had scaled to zero. Record what you actually arranged in `Note`.
 
@@ -19,105 +19,40 @@ Run 1 is labelled **first-hit**, not *cold*: it is the first request this script
 
 | Measure | n | min | p50 | p90 | p95 | p99 | max |
 |---|--:|--:|--:|--:|--:|--:|--:|
-| client stopwatch (ms) | 20 | 7833 | 8557 | 9550 | 9614 | 9914 | 9914 |
-| server-reported total (ms) | 20 | 7630 | 8298 | 9355 | 9413 | 9696 | 9696 |
+| client stopwatch (ms) | 20 | 5301 | 5662 | 6251 | 6368 | 6983 | 6983 |
+| server-reported total (ms) | 20 | 5089 | 5426 | 5842 | 6070 | 6757 | 6757 |
 
 **client stopwatch** is submit-to-response measured by this script: upload, network, server work, and serialisation. It is the number a person with a stopwatch sees, minus render. **server-reported total** is the server's own `timings_ms.total` from the same requests.
 
-PERF-1 gate: observed p95 is **9614ms** against a 5000ms target — **OVER TARGET**
+PERF-1 gate: observed p95 is **6368ms** against a 5000ms target — **OVER TARGET**
 
 All 20 successful responses contained a real verification.
 
-Clock check: the server's reported total is below the client stopwatch on every run, by 174 to 348ms. That gap is upload, network and serialisation, and it is why the screen shows the client's number rather than the server's — the screen must never report less time than passed (PERF-2).
+Clock check: the server's reported total is below the client stopwatch on every run, by 173 to 660ms. That gap is upload, network and serialisation, and it is why the screen shows the client's number rather than the server's — the screen must never report less time than passed (PERF-2).
 
 ## Every run
 
 | # | | HTTP | client ms | server ms | overhead | preprocess | extract | compare | recommendation | request id |
 |--:|---|--:|--:|--:|--:|--:|--:|--:|---|---|
-| 1 | first-hit | 200 | 8710 | 8413 | 297 | 428 | 7981 | 1 | ready_to_approve | `req_e7d1281e6e6e421d` |
-| 2 | warm | 200 | 9914 | 9696 | 218 | 604 | 9087 | 1 | ready_to_approve | `req_8a91b4847558454f` |
-| 3 | warm | 200 | 8073 | 7882 | 191 | 412 | 7466 | 1 | ready_to_approve | `req_2cd42a6f31174748` |
-| 4 | warm | 200 | 9088 | 8779 | 309 | 412 | 8363 | 1 | ready_to_approve | `req_9a97513d466043ef` |
-| 5 | warm | 200 | 8400 | 8158 | 242 | 578 | 7576 | 1 | ready_to_approve | `req_579f6f16a92d401c` |
-| 6 | warm | 200 | 7947 | 7757 | 190 | 416 | 7336 | 1 | ready_to_approve | `req_cac95db0b95e4d2a` |
-| 7 | warm | 200 | 8064 | 7830 | 234 | 400 | 7426 | 1 | ready_to_approve | `req_20bc6eb873ad457d` |
-| 8 | warm | 200 | 8337 | 8158 | 179 | 572 | 7581 | 2 | ready_to_approve | `req_99ec74201fa5420e` |
-| 9 | warm | 200 | 8833 | 8535 | 298 | 590 | 7940 | 2 | ready_to_approve | `req_45c39b2b74414753` |
-| 10 | warm | 200 | 7868 | 7668 | 200 | 558 | 7104 | 1 | ready_to_approve | `req_a9b57f3a3e984907` |
-| 11 | warm | 200 | 7929 | 7716 | 213 | 586 | 7125 | 1 | ready_to_approve | `req_399482f0400e4b19` |
-| 12 | warm | 200 | 9614 | 9413 | 201 | 396 | 9012 | 1 | ready_to_approve | `req_d3f4c68824e3438e` |
-| 13 | warm | 200 | 9327 | 9007 | 320 | 399 | 8604 | 1 | ready_to_approve | `req_b0bba069268c4f55` |
-| 14 | warm | 200 | 8957 | 8769 | 188 | 413 | 8351 | 1 | ready_to_approve | `req_b97e3a526c844470` |
-| 15 | warm | 200 | 8696 | 8502 | 194 | 586 | 7911 | 2 | ready_to_approve | `req_eeffe4821cc9484b` |
-| 16 | warm | 200 | 7833 | 7630 | 203 | 411 | 7216 | 1 | ready_to_approve | `req_3a7a1eba8b4e4bd8` |
-| 17 | warm | 200 | 8120 | 7772 | 348 | 403 | 7365 | 1 | ready_to_approve | `req_52e9d56cef6b4a62` |
-| 18 | warm | 200 | 8557 | 8298 | 259 | 411 | 7883 | 1 | ready_to_approve | `req_6a1fd9ea2b51429b` |
-| 19 | warm | 200 | 9550 | 9355 | 195 | 550 | 8800 | 2 | ready_to_approve | `req_11fad9c63fd04eb0` |
-| 20 | warm | 200 | 8693 | 8519 | 174 | 567 | 7946 | 1 | ready_to_approve | `req_3fea363292cf4cf6` |
+| 1 | first-hit | 200 | 5796 | 5619 | 177 | 555 | 5059 | 1 | ready_to_approve | `req_4eae25893b9f4db1` |
+| 2 | warm | 200 | 5738 | 5516 | 222 | 541 | 4970 | 1 | ready_to_approve | `req_311520c0bd5e4fa7` |
+| 3 | warm | 200 | 5607 | 5134 | 473 | 551 | 4577 | 1 | ready_to_approve | `req_2deba5cacb724029` |
+| 4 | warm | 200 | 5586 | 5411 | 175 | 550 | 4856 | 1 | ready_to_approve | `req_bd9d4e730e3c4eec` |
+| 5 | warm | 200 | 6368 | 5708 | 660 | 549 | 5154 | 1 | ready_to_approve | `req_46744805d64c4497` |
+| 6 | warm | 200 | 5892 | 5462 | 430 | 547 | 4910 | 1 | ready_to_approve | `req_fd735baaf15443e6` |
+| 7 | warm | 200 | 5662 | 5426 | 236 | 550 | 4869 | 1 | ready_to_approve | `req_48271608a7ab43cd` |
+| 8 | warm | 200 | 5426 | 5196 | 230 | 550 | 4642 | 1 | ready_to_approve | `req_3365dfffc04d4f07` |
+| 9 | warm | 200 | 5686 | 5497 | 189 | 541 | 4948 | 3 | ready_to_approve | `req_d4144b038fc342b8` |
+| 10 | warm | 200 | 5577 | 5386 | 191 | 546 | 4835 | 1 | ready_to_approve | `req_94b83a1f6fa64402` |
+| 11 | warm | 200 | 6251 | 6070 | 181 | 544 | 5521 | 1 | ready_to_approve | `req_bdc769dcf5e946c1` |
+| 12 | warm | 200 | 5583 | 5410 | 173 | 548 | 4858 | 1 | ready_to_approve | `req_a119002ca08c46f5` |
+| 13 | warm | 200 | 5403 | 5227 | 176 | 536 | 4686 | 1 | ready_to_approve | `req_3aa933d25b794e41` |
+| 14 | warm | 200 | 6983 | 6757 | 226 | 592 | 6160 | 1 | ready_to_approve | `req_63b199981a94414e` |
+| 15 | warm | 200 | 5930 | 5615 | 315 | 555 | 5055 | 1 | ready_to_approve | `req_b602af7e3c88494e` |
+| 16 | warm | 200 | 5301 | 5089 | 212 | 551 | 4532 | 1 | ready_to_approve | `req_d2fbe930832b49f7` |
+| 17 | warm | 200 | 6048 | 5842 | 206 | 546 | 5291 | 1 | ready_to_approve | `req_af2cfd65210f44d2` |
+| 18 | warm | 200 | 5455 | 5237 | 218 | 556 | 4676 | 1 | ready_to_approve | `req_5c7776e12c8541e9` |
+| 19 | warm | 200 | 5929 | 5751 | 178 | 546 | 5201 | 1 | ready_to_approve | `req_80f3b33b66b8408c` |
+| 20 | warm | 200 | 5359 | 5171 | 188 | 569 | 4597 | 1 | ready_to_approve | `req_06bcad6633e844d8` |
 
-Cost across 20 priced run(s): $0.6266 total, $0.0313 mean.
-
-
----
-
-# Stage breakdown, the priority lane, and the honesty check
-
-Measured on <https://labelproof.fly.dev> the same day as the table above, warm, two images
-per request.
-
-## Where the time goes (OPS-1, LP-278)
-
-| Stage | ms | share |
-|---|--:|--:|
-| extract (the model) | 6,619–7,056 | **91%** |
-| preprocess | 570–597 | 8% |
-| quality | 312–329 | 4% |
-| ingest | 255–269 | 3% |
-| compare (the rules engine) | 1 | 0% |
-| adjudicate | not run | — |
-
-**The slowest stage is the model call and there is no second place.** Everything this
-project wrote comes to roughly 1.1 seconds against a 7-second extraction, so the
-instruction OPS-1 gives — attack the slowest stage first — points at the model, not at the
-code. That is what the model sweep in the README is: the only lever on this number is
-which model answers, and the trade it costs is argued there.
-
-Attacking the second-slowest stage is worth naming so it can be dismissed with a number.
-`preprocess` is ~580ms for two images and it is mostly the downscale to 2,576px, which is
-the resolution the government warning needs to be legible. Halving it would save ~290ms of
-a 7,400ms request — under 4% — in exchange for the tier the safety-critical field depends
-on. Not a trade this product makes.
-
-`compare` is 1ms. The entire rules engine — seven fields, the commodity matrix, the
-standards-of-fill table, every warning check in 27 CFR 16.21 and 16.22 — costs a
-millisecond. That is the argument for deterministic rules stated as a measurement.
-
-## Verify Now during a running batch (PERF-5, LP-282)
-
-A 22-application batch was submitted and left running; three single verifications were
-issued against the same machine while it worked.
-
-| | Idle | During a 22-item batch |
-|---|--:|--:|
-| Wall clock | 7,386–7,844 ms | 7,119–7,800 ms |
-
-**Indistinguishable.** The priority lane holds: `api/main.py` gives interactive
-verifications a reserved slot that batch workers never acquire, so an agent checking one
-label does not queue behind three hundred. The batch finished 17 of 22 during the
-measurement and lost nothing.
-
-## The screen never reports less time than passed (PERF-2, LP-285)
-
-| Run | Client stopwatch | Server `timings_ms.total` | Gap |
-|--:|--:|--:|--:|
-| 1 | 7,470 | 7,292 | 178 |
-| 2 | 7,669 | 7,484 | 185 |
-| 3 | 7,386 | 7,208 | 178 |
-| 4 | 7,844 | 7,658 | 186 |
-| 5 | 7,605 | 7,399 | 206 |
-
-The client number is larger on every run, by 178–206ms — upload, network and
-serialisation, the part the server cannot see. This is why the result card shows the
-CLIENT's measurement: a screen that displayed the server's 7,292 while the agent waited
-7,470 would be shaving its own homework, and the stopwatch is the thing a stakeholder will
-actually hold.
+Cost across 20 priced run(s): $0.9233 total, $0.0462 mean.

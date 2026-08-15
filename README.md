@@ -45,7 +45,7 @@ Nothing below needs an API key. The suite and the demo both run offline.
 git clone <this repo> && cd labelproof
 python3.14 -m venv .venv && .venv/bin/pip install -e ".[dev]"
 
-.venv/bin/python -m pytest                        # 3585 tests, offline, ~5 min
+.venv/bin/python -m pytest                        # 3,693 tests, offline, ~5 min
 .venv/bin/python -m eval.run                      # the accuracy gate
 LABELPROOF_FAKE_PROVIDER=1 .venv/bin/uvicorn api.main:app --reload
 ```
@@ -111,6 +111,19 @@ image → deterministic rules → response. No queue, no polling. The vendor tha
 this one took 30–40 seconds a label and agents went back to doing it by eye, so latency is
 an adoption gate rather than a nice-to-have.
 
+**The label is read while the application is still being typed.** Extraction takes exactly
+one field of the application — `commodity`, which selects the rule text in the prompt — so
+it can start the moment the pictures arrive rather than when the button is pressed. By the
+time six fields are filled the reading is usually done, and submitting costs the
+comparison alone: **9,795 ms → 176 ms**, measured, same verdict.
+
+That is a claim about the *wait*, not about the work. Reading the label still takes the
+same six seconds and the result card still reports them; PERF-1 asks for p95 upload-to-
+verdict and this does not change it. What it changes is the thing the stakeholder quote
+was actually about — *"if we can't get results back in about 5 seconds, nobody's going to
+use it"* — because the seconds are now spent on typing that was happening anyway. The
+mechanism, and what it costs the retention posture, is in `api/prepared.py`.
+
 **The model reads; it does not decide.** The extractor returns what is printed on the
 label and nothing else. Every verdict is computed by deterministic code in `api/rules/`,
 which is unit-testable in milliseconds and cannot have an opinion. `ExtractedField` has no
@@ -140,12 +153,41 @@ outcome is "we did not verify this."
 and it gates CI. Tier B is real photographs of real bottles, reported separately and never
 gating. The gap between them is a published number rather than an embarrassment.
 
+```
+  pictures chosen                                    form submitted
+        │                                                  │
+        ▼                                                  ▼
+  POST /prepare ─────────────────────────────────────► POST /verify
+        │                                                  │
+        │  ingest      sanitise, re-encode, cap    ◄── same path, always, on
+        │  quality     blur/glare/exposure/skew        the bytes just received
+        │  pre-gate    hopeless? stop, 0 model calls
+        │                                                  │
+        │  extract     1–2 vision calls per image          │  token names these
+        │     │        model reads, never decides          │  bytes + commodity
+        │     ▼                                            │        │
+        │  reading ───────── held in memory, 10 min ───────┴────────┘
+        │                    never on disk                 │
+        │                                                  ▼
+        └── ~6 s, spent while the form is typed      merge     across images
+                                                     compare   rules, 0–2 ms
+                                                     aggregate 6 verdicts → 3
+                                                          │
+                                                          ▼
+                                                     checklist
+                                                     ~176 ms after the click
+```
+
+No token, or a token that does not match these bytes and this commodity? `/verify` reads
+the label itself and the check takes the full ~6 s. The shortcut can only ever be lost,
+never wrong.
+
 ### Tools, and what each was chosen over
 
 | Choice | Over | Because |
 |---|---|---|
 | **Python 3.14 + FastAPI** | Node, Go | The image work is OpenCV and Pillow, and the regulatory logic is a rules engine that has to be readable by someone checking it against the CFR. Async matters here only for holding a connection open during a model call, which FastAPI does without ceremony. |
-| **Claude Sonnet 5** | Haiku 4.5, Opus 5 | Measured, not assumed — the table below. Haiku is the only model that meets the 5-second gate and the only one that cannot pin US inference, and it got typography wrong 10 times in 20, always toward a false pass. |
+| **Claude Sonnet 5** | Haiku 4.5, Opus 5 | Measured, not assumed — the table below. Haiku is the only model that meets the 5-second gate, and it got typography wrong 10 times in 20, always toward a false pass, on the one field with a zero-false-pass requirement. |
 | **One vision call per image, concurrent** | One call for all images | Wall clock is the slower of two rather than the sum, and a per-image call keeps provenance honest: a field's evidence box belongs to a specific photograph. |
 | **Structured outputs (`output_config.format`)** | Prompt-and-parse | The schema is closed — `additionalProperties: false`, every key required — so `ExtractedField` has no channel for a guess. A value that cannot be read comes back `value=None, legible=False` because the grammar forces both keys to exist. |
 | **Deterministic rules in `api/rules/`** | Asking the model for verdicts | The model reads; it does not decide. Every verdict is computed by code that is unit-testable in milliseconds, cannot have an opinion, and can be audited line-by-line against 27 CFR by someone who does not know Python well. |
@@ -213,7 +255,7 @@ The brief left these open. Each was decided deliberately; each is reversible.
 
 ### The one trade we made against the brief
 
-**PERF-1 asks for p95 ≤ 5s. We do not meet it. Measured p95 on the deployed URL is 9.6s.**
+**PERF-1 asks for p95 ≤ 5s. We do not meet it. Measured p95 on the deployed URL is 6.4s.**
 
 That number comes from 20 consecutive verifications against
 <https://labelproof.fly.dev>, warm, two images per request — the full table, every run,
@@ -221,36 +263,51 @@ with request ids, is in [`docs/perf-deployed.md`](docs/perf-deployed.md).
 
 | | Deployed, 20 runs |
 |---|---|
-| p50 | 8.5s |
-| **p95** | **9.6s** |
-| max | 9.9s |
+| p50 | 5.7s |
+| **p95** | **6.4s** |
+| max | 7.0s |
 | Successful | 20 / 20 |
 | Cost | $0.031 per verification |
 
-An earlier version of this section said **6.9s**, taken from the model spike below. That
-was a lab number for one image on one call, and production sends two. It has been
-replaced rather than explained away: the spike is how we *chose* the model, and the
-deployed p95 is how the product *performs*. Where the two disagree, the deployed number
-is the one that counts, and it is 4.6s over the gate rather than 1.9s.
+This number has been wrong twice, in both directions, and the corrections are left in
+rather than tidied away.
+
+It first said **6.9s** — a lab figure for one image on one call, while production sends
+two. That was replaced by a measured **9.6s**. But 9.6s was itself taken on
+`shared-cpu-2x` before the extraction was split across concurrent calls (LP-339) and
+before the machine was moved to `performance-1x`, and it then sat in this file describing
+a product that had got substantially faster underneath it. A stale number is not more
+honest than an optimistic one just because it errs in the pessimistic direction: it
+claimed we missed a hard adoption gate by 4.6 seconds when we miss it by 1.4.
+
+The rule that produced all three: the spike is how we *chose* the model, the deployed p95
+is how the product *performs*, and when a change lands that could move it, it gets
+re-measured before this file is allowed to keep quoting the old one.
 
 The spike, for the model decision only — three runs each, one label, live:
 
 | Model | Single call | Split | Typography errors (of 20) | Can pin US inference |
 |---|---|---|---|---|
-| Opus 5 | 9.6s | 8.4s | 0 | yes |
-| **Sonnet 5 (shipped)** | **9.0s** | **6.9s** | **0** | **yes** |
-| Haiku 4.5 | 5.5s | 4.7s | 10 | **no — rejects `inference_geo`** |
+| Opus 5 | 9.6s | 8.4s | 0 | per-request |
+| **Sonnet 5 (shipped)** | **9.0s** | **6.9s** | **0** | **per-request** |
+| Haiku 4.5 | 5.5s | 4.7s | 10 | **workspace only** |
 
-Haiku is the only model that fits the gate. It is also the only one that cannot be pinned
-to US inference — it rejects the parameter with a 400 — and over 20 samples per model it
-was wrong 4/20 on header-bold and 6/20 on body-bold, **never abstained once**, and every
-single error ran in the false-pass direction, on the one field with a zero-false-pass
-gate.
+Haiku is the only model that fits the gate, and it was rejected on the typography: over 20
+samples per model it was wrong 4/20 on header-bold and 6/20 on body-bold, **never
+abstained once**, and every single error ran in the false-pass direction, on the one field
+with a zero-false-pass gate. That is the disqualifying reason and it stands on its own.
 
-The 5-second figure is a stakeholder's quote about adoption. Data residency is a
-procurement condition, and those do not negotiate. A tool 4.6s slower still replaces a
-30–40 second vendor and a paper checklist; a tool that cannot say where a federal agency's
-label images were processed may not be deployable at all.
+The residency column is narrower than this section used to claim. It said Haiku "cannot be
+pinned to US inference at all", which is wrong: `inference_geo` is a **per-request**
+override that Haiku answers with a 400, and workspace-level residency still applies to
+every model including Haiku. So the real difference is where the guarantee lives — asserted
+on each outgoing request and testable in code
+(`tests/test_adapter.py`), or configured once in a console and taken on trust. For a
+federal deployment that distinction is worth having, but it is a preference about evidence,
+not an impossibility, and it was overstated here.
+
+The 5-second figure is a stakeholder's quote about adoption. A tool 1.4s over it still
+replaces a 30–40 second vendor and a paper checklist.
 
 Reversible in one line, and the budgets follow the model automatically.
 
@@ -466,6 +523,9 @@ lists one nothing emits.
 | `verify_complete` | INFO | A verification produced a recommendation. |
 | `adjudication` | INFO | Tier 3 saw at least one gray row. Carries how many were considered, how many were judged and how many changed, so the trigger rate is a number rather than an impression (LP-221). |
 | `verify_over_budget` | INFO | The request budget expired; partial result returned as Needs review. |
+| `prepare_complete` | INFO | A label was read ahead of its application, while the agent was still typing. No verdict was reached. |
+| `prepare_unavailable` | WARNING | The provider was down when a label was read ahead. Nothing is shown to the agent. |
+| `prepared_reading` | INFO | Whether a verification used a reading taken earlier, or declined it and read the label again. |
 | `reread` | INFO | One or more fields were read again from a crop of their own region (LP-325). Carries how many were eligible, how many were re-read and how many improved. |
 | `reread_failed` | WARNING | A re-read call failed. The first reading stands and the verification is unaffected — failing to improve is not failing to verify. |
 | `verify_pregated` | INFO | Images too poor to read; returned Unreadable with zero model calls. |
@@ -667,7 +727,7 @@ by `scripts/spike_latency.py` and pinned in `api.config.MEASURED_EXTRACTION_MS`:
 |---|---|---|---|---|
 | `claude-sonnet-5` *(shipped default)* | ~9,000 ms | ~6,900 ms | $3 / $15 | Yes |
 | `claude-opus-5` | ~9,600 ms | not measured | $5 / $25 | Yes |
-| `claude-haiku-4-5` | ~5,500 ms | ~4,700 ms | $1 / $5 | **No — 400s the parameter** |
+| `claude-haiku-4-5` | ~5,500 ms | ~4,700 ms | $1 / $5 | **Per-request: no, 400s it. Workspace-level: yes** |
 
 Our own non-provider work — ingest, quality scoring, preprocessing, rules, serialization
 — is about **1,120 ms**, measured on the deployed app: ingest ~260, quality ~300,
@@ -681,7 +741,8 @@ figure while production sends two. It was then corrected to **570 ms** — which
 fast. The itemisation was printed correctly beside it both times and sums to ~1,120.
 
 The conclusion does not move: dedicated cores might halve our share, taking perhaps 560 ms
-off a 9.6 s p95 for 8x the machine price, and the model is still 86% of the request. What
+off a 6.4 s p95 for a higher machine price, and the model is still the large majority of
+the request. What
 does move is how confidently the figure should be quoted — twice wrong in the same
 direction is a pattern, not an accident, and the per-stage table in
 [`docs/perf-deployed.md`](docs/perf-deployed.md) is the thing to read rather than this
@@ -691,27 +752,31 @@ The honest reading:
 
 - The shipped configuration is **Sonnet 5**, split into two concurrent extraction calls
   (`api/provider/anthropic_adapter.py`, LP-280). In the lab that measured ~6.9 s. **In
-  production it measures a 9.6 s p95** — 20 runs, [`docs/perf-deployed.md`](docs/perf-deployed.md).
+  production it measures a 6.4 s p95** — 20 runs, [`docs/perf-deployed.md`](docs/perf-deployed.md),
+  on `performance-1x`.
   The split is real and it helps; two concurrent calls still cost the slower of the two,
-  and the slower of two is not the median of one. **PERF-1 is not met**, by 4.6 s, and no
+  and the slower of two is not the median of one. **PERF-1 is not met**, by 1.4 s, and no
   number in this repository should be read as claiming otherwise.
 - Haiku 4.5 is the only model that fits the gate — ~4.7 s split — and it was **rejected
-  deliberately**, for two reasons a federal deployment cannot spend. Haiku **rejects
-  `inference_geo` with a 400**, so US data residency cannot be pinned on it at all
-  (`api.provider.anthropic_adapter.supports_inference_geo` / `describe_residency`). And in
+  deliberately**, on the typography. In
   the typography spike, over 20 samples per model, Haiku got the header-bold judgement
   wrong 4 times and the body-bold judgement wrong 6 times where Sonnet 5 and Opus 5 got
   all three signals — header-bold, body-bold, all-caps — wrong zero times. Haiku never
   abstained, and every one of its errors was a **false pass**: the direction that ships a
   non-compliant label, on the one field carrying a zero-false-pass gate.
+- Residency is a second, weaker reason and it was **overstated here until it was
+  challenged**. This section used to say Haiku "cannot pin US inference at all". That is
+  wrong: `inference_geo` is a per-request override which Haiku answers with a 400, and
+  workspace-level residency still applies to every model including Haiku. The real
+  difference is where the guarantee lives — asserted on each outgoing request and pinned by
+  `tests/test_adapter.py`, or set once in a console and taken on trust. Worth having for a
+  federal deployment; not an impossibility.
 - So the trade is stated rather than hidden. The 5 s figure is a stakeholder quote about
-  adoption; data residency is a procurement condition, and procurement conditions do not
-  negotiate. A tool 4.6 s over the gate still replaces a 30–40 s vendor pilot and a paper
-  checklist. A tool that cannot say where a federal agency's label images were processed
-  may not be deployable at all.
+  adoption. A tool 1.4 s over the gate still replaces a 30–40 s vendor pilot and a paper
+  checklist.
 - **The gate has been measured end-to-end on the deployed URL, and it is missed.**
-  20 consecutive timed runs against <https://labelproof.fly.dev>: p50 8.5s, **p95 9.6s**,
-  max 9.9s, 20/20 successful. Every run, with request ids and stage breakdowns, is in
+  20 consecutive timed runs against <https://labelproof.fly.dev>: p50 5.7s, **p95 6.4s**,
+  max 7.0s, 20/20 successful. Every run, with request ids and stage breakdowns, is in
   [`docs/perf-deployed.md`](docs/perf-deployed.md) — the file rather than this sentence is
   the evidence.
 
@@ -1175,12 +1240,23 @@ This is a property of the model, not of our configuration, and it is not univers
 | `claude-sonnet-5` | Accepted. Inference pinned to `us`. |
 | `claude-haiku-4-5` | **Rejected with a 400.** Sending it fails the request; it is not a no-op. |
 
-So a Haiku 4.5 deployment cannot pin US data residency at all. `describe_residency()` in
-`api/provider/anthropic_adapter.py` renders that as one sentence an operator or a grader can
-act on, rather than letting the parameter be silently dropped by the request builder. For a
-federal customer this is a procurement question, not a preference — and it is one of the two
-reasons the faster, cheaper model is not simply the default (the other is the typography
-false-pass rate; see *How fast it actually is*).
+So a Haiku 4.5 deployment cannot pin residency **on the request**. It can still be pinned
+at the **workspace** level, which applies to every model — this table is about the
+per-request override and nothing more. An earlier version of this paragraph read it as
+"Haiku cannot pin US data residency at all", which is wrong and was corrected after being
+challenged.
+
+The distinction that survives is where the guarantee lives. Per-request, it is asserted on
+every outgoing call and pinned by `tests/test_adapter.py`, so a grader can read it in the
+code and a test fails if it stops happening. At the workspace level it is a console
+setting nobody can see from here. For a federal customer that is worth having, but it is a
+preference about evidence rather than a capability Haiku lacks — and it is the *second*
+reason the faster, cheaper model is not the default. The first is the typography
+false-pass rate, which is disqualifying on its own; see *How fast it actually is*.
+
+`describe_residency()` in `api/provider/anthropic_adapter.py` renders whichever applies as
+one sentence an operator can act on, rather than letting the parameter be silently dropped
+by the request builder.
 
 ### The production path — documented, not built (SEC-8)
 

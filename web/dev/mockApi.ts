@@ -219,6 +219,26 @@ export const mockApi: Connect.NextHandleFunction = (req, res, next) => {
     return;
   }
 
+  if (url === '/prepare' && req.method === 'POST') {
+    // The stand-in has to speak this too. Without it every dev upload silently loses the
+    // head start, which is invisible precisely where it would be looked at.
+    req.on('data', () => undefined);
+    req.on('end', () => {
+      setTimeout(
+        () =>
+          send(res, {
+            prepared: true,
+            token: 'dev-prepared-token',
+            read_ms: 5800,
+            expires_in_s: 600,
+            images: [],
+          }),
+        1800,
+      );
+    });
+    return;
+  }
+
   if (url === '/verify' && req.method === 'POST') {
     // Drain the upload, wait long enough to see the stage narration, then answer.
     req.on('data', () => undefined);

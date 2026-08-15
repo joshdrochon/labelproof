@@ -26,6 +26,7 @@ from __future__ import annotations
 import asyncio
 import functools
 import json
+import time
 from typing import Annotated, Any
 
 from fastapi import APIRouter, File, Form, Request, UploadFile
@@ -33,18 +34,22 @@ from pydantic import ValidationError
 
 from api import errors, timing
 from api import logging as applog
+from api import prepared as prepared_mod
 from api.models import (
     Application,
+    Commodity,
     Recommendation,
     VerificationResult,
 )
 from api.provider.base import (
     ExtractionProvider,
+    ExtractionRequest,
+    ExtractionResponse,
     ImageInput,
     ProviderError,
 )
 from api.routes import get_config, provider_for
-from api.verify import pregate_headline, prepare_images
+from api.verify import AlreadyRead, pregate_headline, prepare_images
 from api.verify import unverified as _unverified
 from api.verify import verify as run_verification
 
@@ -145,12 +150,98 @@ async def _read_uploads(images: list[UploadFile], max_images: int) -> list[tuple
     return out
 
 
+@router.post("/prepare", include_in_schema=False)
+async def prepare_endpoint(
+    request: Request,
+    images: Annotated[list[UploadFile], File()],
+    commodity: Annotated[str, Form()],
+    roles: Annotated[list[str] | None, Form()] = None,
+) -> dict[str, Any]:
+    """Read the label now, so the agent is not waiting for it later (LP-346).
+
+    Extraction takes exactly one field of the application — `commodity`, which selects the
+    rule text in the prompt — so it can run the moment the pictures arrive, while the
+    other six fields are still being typed. `POST /verify` then costs the comparison,
+    which measures 2ms.
+
+    **This does not verify anything and deliberately returns no verdict.** It returns a
+    token, the per-image quality reports, and a retake reason if the pre-gate refused the
+    artwork. A caller that skipped `/verify` would learn nothing about the label's
+    compliance from this response, which is the point: there is no route to an answer that
+    does not go through the comparison.
+
+    Failure here is never fatal. Any error is reported and the client simply submits
+    normally — the reading is an optimisation, and the only thing losing it costs is the
+    head start.
+    """
+    config = get_config(request)
+    uploads = await _read_uploads(images, config.max_images)
+    payloads = [data for _, data in uploads]
+
+    try:
+        chosen = Commodity(commodity.strip().lower())
+    except ValueError:
+        raise errors.UserError(
+            "That is not a kind of product this tool checks. Choose distilled spirits, "
+            "wine, or malt beverage.",
+            next_step="fix_application",
+            code="unknown_commodity",
+        ) from None
+
+    prepared = await asyncio.to_thread(prepare_images, payloads, config, roles=roles)
+    if prepared.pregated:
+        # Say so now rather than at submit. The agent can retake the photograph while they
+        # would otherwise have been typing, which is the same head start pointed at the
+        # other outcome.
+        return {
+            "prepared": False,
+            "reason": pregate_headline(prepared.reason or ""),
+            "images": [report.model_dump() for report in prepared.reports],
+        }
+
+    provider = provider_for(request, [name for name, _ in uploads])
+    started = time.perf_counter()
+    try:
+        response = await asyncio.to_thread(
+            provider.extract,
+            ExtractionRequest(commodity=chosen, images=prepared.usable),
+        )
+    except ProviderError:
+        # Not an error the agent needs to see. They have not asked for anything yet, and
+        # submitting will try again with the same provider and report properly if it is
+        # still down.
+        applog.warn("prepare_unavailable", kind="provider", code="provider_unavailable")
+        return {"prepared": False, "reason": None, "images": []}
+    extract_ms = int((time.perf_counter() - started) * 1000)
+
+    entry = request.app.state.prepared_readings.put(
+        image_digest=prepared_mod.digest(payloads),
+        commodity=chosen,
+        extractions=tuple(response.extractions),
+        reports=tuple(prepared.reports),
+        ingest_ms=prepared.ingest_ms,
+        quality_ms=prepared.quality_ms,
+        extract_ms=extract_ms,
+        unseen=prepared.skipped_reasons if prepared.partial else (),
+        usage=response.usage,
+    )
+    applog.log("prepare_complete", duration_ms=extract_ms, count=len(prepared.usable))
+    return {
+        "prepared": True,
+        "token": entry.token,
+        "read_ms": extract_ms,
+        "expires_in_s": int(prepared_mod.TTL_SECONDS),
+        "images": [report.model_dump() for report in prepared.reports],
+    }
+
+
 @router.post("/verify", response_model=VerificationResult)
 async def verify_endpoint(
     request: Request,
     images: Annotated[list[UploadFile], File()],
     application: Annotated[str, Form()],
     roles: Annotated[list[str] | None, Form()] = None,
+    prepared_token: Annotated[str | None, Form()] = None,
 ) -> VerificationResult:
     """Verify one application against its label artwork."""
     # The one clock that decides what `total` means. Started before a byte is parsed, so
@@ -202,11 +293,34 @@ async def verify_endpoint(
     provider = provider_for(request, [name for name, _ in uploads])
     remaining_ms = timer.remaining_ms(config.request_budget_ms)
 
+    # A reading taken while the agent was still typing (LP-346). Claimed here, AFTER
+    # `prepare_images` has run on the bytes this request actually carried — ingest is the
+    # security boundary and a token may never be a way around it. The store re-checks the
+    # digest and the commodity, so a token can only ever answer for the artwork it was
+    # taken from; anything else falls through to a normal extraction.
+    already_read: AlreadyRead | None = None
+    if prepared_token:
+        claimed = request.app.state.prepared_readings.take(
+            prepared_token, [data for _, data in uploads], parsed.commodity
+        )
+        if claimed is not None:
+            already_read = AlreadyRead(
+                response=ExtractionResponse(
+                    extractions=list(claimed.extractions), usage=claimed.usage
+                ),
+                extract_ms=claimed.extract_ms,
+            )
+        applog.log(
+            "prepared_reading",
+            status="used" if claimed is not None else "declined",
+        )
+
     result = await _verify_within_budget(
         parsed,
         prepared.usable,
         provider,
         remaining_ms=remaining_ms,
+        already_read=already_read,
         # Retake reasons for photographs the pre-gate refused while others were read.
         # While any of them exists, no field may come back Missing — see
         # `api.verify._demote_missing_when_unseen`.
@@ -270,6 +384,7 @@ async def _verify_within_budget(
     *,
     remaining_ms: float,
     unseen: tuple[str, ...] = (),
+    already_read: AlreadyRead | None = None,
 ) -> VerificationResult | None:
     """Run the pipeline off the event loop, bounded by what is left of the budget.
 
@@ -283,7 +398,12 @@ async def _verify_within_budget(
     task = asyncio.create_task(
         asyncio.to_thread(
             functools.partial(
-                run_verification, application, images, provider, unseen=unseen
+                run_verification,
+                application,
+                images,
+                provider,
+                unseen=unseen,
+                already_read=already_read,
             )
         )
     )

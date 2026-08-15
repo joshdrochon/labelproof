@@ -10,8 +10,8 @@ tracker if one is used.
 | **Source brief** | Take-home docx, sha `7f50443d68066298…` |
 | **MVP** | Day 2 EOD — §M tickets |
 | **Final** | Day 7 noon — §F tickets |
-| **Ticket prefix** | `LP-001` … `LP-338` |
-| **State** | **334 of 336 closed.** Derived from `Closes:` trailers by `scripts/sync_board.py` and a post-commit hook — never hand-edited. A close with no commit behind it is a false close. |
+| **Ticket prefix** | `LP-001` … `LP-347` |
+| **State** | **336 of 338 closed.** Derived from `Closes:` trailers by `scripts/sync_board.py` and a post-commit hook — never hand-edited. A close with no commit behind it is a false close. |
 | **What remains** | Audited in [`docs/prd-audit.md`](docs/prd-audit.md). The open items are, in order of count: human testing that needs people, two deploy drills, and measurements that need scale. |
 
 **Scope law (locked):** *"A working core application with clean code is preferred over
@@ -259,6 +259,8 @@ in LP-237, with fixtures across LP-068, 163, 195–198, 216, 226–229.
 - [x] **LP-336** Typed application entries: accept decoration (`45%`, `45% ABV`, `alc. 45% by vol.`, `90 proof`), refuse ambiguity. The browser took the first number, so `45% (Front) / 43% (Back)` was silently filed as 45 (UX-1, MATCH-7, FIELD-3)
 - [x] **LP-337** Style guide as tokens — colour, spacing, type, targets, voice — with a test that fails the build on drift: raw hex outside `:root`, a value off the scale, a font named but never served, jargon in rendered copy (UX-3, UX-6)
 - [x] **LP-338** Glare alone may not refuse an image: `glare_score` counts near-saturated pixels, the generator paints paper at ~245 against BLOWN_LEVEL 250, and real scans clip to 255 — so two of 23 real white labels scored glare 0.000 with blur 1.000 and were refused unread, one of them the only label with no government warning (IMG-5, LP-321)
+- [x] **LP-346** Read the label while the agent is still typing: extraction takes only `commodity` from the application, so it can run the moment the pictures arrive. `POST /prepare` reads and stores the result in memory against a token bound to the artwork and the commodity; `POST /verify` skips the model call and costs the comparison. Measured on a real label: **9,795ms → 176ms** at the button press, same verdict, same cost reported (PERF-1, PERF-7)
+- [x] **LP-347** Every application field shows an `e.g.` example in hint text above the box. Not placeholders: GOV.UK and USWDS both rule those out for examples — they vanish on typing, are not reliably announced, and default to ~2.8:1 contrast (UX-1, UX-6)
 - [x] **LP-335** `verify` logged three Tier-3 counters that were not on the logging allowlist; the logger raised and every low-confidence mismatch on brand/class/producer/origin returned a 500 in production (SEC-4, OPS-5)
 - [x] **LP-334** Batch wiring is check-then-assign and runs in a threadpool: two cold-start requests could each build a store (double `recover()`) and a pool (double the provider ceiling) (BATCH-6)
 - [x] **LP-158** Job survives service restart (state persisted) (BATCH-6)

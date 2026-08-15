@@ -329,8 +329,56 @@ function networkFailure(): ApiFailure {
 export interface VerifySubmission {
   application: Application;
   files: File[];
+  /** A reading already taken for exactly these files. Ignored by the server if it is not. */
+  preparedToken?: string;
   /** Which face each image shows. The server assumes front/back for a pair otherwise. */
   roles?: (string | null)[];
+}
+
+/** A reading the server took while the agent was still typing. */
+export interface PreparedReading {
+  token: string;
+  /** What the reading cost in wall clock, so the result can report the work not the wait. */
+  readMs: number;
+}
+
+/**
+ * Ask the server to read the label now, before the form is finished.
+ *
+ * Extraction takes only the commodity from the application, so it can start the moment
+ * the pictures exist. By the time six fields are typed the reading is usually done and
+ * pressing the button costs the comparison alone.
+ *
+ * Returns null for every unhappy path — no reading, provider down, endpoint missing,
+ * offline. The caller submits normally and loses nothing but the head start, so there is
+ * no error here worth showing to someone who has not asked for anything yet.
+ */
+export async function prepareReading(
+  files: File[],
+  commodity: string,
+  signal?: AbortSignal,
+): Promise<PreparedReading | null> {
+  if (files.length === 0) return null;
+  const form = new FormData();
+  form.append('commodity', commodity);
+  for (const file of files) {
+    const blob = await shrinkForUpload(file);
+    const name =
+      blob === (file as Blob) ? file.name : file.name.replace(/\.[^.]+$/, '') + '.webp';
+    form.append('images', blob, name);
+  }
+  try {
+    const response = await fetch('/prepare', { method: 'POST', body: form, signal });
+    if (!response.ok) return null;
+    const body = asRecord(await response.json());
+    if (!body || body['prepared'] !== true || typeof body['token'] !== 'string') return null;
+    return {
+      token: body['token'],
+      readMs: typeof body['read_ms'] === 'number' ? body['read_ms'] : 0,
+    };
+  } catch {
+    return null;
+  }
 }
 
 export async function verify(
@@ -339,6 +387,7 @@ export async function verify(
 ): Promise<VerificationResult> {
   const form = new FormData();
   form.append('application', JSON.stringify(submission.application));
+  if (submission.preparedToken) form.append('prepared_token', submission.preparedToken);
   for (const file of submission.files) {
     const blob = await shrinkForUpload(file);
     const name =

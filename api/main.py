@@ -36,6 +36,7 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 from api import errors
 from api import logging as applog
 from api.config import Config, load
+from api.prepared import PreparedReadings
 from api.provider.base import ExtractionProvider, ProviderError
 from api.routes import batch, health, sample, verify
 from api.security import harden
@@ -86,6 +87,10 @@ def create_app(
     )
     app.state.config = resolved
     app.state.provider = provider
+    # Readings taken while the agent was still typing (LP-346). In memory, bounded,
+    # expiring, and gone when the process is — see api/prepared.py for what that costs
+    # the retention posture and why it is still true that nothing is written to disk.
+    app.state.prepared_readings = PreparedReadings()
 
     applog.configure(level=getattr(logging, resolved.log_level.upper(), logging.INFO))
     for _ in resolved.warnings:

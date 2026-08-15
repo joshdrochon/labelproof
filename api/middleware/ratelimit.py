@@ -124,7 +124,10 @@ def lane_for(method: str, path: str, lanes: tuple[Lane, ...]) -> Lane:
     by_name = {lane.name: lane for lane in lanes}
     if path in ("/health", "/ready"):
         return by_name["exempt"]
-    if path == "/verify":
+    # `/prepare` reads the label with the same model call `/verify` makes, so it draws on
+    # the same budget. Giving it the `default` lane would be a cheaper way to spend the
+    # identical money, reached by calling the other endpoint.
+    if path in ("/verify", "/prepare"):
         return by_name["verify"]
     if path == "/batch":
         return by_name["batch_submit" if method == "POST" else "batch_read"]

@@ -832,27 +832,50 @@ def test_the_simulated_progress_timer_never_becomes_the_result() -> None:
     source = _web_source("routes/VerifyNow.tsx")
     assert "elapsedMs={waited}" not in source
     assert "elapsedMs={stage}" not in source
-    assert "elapsedMs={elapsedMs}" in source
 
 
-def test_the_screen_does_not_render_the_servers_smaller_number() -> None:
-    """Deliberate. The server's total excludes upload and network, so showing it would
-    under-report — the flattering direction, and the one PERF-2 forbids."""
+def test_the_card_reports_the_work_rather_than_the_wait() -> None:
+    """This rule INVERTED when the label started being read during typing, and the reason
+    is worth keeping.
+
+    It used to be: never show the server's total, because it excludes upload and network
+    and is therefore always smaller than the time that actually passed. The client
+    stopwatch was the honest number precisely because it was the bigger one.
+
+    Reading ahead broke that reasoning. The client stopwatch now measures the gap between
+    pressing a button and seeing an answer — 176ms in the measured case — while the label
+    took nearly six seconds to read a minute earlier. The bigger number became the
+    truthful one and it is the server's.
+
+    So the card shows `timings_ms.total`, and the client stopwatch is recorded but not
+    displayed. What has not changed is the rule underneath both: report the WORK, never
+    whichever number happens to flatter."""
     source = _web_source("routes/VerifyNow.tsx")
-    for flattering in (
-        "elapsedMs={result.timings_ms.total}",
-        "elapsedMs={checked.result.timings_ms.total}",
-    ):
-        assert flattering not in source, (
-            "The result card must not display the server's own total. It is always "
-            "smaller than the time that actually passed (PERF-2, PRD §232)."
-        )
+    assert "result.timings_ms.total" in source, (
+        "The result card must report the server's measured work. The client stopwatch "
+        "now times the wait after a button press, not the verification."
+    )
+    assert "elapsedMs={elapsedMs}" not in source, (
+        "The client stopwatch must not be the headline: with the label read during "
+        "typing it under-reports a six-second check as a fifth of a second."
+    )
 
 
-def test_the_banner_renders_the_elapsed_value_it_is_given() -> None:
-    source = _web_source("components/AggregateBanner.tsx")
-    assert "formatElapsed(elapsedMs)" in source
-    assert 'data-testid="elapsed"' in source
+def test_the_timing_is_on_the_card_but_not_in_the_verdict() -> None:
+    """OPS-1 asks for elapsed time on every result card and it is there — beside the check
+    reference, with the rest of the provenance.
+
+    Not beside the recommendation, which is the one thing on that screen anyone came for.
+    Once the label is read while the form is being filled, the number describes nothing
+    the agent waited for, and a verdict is not the place for a statistic nobody acts on.
+    """
+    banner = _web_source("components/AggregateBanner.tsx")
+    assert 'data-testid="elapsed"' not in banner, (
+        "the timing is back beside the recommendation"
+    )
+
+    screen = _web_source("routes/VerifyNow.tsx")
+    assert 'data-testid="elapsed"' in screen, "OPS-1 wants elapsed time on the result card"
 
 
 def test_the_server_total_still_reaches_the_client_for_the_breakdown() -> None:

@@ -183,6 +183,11 @@ interface TextFieldProps {
   label: string;
   value: string;
   hint?: string;
+  //: An example of the value, shown inside the empty field and prefixed "e.g." so it
+  //: reads as an example rather than as something already filled in. Never the label, and
+  //: never an instruction — a placeholder vanishes the moment someone types, so anything
+  //: needed WHILE typing belongs in `hint`, which does not move.
+  placeholder?: string;
   problem?: string;
   disabled?: boolean;
   wide?: boolean;
@@ -194,6 +199,7 @@ function TextField({
   label,
   value,
   hint,
+  placeholder,
   problem,
   disabled,
   wide,
@@ -220,6 +226,7 @@ function TextField({
         name={id}
         type="text"
         value={value}
+        placeholder={placeholder}
         disabled={disabled}
         autoComplete="off"
         spellCheck={false}
@@ -281,6 +288,7 @@ export default function ApplicationForm({
       <TextField
         id="brand_name"
         label="Brand name"
+        placeholder="e.g. Old Tom Distillery"
         value={draft.brand_name}
         problem={problems.brand_name}
         onChange={(value) => set('brand_name', value)}
@@ -289,7 +297,7 @@ export default function ApplicationForm({
       <TextField
         id="class_type"
         label="Class / type"
-        hint="For example: Kentucky Straight Bourbon Whiskey"
+        placeholder="e.g. Kentucky Straight Bourbon Whiskey"
         value={draft.class_type}
         problem={problems.class_type}
         wide
@@ -299,7 +307,8 @@ export default function ApplicationForm({
       <TextField
         id="alcohol_content"
         label="Alcohol content"
-        hint="Percent by volume. Leave empty if the application does not state it."
+        hint="Leave empty if the application does not state it."
+        placeholder="e.g. 45"
         value={draft.alcohol_content}
         problem={problems.alcohol_content}
         onChange={(value) => set('alcohol_content', value)}
@@ -308,7 +317,7 @@ export default function ApplicationForm({
       <TextField
         id="net_contents"
         label="Net contents"
-        hint="For example: 750 mL"
+        placeholder="e.g. 750 mL"
         value={draft.net_contents}
         problem={problems.net_contents}
         onChange={(value) => set('net_contents', value)}
@@ -317,6 +326,7 @@ export default function ApplicationForm({
       <TextField
         id="producer_name"
         label="Producer or bottler"
+        placeholder="e.g. Old Tom Distillery"
         value={draft.producer_name}
         problem={problems.producer_name}
         onChange={(value) => set('producer_name', value)}
@@ -325,6 +335,7 @@ export default function ApplicationForm({
       <TextField
         id="producer_address"
         label="Producer city and state"
+        placeholder="e.g. Bardstown, Kentucky"
         value={draft.producer_address}
         problem={problems.producer_address}
         onChange={(value) => set('producer_address', value)}

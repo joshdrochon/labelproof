@@ -28,19 +28,16 @@ interface AggregateBannerProps {
   aggregate: Aggregate;
   fields: FieldResult[];
   /** Wall-clock from submit to answer, measured in the browser. */
-  elapsedMs: number;
   onJumpToField?: (field: FieldName) => void;
 }
 
 export default function AggregateBanner({
   aggregate,
   fields,
-  elapsedMs,
   onJumpToField,
 }: AggregateBannerProps) {
   const meta = RECOMMENDATIONS[aggregate.recommendation];
   const attention = attentionFields(fields);
-  const elapsed = formatElapsed(elapsedMs);
 
   return (
     <section
@@ -95,11 +92,6 @@ export default function AggregateBanner({
         )}
       </div>
 
-      {elapsed ? (
-        <p className="banner__elapsed" data-testid="elapsed">
-          Checked {elapsed}
-        </p>
-      ) : null}
     </section>
   );
 }

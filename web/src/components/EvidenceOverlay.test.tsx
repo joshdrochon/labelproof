@@ -127,3 +127,30 @@ describe('evidence overlay', () => {
     expect(screen.getByText(/can sit a little off/i)).toBeInTheDocument();
   });
 });
+
+
+describe('tags stay inside the picture', () => {
+  const region = (field: string, x0: number, y0: number) => ({
+    field,
+    label: field,
+    number: 1,
+    needsAttention: false,
+    bbox: { x0, y0, x1: x0 + 0.1, y1: y0 + 0.1 },
+  });
+
+  it('keeps every marker inside the picture', () => {
+    // The names are in the legend below now, so what sits on the image is a numbered
+    // circle. It cannot run off the edge the way a labelled tag did — but it still has
+    // to be placed within bounds.
+    const placed = placeTags([
+      region('government_warning', 0.98, 0.97) as never,
+      region('brand_name', 0.0, 0.0) as never,
+    ]);
+    for (const tag of placed) {
+      expect(tag.left).toBeGreaterThanOrEqual(0);
+      expect(tag.left).toBeLessThanOrEqual(100);
+      expect(tag.top).toBeGreaterThanOrEqual(0);
+      expect(tag.top).toBeLessThanOrEqual(96);
+    }
+  });
+});

@@ -199,7 +199,12 @@ def test_numbers_are_set_in_a_face_whose_figures_share_a_baseline() -> None:
     because it is. Anything showing a number uses the text face and lining figures.
     """
     body = _stylesheet()
-    for selector in (".step__number", ".evidence__tag-number", ".row__number"):
+    for selector in (
+        ".step__number",
+        ".evidence__marker",
+        ".evidence__legend-number",
+        ".row__number",
+    ):
         block = re.search(rf"\{re.escape(selector)}\s*\{{([^}}]*)\}}", body)
         if block is None:
             continue
