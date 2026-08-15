@@ -25,7 +25,7 @@ import type {
 import { ApiFailure, listSamples, loadSample, prepareReading, verify } from '../api';
 import type { PreparedReading, SampleCase } from '../api';
 import { NEXT_STEP_LABELS, STAGES } from '../copy';
-import { evidenceRegions } from '../evidence';
+import { evidenceRegions, regionFor } from '../evidence';
 import { attentionFields, settledFields } from '../triage';
 import AggregateBanner from '../components/AggregateBanner';
 import ApplicationForm, {
@@ -48,8 +48,13 @@ interface Checked {
    *  reports the server's total, which describes the work rather than the wait. */
   elapsedMs: number;
   imageUrls: string[];
-  /** True when the outlines are drawn over the upload rather than a server-side copy. */
-  approximateGeometry: boolean;
+  /**
+   * Per picture: true where the outlines are drawn over the upload rather than a
+   * server-side copy. Not one flag for the whole result — a server that names the front
+   * and not the back would otherwise have both declared exact, and the back's outlines
+   * would sit on the un-deskewed original with nothing said.
+   */
+  approximateByIndex: boolean[];
 }
 
 export default function VerifyNow() {
@@ -128,7 +133,7 @@ export default function VerifyNow() {
         application,
         elapsedMs: Date.now() - startedRef.current,
         imageUrls: urls,
-        approximateGeometry: !hasServerUrls,
+        approximateByIndex: urls.map((_, i) => !serverUrls[i]),
       });
       setExpanded(new Set(attentionFields(result.fields).map((row) => row.field)));
       setDecisions({});
@@ -558,7 +563,7 @@ function ChecklistScreen({
   setImageIndex,
   onStartOver,
 }: ChecklistScreenProps) {
-  const { result, application, imageUrls, approximateGeometry } = checked;
+  const { result, application, imageUrls, approximateByIndex } = checked;
   const attention = useMemo(() => attentionFields(result.fields), [result.fields]);
   const settled = useMemo(() => settledFields(result.fields), [result.fields]);
 
@@ -581,15 +586,31 @@ function ChecklistScreen({
     [expanded, setExpanded],
   );
 
+  /**
+   * Highlight a row's region, switching pictures when it lives on the other one.
+   *
+   * `FieldRow` prints "Outlined as 2 on the picture" for any row with a bbox, but the
+   * overlay only draws regions belonging to the picture on screen — so on a front/back
+   * pair that sentence could name an outline the agent was looking straight past.
+   */
+  const activate = useCallback(
+    (field: FieldName | null) => {
+      setActiveField(field);
+      const region = regionFor(regions, field);
+      if (region) setImageIndex(region.imageIndex);
+    },
+    [regions, setActiveField, setImageIndex],
+  );
+
   const jumpToField = useCallback(
     (field: FieldName) => {
       if (!expanded.has(field)) toggle(field);
-      setActiveField(field);
+      activate(field);
       const row = document.getElementById(`row-${field}`);
       row?.scrollIntoView({ block: 'center', behavior: 'smooth' });
       row?.querySelector<HTMLElement>('.row__toggle')?.focus();
     },
-    [expanded, setActiveField, toggle],
+    [expanded, activate, toggle],
   );
 
   // Keyboard shortcuts for the power user (UX-4, LP-111). Never while typing.
@@ -698,8 +719,8 @@ function ChecklistScreen({
             }
             regions={regions}
             activeField={activeField}
-            onActivateField={setActiveField}
-            geometryIsApproximate={approximateGeometry}
+            onActivateField={activate}
+            geometryIsApproximate={approximateByIndex[imageIndex] ?? true}
             qualityNote={qualityNote}
           >
             {imageUrls.length > 1 ? (
@@ -757,7 +778,7 @@ function ChecklistScreen({
                     number={numberFor(row.field)}
                     expanded={expanded.has(row.field)}
                     onToggle={() => toggle(row.field)}
-                    onActivate={(on) => setActiveField(on ? row.field : null)}
+                    onActivate={(on) => activate(on ? row.field : null)}
                     decision={decisions[row.field] ?? null}
                     onDecide={(value) =>
                       setDecisions({ ...decisions, [row.field]: value ?? undefined })
@@ -791,7 +812,7 @@ function ChecklistScreen({
                     number={null}
                     expanded={expanded.has(row.field)}
                     onToggle={() => toggle(row.field)}
-                    onActivate={(on) => setActiveField(on ? row.field : null)}
+                    onActivate={(on) => activate(on ? row.field : null)}
                     decision={decisions[row.field] ?? null}
                     onDecide={(value) =>
                       setDecisions({ ...decisions, [row.field]: value ?? undefined })
