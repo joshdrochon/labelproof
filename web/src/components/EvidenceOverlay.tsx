@@ -53,8 +53,6 @@ interface PlacedTag {
   region: EvidenceRegion;
   left: number;
   top: number;
-  /** True when the tag is anchored by its right edge, to keep it inside the picture. */
-  flipped: boolean;
 }
 
 const TAG_MIN_GAP = 7.5; // percent of image height
@@ -68,11 +66,6 @@ const TAG_MIN_GAP = 7.5; // percent of image height
 //: actually occupies on the narrowest panel this renders in.
 const TAG_X_PROXIMITY = 45; // percent of image width
 
-//: Past this, a tag is anchored by its RIGHT edge and grows leftward into the picture.
-//: Left-anchored tags near the right edge ran off the image entirely and over the
-//: checklist beside it: `left` positions the start of the tag, and nothing was accounting
-//: for how long the tag is.
-const TAG_FLIP_AT = 55; // percent of image width
 
 /**
  * Push overlapping tags apart, top to bottom. Deterministic: same input, same layout,
@@ -107,12 +100,7 @@ export function placeTags(regions: EvidenceRegion[]): PlacedTag[] {
         }
       }
     }
-    placed.push({
-      region: tag.region,
-      left: tag.left,
-      top: clamp(top, 0, 96),
-      flipped: tag.left > TAG_FLIP_AT,
-    });
+    placed.push({ region: tag.region, left: tag.left, top: clamp(top, 0, 96) });
   }
   return placed;
 }
@@ -165,7 +153,7 @@ export default function EvidenceOverlay({
         )}
 
         {imageUrl
-          ? tags.map(({ region, left, top, flipped }) => {
+          ? tags.map(({ region, left, top }) => {
               const active = region.field === activeField;
               const width = (region.bbox.x1 - region.bbox.x0) * 100;
               const height = (region.bbox.y1 - region.bbox.y0) * 100;
@@ -183,29 +171,58 @@ export default function EvidenceOverlay({
                       height: `${Math.max(height, 1.5)}%`,
                     }}
                   />
+                  {/* The marker on the picture is the NUMBER alone. Its name is in the
+                      legend below, where a long label has room and cannot land on top of
+                      its neighbour. Labels were drawn here, spread apart by a gap
+                      measured as a percentage of image height — which on a landscape
+                      label is about thirteen pixels against a tag nearly thirty tall, so
+                      four of them piled up in one corner and the topmost was clipped off
+                      the panel entirely. */}
                   <button
                     type="button"
-                    className="evidence__tag"
+                    className="evidence__marker"
                     data-active={active ? 'true' : 'false'}
                     data-attention={region.needsAttention ? 'true' : 'false'}
-                    data-flipped={flipped ? 'true' : 'false'}
                     style={{ left: `${left}%`, top: `${top}%` }}
+                    aria-label={region.label}
                     onMouseEnter={() => onActivateField?.(region.field)}
                     onMouseLeave={() => onActivateField?.(null)}
                     onFocus={() => onActivateField?.(region.field)}
                     onBlur={() => onActivateField?.(null)}
                     onClick={() => onActivateField?.(region.field)}
                   >
-                    {region.number !== null ? (
-                      <span className="evidence__tag-number">{region.number}</span>
-                    ) : null}
-                    <span className="evidence__tag-label">{region.label}</span>
+                    {region.number ?? '•'}
                   </button>
                 </div>
               );
             })
           : null}
       </div>
+
+      {/* The names, stacked, with room to be read. Each one is the same control as its
+          marker: hovering or focusing either highlights the region on the picture. */}
+      {imageUrl && tags.length > 0 ? (
+        <ul className="evidence__legend">
+          {tags.map(({ region }) => (
+            <li key={region.field}>
+              <button
+                type="button"
+                className="evidence__legend-item"
+                data-active={region.field === activeField ? 'true' : 'false'}
+                data-attention={region.needsAttention ? 'true' : 'false'}
+                onMouseEnter={() => onActivateField?.(region.field)}
+                onMouseLeave={() => onActivateField?.(null)}
+                onFocus={() => onActivateField?.(region.field)}
+                onBlur={() => onActivateField?.(null)}
+                onClick={() => onActivateField?.(region.field)}
+              >
+                <span className="evidence__legend-number">{region.number ?? '•'}</span>
+                <span>{region.label}</span>
+              </button>
+            </li>
+          ))}
+        </ul>
+      ) : null}
 
       {qualityNote ? <p className="evidence__note">{qualityNote}</p> : null}
       {geometryIsApproximate && visible.length > 0 ? (

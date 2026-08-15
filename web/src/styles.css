@@ -1040,6 +1040,100 @@ kbd {
   text-align: center;
 }
 
+/* The marker on the picture: a number, nothing more.
+   Labels used to be drawn here and spread apart by a gap measured as a percentage of
+   IMAGE HEIGHT — about thirteen pixels on a landscape label, against a tag nearly thirty
+   tall. Four of them piled into one corner and the top one clipped off the panel. A
+   circle cannot overlap its neighbour the way a sentence can, and the names moved to the
+   legend below where they have room. */
+.evidence__marker {
+  position: absolute;
+  transform: translate(-50%, -50%);
+  display: grid;
+  place-items: center;
+  width: 1.5rem;
+  height: 1.5rem;
+  padding: 0;
+  border: 2px solid var(--surface);
+  border-radius: 50%;
+  background: var(--navy);
+  color: var(--on-navy);
+  font: inherit;
+  font-size: 1rem;
+  font-weight: 700;
+  line-height: 1;
+  cursor: pointer;
+}
+
+/* The drawn circle is 24px because a bigger one would cover the text it points at. The
+   TARGET is 44px: this carries the hit area without growing the mark, which is what a
+   finger actually lands on (UX-3). */
+.evidence__marker::after {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: 2.75rem;
+  height: 2.75rem;
+}
+
+.evidence__marker[data-attention='true'] {
+  background: var(--serious);
+}
+
+.evidence__marker[data-active='true'] {
+  outline: 3px solid var(--focus);
+  outline-offset: 2px;
+}
+
+/* The names, stacked, each one the same control as its marker. */
+.evidence__legend {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  margin-top: 0.75rem;
+  list-style: none;
+}
+
+.evidence__legend-item {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  width: 100%;
+  min-height: 2.75rem;
+  padding: 0.25rem 0.5rem;
+  border: 0;
+  border-radius: var(--radius);
+  background: none;
+  font: inherit;
+  font-size: 1rem;
+  color: var(--ink);
+  text-align: left;
+  cursor: pointer;
+}
+
+.evidence__legend-item:hover,
+.evidence__legend-item[data-active='true'] {
+  background: var(--surface-selected);
+}
+
+.evidence__legend-number {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 1.5rem;
+  height: 1.5rem;
+  border-radius: 50%;
+  background: var(--navy);
+  color: var(--on-navy);
+  font-weight: 700;
+}
+
+.evidence__legend-item[data-attention='true'] .evidence__legend-number {
+  background: var(--serious);
+}
+
 .evidence__box {
   position: absolute;
   border: 2px dashed var(--slate);
@@ -1060,75 +1154,12 @@ kbd {
     0 0 0 5px var(--navy);
 }
 
-.evidence__tag {
-  position: absolute;
-  transform: translate(-0.35rem, -2.1rem);
-  max-width: 100%;
-  display: inline-flex;
-  align-items: center;
-  gap: 0.25rem;
-  font: inherit;
-  font-size: 1rem;
-  font-weight: 600;
-  line-height: 1.1;
-  padding: 0.25rem 0.5rem;
-  background: var(--surface);
-  color: var(--ink);
-  border: 2px solid var(--slate);
-  border-radius: var(--radius);
-  cursor: pointer;
-  max-width: 12rem;
-}
-
 /* UX-3 asks for 44px of TARGET, and a 44px-tall chip floating over a photograph covers
    the very thing it is pointing at. So the drawn box stays the size of its words and an
    invisible pseudo-element carries the rest of the hit area, centred on the chip. It is
    absolutely positioned, so it costs no layout and moves with the tag. */
 /* Anchored by its right edge, so a tag marking something at the far side of the label
    grows back into the picture instead of off it and over the checklist. */
-.evidence__tag[data-flipped='true'] {
-  transform: translate(calc(-100% + 0.35rem), -2.1rem);
-}
-
-.evidence__tag::after {
-  content: '';
-  position: absolute;
-  top: 50%;
-  left: 50%;
-  transform: translate(-50%, -50%);
-  width: 100%;
-  min-width: 2.75rem;
-  height: 2.75rem;
-}
-
-.evidence__tag[data-attention='true'] {
-  border-color: var(--serious);
-}
-
-.evidence__tag[data-active='true'] {
-  background: var(--navy);
-  border-color: var(--navy);
-  color: var(--on-dark);
-}
-
-.evidence__tag-number {
-  display: inline-grid;
-  place-items: center;
-  width: 1.6rem;
-  height: 1.6rem;
-  border-radius: 50%;
-  background: var(--serious);
-  color: var(--on-dark);
-  font-size: 1rem;
-  flex: none;
-}
-
-.evidence__tag-label {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
 .evidence__note {
   margin-top: 0.75rem;
   font-size: 1rem;
@@ -2429,18 +2460,7 @@ kbd {
     box-shadow: none;
   }
 
-  .evidence__tag,
-  .evidence__tag-number {
-    background: #fff;
-    color: #000;
-    border-color: #000;
-  }
-
-  .evidence__tag-number {
-    border: 1.5pt solid #000;
-  }
-
-  .checked__checklist {
+      .checked__checklist {
     clear: both;
     padding-top: 0.5rem;
   }

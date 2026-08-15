@@ -138,27 +138,19 @@ describe('tags stay inside the picture', () => {
     bbox: { x0, y0, x1: x0 + 0.1, y1: y0 + 0.1 },
   });
 
-  it('anchors a tag near the right edge by its right side', () => {
-    // `left` positions the START of a tag, and a tag is as wide as its words. Left-anchored
-    // at the far edge, "Government warning" ran off the image and over the checklist.
-    const [tag] = placeTags([region('government_warning', 0.78, 0.05) as never]);
-    expect(tag.flipped).toBe(true);
-  });
-
-  it('leaves a tag on the left side anchored normally', () => {
-    const [tag] = placeTags([region('brand_name', 0.1, 0.05) as never]);
-    expect(tag.flipped).toBe(false);
-  });
-
-  it('separates two wide tags that sit 18% apart on the same line', () => {
-    // The real case: a landscape label with the warning up the right edge and the
-    // producer beside it. 18% apart is outside the old 16% window, so nothing moved them,
-    // and they overlapped on screen because neither tag is 16% of anything.
+  it('keeps every marker inside the picture', () => {
+    // The names are in the legend below now, so what sits on the image is a numbered
+    // circle. It cannot run off the edge the way a labelled tag did — but it still has
+    // to be placed within bounds.
     const placed = placeTags([
-      region('government_warning', 0.78, 0.05) as never,
-      region('producer', 0.6, 0.05) as never,
+      region('government_warning', 0.98, 0.97) as never,
+      region('brand_name', 0.0, 0.0) as never,
     ]);
-    const [a, b] = placed;
-    expect(Math.abs(a.top - b.top)).toBeGreaterThanOrEqual(7.5);
+    for (const tag of placed) {
+      expect(tag.left).toBeGreaterThanOrEqual(0);
+      expect(tag.left).toBeLessThanOrEqual(100);
+      expect(tag.top).toBeGreaterThanOrEqual(0);
+      expect(tag.top).toBeLessThanOrEqual(96);
+    }
   });
 });
