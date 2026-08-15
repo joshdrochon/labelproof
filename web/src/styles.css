@@ -1997,6 +1997,17 @@ kbd {
   background: var(--surface);
 }
 
+/* Visible, not `visually-hidden`. It explains why the leading numbers are out of order,
+   and that question is asked by everyone looking at the table, not only by the people
+   using a screen reader. Measure-limited like the notices above it, because it is a
+   sentence rather than a row. */
+.triage__caption {
+  text-align: left;
+  max-width: 72ex;
+  color: var(--ink-soft);
+  margin-bottom: 0.5rem;
+}
+
 .triage th,
 .triage td {
   text-align: left;

@@ -712,14 +712,25 @@ class _SampleRow:
 
 _ROBUSTNESS = Path(__file__).resolve().parents[2] / "fixtures" / "robustness"
 
-#: The sample batch: five rows that queue, covering the outcomes a reviewer needs to see,
-#: and a sixth that does not.
+#: The sample batch: six rows that queue, covering the outcomes a reviewer needs to see,
+#: and a seventh that does not.
 #:
 #: Every expected outcome below is the fixture's own committed one — the golden set for the
-#: first four, `fixtures/robustness/manifest.json` for the fifth, which declares
+#: first five, `fixtures/robustness/manifest.json` for the sixth, which declares
 #: `tc14_blur_hopeless` "pregated". Nothing here is a guess about what the pipeline will
 #: say, because a demo that promises an outcome and produces another teaches a reviewer to
 #: distrust the ones that are right.
+#:
+#: **One product per row, as far as the committed fixtures allow.** This was five rows of
+#: OLD TOM DISTILLERY: five identical brand names down the Brand column with five different
+#: recommendations beside them, which reads as one application checked five times and
+#: disagreed with itself. Brand is the only column a reviewer can use to tell one
+#: row from another at a glance, so the defects are spread across the distinct products the
+#: set actually ships — and across commodities, since a sample of nothing but spirits shows
+#: none of the rules that turn on what is in the bottle. Old Tom still appears three times:
+#: the only two-image fixture in the set is his, the only label with no warning at all is
+#: his, and the blurred photograph IS his label. That is what the set ships, not a choice
+#: available here — and four brands across six rows is the point being made anyway.
 #:
 #: Ordered so the first row is a pass, like `sample.CASES` and for the same reason. It does
 #: not survive into the table — that is sorted worst-first, which is the batch view's whole
@@ -727,14 +738,24 @@ _ROBUSTNESS = Path(__file__).resolve().parents[2] / "fixtures" / "robustness"
 #: it.
 _SAMPLE_ROWS: Final[tuple[_SampleRow, ...]] = (
     # A label that checks out, photographed front and back — so the sample also exercises
-    # the two-image case the evidence view has to handle.
+    # the two-image case the evidence view has to handle. Spirits, OLD TOM DISTILLERY.
     _SampleRow("tc16_front_back"),
-    # The label says 40% where the application says 45%.
-    _SampleRow("tc08_abv_mismatch"),
-    # No government warning anywhere. The most serious thing a label can be missing.
+    # No government warning anywhere. The most serious thing a label can be missing, and
+    # the row the worst-first ordering has to put at the top. Spirits, OLD TOM DISTILLERY.
     _SampleRow("tc07_missing_warning"),
-    # "Government Warning:" in title case rather than capitals — Jenny's catch (TC-03).
-    _SampleRow("tc03_title_case_warning"),
+    # A wine above 14% with no alcohol content on the label. Carried by a WINE row on
+    # purpose: the same silence is Not applicable on a table wine and Missing here, so this
+    # is the row that shows the tool reading the commodity rather than one rule for
+    # everything. STONEHILL VINEYARD.
+    _SampleRow("tc26_wine_above_fourteen_needs_abv"),
+    # An import whose label never says where it came from. MAISON CLAIRE — a third brand,
+    # and the only row in the sample where `is_import` is true.
+    _SampleRow("tc19_import_missing_origin"),
+    # The judgment tier, which the sample showed nothing of at all: the label's brand is not
+    # character-for-character the application's, and it obviously means the same thing. An
+    # agent who never sees Acceptable variation in the demo does not learn that this tool
+    # asks rather than decides. Stone's Throw.
+    _SampleRow("tc02_stones_throw"),
     # A photograph too blurred to read, refused before a token is spent. The application is
     # Old Tom's because this photograph IS Old Tom's label: `fixtures/robustness/
     # manifest.json` declares `base: tc01_old_tom_clean` and blurs it past recovery, which
@@ -743,9 +764,9 @@ _SAMPLE_ROWS: Final[tuple[_SampleRow, ...]] = (
     _SampleRow("tc01_old_tom_clean", artwork=(_ROBUSTNESS / "tc14_blur_hopeless.png",)),
 )
 
-#: The sixth row, and the reason it is here. Row-level validation is the part of batch mode
-#: that is hardest to believe without seeing it — 300 applications where three rows have a
-#: typo must queue 297, not refuse the file — and a reviewer cannot see it unless the
+#: The seventh row, and the reason it is here. Row-level validation is the part of batch
+#: mode that is hardest to believe without seeing it — 300 applications where three rows
+#: have a typo must queue 297, not refuse the file — and a reviewer cannot see it unless the
 #: manifest they were handed already contains one. A misspelled commodity is the typo a
 #: spreadsheet actually produces, and it names one row and one column.
 _MALFORMED_COMMODITY: Final[str] = "whisky"
@@ -802,8 +823,8 @@ def _sample_record(spec: _SampleRow, files: Sequence[Path]) -> dict[str, str]:
 #: The per-client lane in `api/middleware/ratelimit.py` cannot bound the bill: it is keyed
 #: on the client, and a caller with more addresses simply gets more budget. This is the
 #: number that says what a day of being pointed at costs — twenty clicks an hour is a
-#: hundred verifications an hour, which is a demo server, and anything above it is not a
-#: person looking at the product.
+#: hundred and twenty verifications an hour, which is a demo server, and anything above it
+#: is not a person looking at the product.
 SAMPLE_BATCHES_PER_HOUR = 20
 _SAMPLE_WINDOW_SECONDS = 3600.0
 
@@ -864,8 +885,10 @@ async def create_sample_batch(request: Request) -> BatchAccepted:
     Neither one is told what the answer should be, which is the property that makes a demo
     worth watching.
 
-    Six rows, five of which queue. The sixth is deliberately malformed so `row_errors` comes
-    back non-empty: a batch that refuses 300 applications over one typo is the failure TC-20
+    Seven rows, six of which queue — four brands across two commodities, so the Brand
+    column tells one row from the next and the wine row shows a rule that turns on what is
+    in the bottle. The seventh is deliberately malformed so `row_errors` comes back
+    non-empty: a batch that refuses 300 applications over one typo is the failure TC-20
     describes, and "297 queued, row 5 needs a fix" is not believable until it is seen.
 
     **This is the only endpoint in the product that spends money on an empty body.** Every
@@ -874,7 +897,7 @@ async def create_sample_batch(request: Request) -> BatchAccepted:
     two limits rather than one: its own rate-limit lane at two a minute per client, and the
     hourly ceiling below across every caller — because a per-client limit is not a bill
     limit when the caller has more than one address. Without them, ten submissions a minute
-    times five verifications is roughly $150 an hour on a public URL with no authentication.
+    times six verifications is roughly $180 an hour on a public URL with no authentication.
 
     The refusal has to read as a full server, not a broken feature. A reviewer who meets it
     should be told the tool works and how to see it working anyway.

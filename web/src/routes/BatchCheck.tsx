@@ -33,7 +33,7 @@ import {
   retryBatch,
 } from '../api';
 import type { BatchAccepted } from '../types';
-import { RECOMMENDATIONS, VERDICTS } from '../copy';
+import { RECOMMENDATIONS, VERDICTS, fieldLabel } from '../copy';
 import { VerdictGlyph } from '../components/VerdictCard';
 import type {
   AgentDecision,
@@ -356,15 +356,15 @@ function BatchUpload({
               out of the way. It runs the real queue on a real manifest; the only thing it
               saves the reviewer is assembling one. */}
           <div className="batch__sample">
-            {/* Says five, because five get checked. The manifest has six rows and one of
-                them is deliberately broken — calling that "six applications checked" is a
+            {/* Says six, because six get checked. The manifest has seven rows and one of
+                them is deliberately broken — calling that "seven applications checked" is a
                 small lie on the one screen whose entire argument is that it never claims
                 more than it knows, and the reviewer meets the contradiction about four
                 seconds later when the row-errors notice appears. */}
             <p className="batch__sample-note">
-              Or try a sample batch. Five applications with their labels, checked right
-              away, plus one deliberately broken row so you can see how that is reported —
-              nothing to upload.
+              Or try a sample batch. Six applications with their labels — different
+              products, spirits and wine — checked right away, plus one deliberately broken
+              row so you can see how that is reported. Nothing to upload.
             </p>
             <button
               type="button"
@@ -528,9 +528,16 @@ function BatchResults({
         </section>
       ) : null}
 
+      {/* Every number here has to differ from the one beside it or it is not a number, it
+          is noise. "Applications 6 / Checked 6" was two readings of one fact on every batch
+          that finished cleanly — which is most of them — and a reviewer who learns that one
+          pair means nothing reads the next pair less carefully. So Checked appears only
+          while it disagrees with the total: mid-run, and on a finished job that lost rows
+          to failures, where "6 applications, 5 checked, 1 could not be checked" is three
+          facts. */}
       <dl className="batch__counts">
         <Count label="Applications" value={counts.total} />
-        <Count label="Checked" value={counts.done} />
+        {counts.done !== counts.total ? <Count label="Checked" value={counts.done} /> : null}
         {counts.failed > 0 ? <Count label="Could not check" value={counts.failed} tone="serious" /> : null}
         {!done ? <Count label="Waiting" value={counts.queued + counts.processing} /> : null}
         {done && status.cost.usd > 0 ? (
@@ -644,16 +651,24 @@ function RowErrors({ status, isSample }: { status: BatchStatus; isSample: boolea
       {/* The sample's bad row is deliberate — it is there to show what a bad row looks
           like before a reviewer meets one in their own file. Telling them to "fix these
           rows" would be blaming them for a mistake we planted, and the first thing they
-          would do is go looking for a spreadsheet they never uploaded. */}
+          would do is go looking for a spreadsheet they never uploaded.
+
+          Both sentences end by saying these rows are not in the table. This notice names a
+          manifest row, the table below is a list of manifest rows, and the one named here
+          is the one missing from it — so without the sentence the notice reads as a row
+          that went astray rather than a row that was never queued.
+
+          Same column heading as the triage table, deliberately: one number, one name for
+          it, or the reviewer has to work out whether they are the same kind of number. */}
       <p className="batch__notice-help">
         {isSample
-          ? 'That is on purpose, so you can see how a bad row is reported: it is named by row number and everything else was queued anyway. Nothing here is your mistake.'
-          : 'Everything else was queued. Fix these rows and upload them as a second batch.'}
+          ? 'That is on purpose, so you can see how a bad row is reported: it is named by its row number and everything else was queued anyway. Nothing here is your mistake. A row listed here was never checked, so it does not appear in the results below.'
+          : 'Everything else was queued. A row listed here was never checked, so it does not appear in the results below. Fix these rows and upload them as a second batch.'}
       </p>
       <table className="rowerrors">
         <thead>
           <tr>
-            <th scope="col">Row</th>
+            <th scope="col">Manifest row</th>
             <th scope="col">Column</th>
             <th scope="col">What is wrong</th>
           </tr>
@@ -708,14 +723,25 @@ function BatchTable({
     );
   }
 
+  // The caption is visible now, and it exists to answer one question: why do the row
+  // numbers run 4, 5, 6, 3, 2? Because the table is sorted worst-first — the point of the
+  // whole screen — and the number is where the application sits in the spreadsheet, which
+  // does not move. Neither half of that was on screen anywhere, so the column read as
+  // scrambled, and a compliance queue that looks like it shuffled its input is one a
+  // reviewer stops trusting. It stays a `<caption>` rather than a paragraph above the table
+  // so a screen reader still hears it on entering the table, and so it survives the stacked
+  // layout below 900px, where `thead` is hidden and the column headings go with it — there
+  // the caption is the only thing on screen that says what the leading number is.
   return (
     <table className="triage">
-      <caption className="visually-hidden">
-        Applications in this batch, most serious first
+      <caption className="triage__caption">
+        Most serious first. <strong>Manifest row</strong> is where the application sits in
+        the spreadsheet — row 1 is the column headings, so the first application is row 2.
+        These run in order of seriousness, not in file order.
       </caption>
       <thead>
         <tr>
-          <th scope="col">Row</th>
+          <th scope="col">Manifest row</th>
           <th scope="col">Brand</th>
           <th scope="col">Recommendation</th>
           <th scope="col">What drove it</th>
@@ -757,17 +783,41 @@ function TriageRow({ item, onOpen }: { item: BatchItem; onOpen: (id: string) => 
           <span className="muted">{STATE_WORDS[item.state]}</span>
         )}
       </td>
+      {/* "What drove it" used to go blank on every row that had no single field to blame,
+          which is two quite different rows: the one where everything matched, and the one
+          where the photograph could not be read at all. Both sat next to a neighbour
+          carrying a full sentence, and a dash beside a paragraph reads as a value that
+          failed to load rather than as an answer.
+
+          So the cell always says something. A clean row says so in three words — it does
+          not need the aggregate's sentence, which ends "the final decision is yours" on
+          every one of them and turns into wallpaper. Anything else with no driving field
+          gets the aggregate's own rationale, because that is where the reason lives: the
+          blurred photograph in the sample batch says "the photo is too blurry to read the
+          label. Retake it…", which is the whole content of that row.
+
+          And it names the field. The verdict word alone answered "what drove it" with
+          "Missing" — true of a label with no alcohol content and of an import with no
+          country of origin alike, and the aggregate's sentence for both of them is the
+          generic "a required element is not on the label". Two rows about two different
+          rules read as the same row, in the one column whose job is to say which. */}
       <td>
         {item.failure ? (
           <span className="muted">{item.failure.message}</span>
-        ) : worstVerdict ? (
+        ) : driving && worstVerdict ? (
           <>
-            {VERDICTS[worstVerdict].word}
+            {fieldLabel(driving)}: {VERDICTS[worstVerdict].word}
             {item.result?.aggregate.rationale ? (
               <span className="muted"> — {item.result.aggregate.rationale}</span>
             ) : null}
           </>
+        ) : recommendation === 'ready_to_approve' ? (
+          <span className="muted">Nothing needed attention.</span>
+        ) : item.result ? (
+          <span className="muted">{item.result.aggregate.rationale}</span>
         ) : (
+          // Still queued or mid-check. The Recommendation column beside it already says
+          // which, so a second copy of "Waiting" here would be the pair problem again.
           <span className="muted">—</span>
         )}
       </td>

@@ -55,6 +55,7 @@ from api.models import (
     AgentDecision,
     Aggregate,
     Application,
+    Commodity,
     Cost,
     FieldName,
     FieldResult,
@@ -1696,12 +1697,12 @@ def sample_client(tmp_path: Path) -> TestClient:
     return TestClient(create_app(config=config, provider=None))
 
 
-def test_the_sample_batch_queues_five_and_reports_the_sixth(tmp_path: Path) -> None:
+def test_the_sample_batch_queues_six_and_reports_the_seventh(tmp_path: Path) -> None:
     """TC-20 — three bad rows out of 300 must queue 297, and nobody believes that unseen.
 
     Row-level validation is the part of batch mode hardest to take on trust, and a reviewer
     cannot see it unless the manifest they were handed already contains a bad row. So one
-    of the six is deliberately malformed, and `row_errors` names its line and its column
+    of the seven is deliberately malformed, and `row_errors` names its line and its column
     the way a spreadsheet does.
     """
     client = sample_client(tmp_path)
@@ -1709,7 +1710,7 @@ def test_the_sample_batch_queues_five_and_reports_the_sixth(tmp_path: Path) -> N
 
     assert response.status_code == 200, response.text
     body = response.json()
-    assert body["accepted"] == 5
+    assert body["accepted"] == 6
     assert len(body["row_errors"]) == 1
     error = body["row_errors"][0]
     assert error["column"] == "commodity"
@@ -1737,8 +1738,9 @@ def test_the_sample_batch_answers_in_the_same_shape_as_an_upload(tmp_path: Path)
 def test_the_sample_batch_covers_the_outcomes_a_reviewer_needs_to_see(
     tmp_path: Path,
 ) -> None:
-    """One click, and the taxonomy is on screen: a pass, a disagreement, a missing warning,
-    a warning heading in the wrong case, and a photograph nobody could read.
+    """One click, and the taxonomy is on screen: a pass, a missing warning, a required
+    statement absent under a rule that turns on the commodity, an import with no country of
+    origin, a judgment call, and a photograph nobody could read.
 
     Asserted as outcomes rather than as fixture names. A row that quietly stopped producing
     the thing it was chosen for would still name the right fixture, and the sample would go
@@ -1749,7 +1751,7 @@ def test_the_sample_batch_covers_the_outcomes_a_reviewer_needs_to_see(
     drain(client)
 
     items = client.get(f"/batch/{job_id}?include_pending=true").json()["items"]
-    assert len(items) == 5
+    assert len(items) == 6
     assert all(item["state"] == ItemState.DONE.value for item in items), (
         "sample mode failed a row it was supposed to check: "
         f"{[i['failure'] for i in items if i['failure']]}"
@@ -1761,21 +1763,67 @@ def test_the_sample_batch_covers_the_outcomes_a_reviewer_needs_to_see(
     }
     assert outcomes["tc16_front_back_front.png"] == Recommendation.READY_TO_APPROVE.value
 
-    abv = by_image["tc08_abv_mismatch.png"]["result"]["fields"]
-    assert next(f for f in abv if f["field"] == "alcohol_content")["verdict"] == (
-        Verdict.MISMATCH.value
-    )
-
     warning = by_image["tc07_missing_warning.png"]["result"]["fields"]
     assert next(f for f in warning if f["field"] == "government_warning")["verdict"] == (
         Verdict.MISSING.value
     )
 
-    title_case = by_image["tc03_title_case_warning.png"]["result"]["aggregate"]
-    assert title_case["driving_field"] == "government_warning"
+    # A wine above 14%. The same silence would be Not applicable on a table wine, so this
+    # row is the one that shows the commodity being read rather than one rule for all three.
+    wine = by_image["tc26_wine_above_fourteen_needs_abv.png"]["result"]["fields"]
+    assert next(f for f in wine if f["field"] == "alcohol_content")["verdict"] == (
+        Verdict.MISSING.value
+    )
+
+    origin = by_image["tc19_import_missing_origin.png"]["result"]["fields"]
+    assert next(f for f in origin if f["field"] == "country_of_origin")["verdict"] == (
+        Verdict.MISSING.value
+    )
+
+    # The judgment tier. Without a row like this the demo only ever shows the tool deciding,
+    # never the tool declining to decide, which is half of what it is for.
+    variation = by_image["tc02_stones_throw.png"]["result"]["fields"]
+    assert next(f for f in variation if f["field"] == "brand_name")["verdict"] == (
+        Verdict.ACCEPTABLE_VARIATION.value
+    )
+    assert outcomes["tc02_stones_throw.png"] == Recommendation.NEEDS_REVIEW.value
 
     blurred = by_image["tc14_blur_hopeless.png"]["result"]
     assert {f["verdict"] for f in blurred["fields"]} == {Verdict.UNREADABLE.value}
+
+
+def test_the_sample_batch_is_a_batch_of_different_products(tmp_path: Path) -> None:
+    """The Brand column has to tell one row from the next, or the table reads as noise.
+
+    This was five rows of OLD TOM DISTILLERY with five different recommendations beside
+    them — one product apparently checked five times and disagreed with itself — and the
+    first thing anyone said about the sample was that its results table made no sense.
+    Brand is the only column a reviewer can scan to keep the rows apart, so most of them
+    must differ, and more than one commodity must appear or the sample shows none of the
+    rules that turn on what is in the bottle.
+
+    Asserted against the manifest the endpoint actually writes, not against `_SAMPLE_ROWS`,
+    because the manifest is what the reviewer downloads and what the parser reads. A row
+    whose commodity was written from a hardcoded constant rather than from its own fixture
+    would pass a check of the tuple and fail here.
+    """
+    client = sample_client(tmp_path)
+    job_id = client.post("/batch/sample").json()["job_id"]
+    drain(client)
+
+    store: BatchStore = client.app.state.batch_store
+    queued = store.items(job_id)
+    brands = [item.application.brand_name for item in queued]
+    commodities = {item.application.commodity for item in queued}
+
+    assert len(set(brands)) >= 4, f"the sample reads as one product checked repeatedly: {brands}"
+    assert len(commodities) >= 2, (
+        f"every row is the same commodity, so the sample shows no rule that depends on "
+        f"it: {commodities}"
+    )
+    assert Commodity.WINE in commodities, (
+        "the wine row is what proves alcohol content is judged against the commodity"
+    )
 
 
 def test_the_unreadable_row_blames_the_photograph_and_not_the_server(
@@ -1832,7 +1880,7 @@ def test_the_sample_manifest_is_written_in_the_parsers_own_columns(tmp_path: Pat
 
     store: BatchStore = client.app.state.batch_store
     queued = store.items(job_id)
-    assert [item.row for item in queued] == [2, 3, 4, 5, 6]
+    assert [item.row for item in queued] == [2, 3, 4, 5, 6, 7]
     assert all(item.application.brand_name for item in queued)
 
 
@@ -2989,7 +3037,7 @@ def test_the_new_decisions_column_goes_through_the_guard_like_every_other_cell(
 
     assert "=cmd" in body, "the value should still be readable, just not executable"
     assert ",=cmd" not in body, "a spreadsheet would execute this cell on open"
-    assert body.count("'=cmd") == 5, "every row's decisions cell, not only the first"
+    assert body.count("'=cmd") == 6, "every row's decisions cell, not only the first"
 
 
 # --- cold-start wiring (LP-334) -------------------------------------------------------
