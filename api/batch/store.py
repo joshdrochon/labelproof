@@ -450,11 +450,27 @@ class BatchStore:
         directory.mkdir(parents=True, exist_ok=True)
         source.replace(directory / stored_name(supplied_name))
 
-    def read_image(self, job_id: str, supplied_name: str) -> bytes | None:
-        path = self.images_root / job_id / stored_name(supplied_name)
-        if not path.is_file():
+    def image_path(self, job_id: str, supplied_name: str) -> Path | None:
+        """The stored file for one manifest name, or None if this job has no such file.
+
+        The containment check is the whole reason this is a method rather than two lines
+        at each call site. `stored_name` reduces the name to a digest, so today nothing a
+        manifest says can steer the path — but "it is already safe" is exactly how a guard
+        stops being written, and the next person to make stored names readable for
+        debugging would be handing a user-supplied string to `open` with no check anywhere
+        between the manifest and the filesystem. Resolving both sides and refusing anything
+        that is not under the job's own directory costs two syscalls and survives that
+        change (SEC-5).
+        """
+        directory = (self.images_root / job_id).resolve()
+        path = (directory / stored_name(supplied_name)).resolve()
+        if not path.is_relative_to(directory) or not path.is_file():
             return None
-        return path.read_bytes()
+        return path
+
+    def read_image(self, job_id: str, supplied_name: str) -> bytes | None:
+        path = self.image_path(job_id, supplied_name)
+        return path.read_bytes() if path is not None else None
 
     # --- staging ---------------------------------------------------------------------
 

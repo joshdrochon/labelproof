@@ -47,6 +47,10 @@ LANES = lanes_for(30)
         ("POST", "/batch/job_abc/retry", "batch_submit"),
         ("GET", "/batch/job_abc", "batch_read"),
         ("GET", "/batch/job_abc/export.csv", "batch_read"),
+        # Artwork for the evidence overlay. One item view fetches an image per photograph
+        # on top of the polling the status endpoint is already doing, so it has to sit in
+        # the generous read lane rather than anywhere near the verification budget.
+        ("GET", "/batch/job_abc/items/itm_abc/images/0", "batch_read"),
         ("GET", "/batch/manifest-template.csv", "batch_read"),
         ("GET", "/sample", "default"),
         ("GET", "/", "default"),

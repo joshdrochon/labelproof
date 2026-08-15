@@ -49,7 +49,7 @@ from types import SimpleNamespace
 from typing import Annotated, Final, cast
 
 from fastapi import APIRouter, FastAPI, File, Request, UploadFile
-from fastapi.responses import PlainTextResponse, Response
+from fastapi.responses import FileResponse, PlainTextResponse, Response
 from starlette.concurrency import run_in_threadpool
 
 from api import errors
@@ -73,6 +73,7 @@ from api.batch.store import BatchStore, is_expired
 from api.batch.worker import ProviderBudget, WorkerPool
 from api.config import Config
 from api.models import FieldName
+from api.pipeline.ingest import sniff
 from api.provider.base import ExtractionProvider
 from api.routes import get_config, provider_for
 
@@ -684,7 +685,12 @@ def _nothing_queueable_message(
 
 
 def _require_job(
-    store: BatchStore, job_id: str, retention_hours: int, *, now: float | None = None
+    store: BatchStore,
+    job_id: str,
+    retention_hours: int,
+    *,
+    now: float | None = None,
+    status_code: int | None = None,
 ) -> BatchJob:
     """The job, or the same refusal for "never existed" and "past its life".
 
@@ -707,6 +713,13 @@ def _require_job(
 
     The predicate is imported, not written here. See `api.batch.store.is_expired`, and the
     merge note on it about where the canonical definition will live.
+
+    `status_code` only picks the status line; the sentence, the code and the expiry rule are
+    the same for every caller. The endpoints that address a *sub-resource* — one item's
+    artwork, one item's decisions — answer 404, because from the caller's seat a missing job
+    and a missing item are the same fact and both are "that URL names nothing". The
+    job-level endpoints keep the 400 they have always sent rather than changing an answer
+    the SPA and the smoke script already read.
     """
     job = store.get_job(job_id)
     if job is not None and not is_expired(job.expires_at, now=now):
@@ -717,6 +730,7 @@ def _require_job(
         f"expired. Upload the manifest again to start a new batch.",
         next_step="navigate",
         code="batch_not_found",
+        status_code=status_code,
     )
 
 
@@ -786,6 +800,102 @@ def _status_message(state: JobState, counts: JobCounts) -> str:
         f"{counts.done + counts.failed} of {counts.total} finished. Results below are "
         f"ready to review now — the rest are still running."
     )
+
+
+def _require_item(store: BatchStore, job_id: str, item_id: str) -> BatchItem:
+    """One item of *this* job, or a 404.
+
+    The `job_id` comparison is not decoration. Item IDs are unguessable, but the URL still
+    carries both, and letting an item be fetched under any job's reference would mean the
+    expiry check two lines above it guarded nothing: an expired batch's artwork would come
+    back through a live batch's URL.
+    """
+    item = store.get_item(item_id)
+    if item is None or item.job_id != job_id:
+        raise errors.UserError(
+            "That application is not in this batch. Open the batch again and pick a row "
+            "from the list.",
+            next_step="navigate",
+            code="batch_item_not_found",
+            status_code=404,
+        )
+    return item
+
+
+@router.get("/batch/{job_id}/items/{item_id}/images/{index}")
+def batch_item_image(request: Request, job_id: str, item_id: str, index: int) -> Response:
+    """The stored artwork behind one batch item, so the evidence can be shown (HITL-3).
+
+    Batch had verdicts and no picture. HITL-3 asks for the extracted value *and* the image
+    region for every field, and the single-check screen has done that since LP-088 — the
+    batch item view showed the same findings with nothing to draw them on, so half the
+    product was reading rows and taking our word for them. This is the missing half of the
+    pair: `Extraction.image_index` numbers the images from zero, and so does `index` here,
+    so an evidence box can be placed without any translation step in between.
+
+    **These are the ORIGINAL uploaded bytes, and that has a visible consequence.** Deskew
+    and downscale run inside the pipeline and their output is never stored — the box
+    coordinates in `Evidence` are normalised against that preprocessed image, so drawn over
+    the original they are close but not exact, and the UI says as much next to them. The
+    alternative is storing a second copy of every photograph: a 300-item batch is roughly
+    600 more files under the same retention promise, held for the life of the job, to move
+    an outline a few pixels. That trade is not worth making, so anyone tempted to serve a
+    preprocessed copy from here should know they are also invalidating the note the UI
+    prints on every batch item.
+
+    Nothing about the batch is inferable from the answers. An unknown job, an expired one,
+    an item that belongs to some other job, and an index past the end are one 404 with one
+    sentence, because they are one fact for the caller — that URL names nothing here.
+
+    `private, no-store` because this is somebody's unpublished label artwork under
+    retention (SEC-2). A shared cache holding it past the TTL would make the deletion
+    promise false somewhere we cannot sweep.
+    """
+    config = get_config(request)
+    store = get_store(request)
+    _require_job(store, job_id, config.retention_hours, status_code=404)
+    item = _require_item(store, job_id, item_id)
+
+    path = (
+        store.image_path(job_id, item.images[index])
+        if 0 <= index < len(item.images)
+        else None
+    )
+    if path is None:
+        raise errors.UserError(
+            "That label image is not on this server. Open the batch again — its images "
+            "are deleted with the batch itself.",
+            next_step="navigate",
+            code="batch_image_not_found",
+            status_code=404,
+        )
+
+    return FileResponse(
+        path,
+        media_type=_stored_media_type(path),
+        headers={"Cache-Control": "private, no-store"},
+    )
+
+
+def _stored_media_type(path: Path) -> str:
+    """What the stored bytes actually are, read from the bytes.
+
+    Sniffed rather than taken from the manifest name, which is a caller's string and can
+    say `.png` over anything at all. `sniff` only ever names an image or a PDF, so the
+    worst an unrecognised file can be served as is `application/octet-stream` — never
+    `text/html`, which is the one answer that would turn an uploaded file into script
+    running on this origin.
+
+    Only the header is read. A batch holds hundreds of photographs and the body is streamed
+    from disk by `FileResponse`; loading a whole image to identify it would undo that for
+    no gain.
+    """
+    with path.open("rb") as handle:
+        head = handle.read(32)
+    try:
+        return str(sniff(head))
+    except errors.LabelProofError:
+        return "application/octet-stream"
 
 
 @router.post("/batch/{job_id}/retry", response_model=BatchStatus)

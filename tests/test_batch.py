@@ -1743,6 +1743,222 @@ def test_pending_items_are_hidden_unless_asked_for(tmp_path: Path) -> None:
     drain(client)
 
 
+# --- HTTP: item artwork (HITL-3) ------------------------------------------------------
+#
+# HITL-3 asks for the extracted value AND the image region for every field. Batch showed
+# the values with no picture behind them, so the evidence half of the requirement was met
+# on the single-check screen and missing on the half of the product that handles 300
+# applications at a time. These pin the endpoint that closes it.
+
+
+BACK_IMAGE = "old_tom_back.png"
+BACK_BYTES = checker_png((180, 180, 200))
+
+
+def one_item(client: TestClient, job_id: str) -> dict[str, Any]:
+    body = client.get(f"/batch/{job_id}?include_pending=true").json()
+    assert body["items"], "the job has no items to read artwork from"
+    item: dict[str, Any] = body["items"][0]
+    return item
+
+
+def test_an_items_artwork_is_served_so_the_evidence_can_be_drawn_on(tmp_path: Path) -> None:
+    """Without this the batch item view draws boxes on nothing and HITL-3 is half met."""
+    client = make_client(tmp_path, provider=spec_provider())
+    job_id = post_batch(client, [row()]).json()["job_id"]
+    drain(client)
+    item = one_item(client, job_id)
+
+    response = client.get(f"/batch/{job_id}/items/{item['item_id']}/images/0")
+    assert response.status_code == 200
+    assert response.content == GOOD_BYTES
+    assert response.headers["content-type"] == "image/png"
+
+
+def test_the_bytes_served_are_the_ones_that_were_uploaded(tmp_path: Path) -> None:
+    """Byte-for-byte, because the evidence note the UI prints depends on it.
+
+    Deskew and downscale happen inside the pipeline and their output is never stored, so
+    the `Evidence` boxes — normalised against that preprocessed image — sit slightly off
+    when drawn over the original. The UI says so. The moment this endpoint starts serving a
+    preprocessed copy, that note is wrong on every batch item, and the batch is also
+    carrying a second copy of 600 photographs under the retention promise.
+    """
+    client = make_client(tmp_path, provider=spec_provider())
+    job_id = post_batch(client, [row()]).json()["job_id"]
+    drain(client)
+    item = one_item(client, job_id)
+
+    served = client.get(f"/batch/{job_id}/items/{item['item_id']}/images/0").content
+    assert served == GOOD_BYTES
+    assert len(served) == len(GOOD_BYTES)
+
+
+def test_the_artwork_is_not_left_in_a_shared_cache(tmp_path: Path) -> None:
+    """SEC-2 — a cached copy outlives the batch, and the deletion promise with it.
+
+    The batch and its images are deleted after the retention window. A response a proxy is
+    free to keep is a copy of somebody's unpublished label artwork sitting somewhere the
+    sweeper cannot reach, while the API tells the caller it is gone.
+    """
+    client = make_client(tmp_path, provider=spec_provider())
+    job_id = post_batch(client, [row()]).json()["job_id"]
+    drain(client)
+    item = one_item(client, job_id)
+
+    headers = client.get(f"/batch/{job_id}/items/{item['item_id']}/images/0").headers
+    assert headers["cache-control"] == "private, no-store"
+
+
+def test_the_index_is_the_one_the_extraction_numbers(tmp_path: Path) -> None:
+    """`Extraction.image_index` is 0-based, so an evidence box needs no translation.
+
+    Off by one here puts the front label's box on the back photograph — an evidence overlay
+    that is confidently pointing at the wrong picture, which is worse than none at all.
+    """
+    client = make_client(tmp_path, provider=spec_provider())
+    job_id = post_batch(
+        client,
+        [row(back_image=BACK_IMAGE)],
+        images={GOOD_IMAGE: GOOD_BYTES, BACK_IMAGE: BACK_BYTES},
+    ).json()["job_id"]
+    drain(client)
+    item = one_item(client, job_id)
+    assert item["images"] == [GOOD_IMAGE, BACK_IMAGE]
+
+    base = f"/batch/{job_id}/items/{item['item_id']}/images"
+    assert client.get(f"{base}/0").content == GOOD_BYTES
+    assert client.get(f"{base}/1").content == BACK_BYTES
+
+
+@pytest.mark.parametrize("index", [1, 7, -1])
+def test_an_index_with_no_image_behind_it_is_a_404(tmp_path: Path, index: int) -> None:
+    """A one-image item asked for its second photograph names nothing, and says so."""
+    client = make_client(tmp_path, provider=spec_provider())
+    job_id = post_batch(client, [row()]).json()["job_id"]
+    drain(client)
+    item = one_item(client, job_id)
+
+    response = client.get(f"/batch/{job_id}/items/{item['item_id']}/images/{index}")
+    assert response.status_code == 404
+    assert response.json()["error"]["next_step"] == "navigate"
+
+
+def test_an_expired_batchs_artwork_is_no_longer_served(tmp_path: Path) -> None:
+    """SEC-2 — the same expiry check the status endpoint uses, or the promise has a hole.
+
+    Purging is driven by `POST /batch`, so between expiry and the next upload the files are
+    still on disk. Status and export refuse them; an image endpoint that did not would hand
+    back the artwork itself, which is the most identifiable thing a batch holds.
+    """
+    client = make_client(tmp_path, provider=spec_provider())
+    job_id = post_batch(client, [row()]).json()["job_id"]
+    drain(client)
+    item = one_item(client, job_id)
+    path = f"/batch/{job_id}/items/{item['item_id']}/images/0"
+    assert client.get(path).status_code == 200
+
+    expire(client, job_id)
+
+    refused = client.get(path)
+    assert refused.status_code == 404
+    assert refused.content != GOOD_BYTES
+
+
+def test_an_item_cannot_be_fetched_under_another_batchs_reference(tmp_path: Path) -> None:
+    """Otherwise the expiry check above guards nothing: an expired batch's artwork would
+    come back through a live batch's URL, because the item ID is all the lookup needed."""
+    client = make_client(tmp_path, provider=spec_provider())
+    stale = post_batch(client, [row()]).json()["job_id"]
+    live = post_batch(client, [row()]).json()["job_id"]
+    drain(client)
+    item = one_item(client, stale)
+    expire(client, stale)
+
+    response = client.get(f"/batch/{live}/items/{item['item_id']}/images/0")
+    assert response.status_code == 404
+    assert response.content != GOOD_BYTES
+
+
+def test_an_unknown_job_and_an_unknown_item_are_the_same_404(tmp_path: Path) -> None:
+    """Both are "that URL names nothing here", and neither confirms the other exists."""
+    client = make_client(tmp_path, provider=spec_provider())
+    job_id = post_batch(client, [row()]).json()["job_id"]
+    drain(client)
+
+    unknown_item = client.get(f"/batch/{job_id}/items/itm_nope/images/0")
+    unknown_job = client.get("/batch/job_nope/items/itm_nope/images/0")
+    assert unknown_item.status_code == 404
+    assert unknown_job.status_code == 404
+
+
+def test_a_manifest_name_that_climbs_out_of_the_job_directory_serves_nothing(
+    tmp_path: Path,
+) -> None:
+    """SEC-5 — image names come from an uploaded manifest, and a manifest can say anything.
+
+    `stored_name` hashes the name, so today the digest is what stops the climb. This
+    patches that away on purpose: it is the change a future debugging convenience would
+    make — readable stored names — and the containment check is what has to still be
+    standing afterwards. Without it, `image_path` would resolve straight onto the secret
+    below and hand it back over HTTP.
+    """
+    store = BatchStore(tmp_path / "store")
+    job = store.create_job()
+    secret = tmp_path / "store" / "secret.txt"
+    secret.write_bytes(b"not label artwork")
+
+    with mock.patch.object(store_mod, "stored_name", lambda supplied: supplied):
+        naive = (store.images_root / job.job_id) / "../../secret.txt"
+        assert naive.resolve() == secret.resolve(), "the traversal must really reach it"
+        assert store.image_path(job.job_id, "../../secret.txt") is None
+        assert store.read_image(job.job_id, "../../secret.txt") is None
+
+
+def test_an_item_naming_a_traversal_path_is_a_404_over_http(tmp_path: Path) -> None:
+    """The same attempt through the endpoint, because a guard in the store is only worth
+    what the route does with it."""
+    client = make_client(tmp_path, provider=spec_provider())
+    job_id = post_batch(client, [row()]).json()["job_id"]
+    drain(client)
+
+    store: BatchStore = client.app.state.batch_store
+    item = one_item(client, job_id)
+    secret = Path(store.root) / "secret.txt"
+    secret.write_bytes(b"not label artwork")
+    with store._conn() as connection:
+        connection.execute(
+            "UPDATE items SET images = ? WHERE item_id = ?",
+            (json.dumps(["../../secret.txt"]), item["item_id"]),
+        )
+
+    response = client.get(f"/batch/{job_id}/items/{item['item_id']}/images/0")
+    assert response.status_code == 404
+    assert b"not label artwork" not in response.content
+
+
+def test_stored_bytes_nobody_can_identify_are_never_served_as_markup(
+    tmp_path: Path,
+) -> None:
+    """A file this tool cannot name must not be handed back as something a browser runs.
+
+    The stored bytes are whatever was uploaded. Trusting the manifest's `.png` and echoing
+    a content type from it is how an uploaded file becomes script on this origin.
+    """
+    assert (
+        batch_routes._stored_media_type(_write(tmp_path / "junk.img", b"<html>hi</html>"))
+        == "application/octet-stream"
+    )
+    assert batch_routes._stored_media_type(_write(tmp_path / "real.img", GOOD_BYTES)) == (
+        "image/png"
+    )
+
+
+def _write(path: Path, data: bytes) -> Path:
+    path.write_bytes(data)
+    return path
+
+
 # --- HTTP: retry (BATCH-8) ------------------------------------------------------------
 
 
