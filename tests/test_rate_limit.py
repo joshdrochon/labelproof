@@ -45,6 +45,9 @@ LANES = lanes_for(30)
         ("POST", "/verify", "verify"),
         ("POST", "/batch", "batch_submit"),
         ("POST", "/batch/job_abc/retry", "batch_submit"),
+        # One click starts five real verifications, so it is priced like a submission and
+        # not like the status poll it superficially resembles.
+        ("POST", "/batch/sample", "batch_submit"),
         ("GET", "/batch/job_abc", "batch_read"),
         ("GET", "/batch/job_abc/export.csv", "batch_read"),
         # Artwork for the evidence overlay. One item view fetches an image per photograph

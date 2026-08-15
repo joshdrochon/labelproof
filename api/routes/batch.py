@@ -41,9 +41,11 @@ from __future__ import annotations
 import contextlib
 import csv
 import io
+import shutil
 import threading
 import zipfile
 from collections.abc import Awaitable, Callable, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Annotated, Final, cast
@@ -77,6 +79,7 @@ from api.models import AgentDecision, FieldName
 from api.pipeline.ingest import sniff
 from api.provider.base import ExtractionProvider
 from api.routes import get_config, provider_for
+from api.routes import sample as sample_mod
 
 router = APIRouter()
 
@@ -680,6 +683,192 @@ def _nothing_queueable_message(
         f"None of the rows in that manifest could be queued, so nothing has been "
         f"checked.{detail}{unused}"
     )
+
+
+# --- the sample batch (UX-1, DEL-5) ---------------------------------------------------
+#
+# Verify Now has had one-click samples since LP-088 and batch has had nothing, so seeing
+# the batch half of this product at all meant hand-building a CSV, gathering label images,
+# and getting the pairing right first. A reviewer who has to do data entry before the demo
+# starts has already formed an opinion, and it is the opinion this tool exists to fix.
+
+
+@dataclass(frozen=True)
+class _SampleRow:
+    """One row of the sample manifest, described by what the reviewer will see.
+
+    `fixture` names a golden-set entry and the application is read from it — never restated
+    here, for the reason `api/routes/sample.py` gives about the single-check demo: a sample
+    that drifted from the set the suite gates on would be a demo of something this project
+    does not test.
+    """
+
+    fixture: str
+    artwork: tuple[Path, ...] = ()
+    """Overrides the fixture's own images. Used only by the unreadable row, whose photograph
+    is a degradation of its fixture rather than a fixture of its own."""
+
+
+_ROBUSTNESS = Path(__file__).resolve().parents[2] / "fixtures" / "robustness"
+
+#: The sample batch: five rows that queue, covering the outcomes a reviewer needs to see,
+#: and a sixth that does not.
+#:
+#: Every expected outcome below is the fixture's own committed one — the golden set for the
+#: first four, `fixtures/robustness/manifest.json` for the fifth, which declares
+#: `tc14_blur_hopeless` "pregated". Nothing here is a guess about what the pipeline will
+#: say, because a demo that promises an outcome and produces another teaches a reviewer to
+#: distrust the ones that are right.
+#:
+#: Ordered so the first row is a pass, like `sample.CASES` and for the same reason. It does
+#: not survive into the table — that is sorted worst-first, which is the batch view's whole
+#: point — but the manifest an agent could download reads in the order a person would write
+#: it.
+_SAMPLE_ROWS: Final[tuple[_SampleRow, ...]] = (
+    # A label that checks out, photographed front and back — so the sample also exercises
+    # the two-image case the evidence view has to handle.
+    _SampleRow("tc16_front_back"),
+    # The label says 40% where the application says 45%.
+    _SampleRow("tc08_abv_mismatch"),
+    # No government warning anywhere. The most serious thing a label can be missing.
+    _SampleRow("tc07_missing_warning"),
+    # "Government Warning:" in title case rather than capitals — Jenny's catch (TC-03).
+    _SampleRow("tc03_title_case_warning"),
+    # A photograph too blurred to read, refused before a token is spent. The application is
+    # Old Tom's because this photograph IS Old Tom's label: `fixtures/robustness/
+    # manifest.json` declares `base: tc01_old_tom_clean` and blurs it past recovery, which
+    # is why its expected outcome there is "pregated". The pre-gate answers it with no model
+    # call, in sample mode and against a real provider alike.
+    _SampleRow("tc01_old_tom_clean", artwork=(_ROBUSTNESS / "tc14_blur_hopeless.png",)),
+)
+
+#: The sixth row, and the reason it is here. Row-level validation is the part of batch mode
+#: that is hardest to believe without seeing it — 300 applications where three rows have a
+#: typo must queue 297, not refuse the file — and a reviewer cannot see it unless the
+#: manifest they were handed already contains one. A misspelled commodity is the typo a
+#: spreadsheet actually produces, and it names one row and one column.
+_MALFORMED_COMMODITY: Final[str] = "whisky"
+
+
+def _sample_artwork(spec: _SampleRow) -> list[Path]:
+    """The files this row's manifest names, in front-then-back order."""
+    if spec.artwork:
+        return list(spec.artwork)
+    entry = sample_mod.golden_entry(spec.fixture)
+    return [sample_mod.LABELS_DIR / name for name in entry.get("images", [])]
+
+
+def _sample_manifest(artwork: Sequence[tuple[_SampleRow, list[Path]]]) -> str:
+    """The manifest, written with the parser's own column list (LP-148, LP-168)."""
+    buffer = io.StringIO(newline="")
+    writer = csv.DictWriter(
+        buffer, fieldnames=manifest_mod.COLUMNS, lineterminator="\r\n", extrasaction="ignore"
+    )
+    writer.writeheader()
+
+    first_image = ""
+    for spec, files in artwork:
+        record = _sample_record(spec, files)
+        first_image = first_image or record["front_image"]
+        writer.writerow(record)
+
+    # The malformed row names an image an earlier row already uses, so the only thing wrong
+    # with the manifest is the thing that is meant to be wrong with it. Naming a file of its
+    # own would also report an unused upload, and two problems where one was intended reads
+    # as a broken sample rather than a demonstration.
+    broken = _sample_record(_SAMPLE_ROWS[0], [])
+    broken["commodity"] = _MALFORMED_COMMODITY
+    broken["front_image"] = first_image
+    broken["back_image"] = ""
+    writer.writerow(broken)
+
+    return buffer.getvalue()
+
+
+def _sample_record(spec: _SampleRow, files: Sequence[Path]) -> dict[str, str]:
+    application = sample_mod.golden_entry(spec.fixture)["application"]
+    record = {
+        column: "" if application.get(column) is None else str(application[column])
+        for column in manifest_mod.APPLICATION_COLUMNS
+    }
+    record["front_image"] = files[0].name if files else ""
+    record["back_image"] = files[1].name if len(files) > 1 else ""
+    return record
+
+
+@router.post("/batch/sample", response_model=BatchAccepted)
+async def create_sample_batch(request: Request) -> BatchAccepted:
+    """Queue a batch built from the committed fixtures. No body, same answer as `POST /batch`.
+
+    **Nothing here is a canned result.** The manifest is parsed by the manifest parser, the
+    pairing is done by the pairing rule, and the items go through the same worker pool and
+    the same pipeline as an uploaded dump — this endpoint only supplies the paperwork a
+    reviewer would otherwise have to assemble by hand. Sample mode replays the fixture
+    specs, exactly as the single-check demo does; a server with a key reads the pixels.
+    Neither one is told what the answer should be, which is the property that makes a demo
+    worth watching.
+
+    Six rows, five of which queue. The sixth is deliberately malformed so `row_errors` comes
+    back non-empty: a batch that refuses 300 applications over one typo is the failure TC-20
+    describes, and "297 queued, row 5 needs a fix" is not believable until it is seen.
+
+    It draws on the submit budget rather than the read one. A click here starts five real
+    verifications, and pricing it like a status poll would put the cost of a batch behind
+    the rate limit meant for polling.
+    """
+    config = get_config(request)
+    store = get_store(request)
+    if purged := store.purge_expired():
+        applog.log("batch_purged", count=len(purged))
+
+    with store.staging() as scratch:
+        landing = _Landing(scratch)
+        accepted = await run_in_threadpool(_assemble_sample, store, config, landing, scratch)
+
+    get_pool(request).start()
+
+    applog.log(
+        "batch_sample_queued",
+        job_id=accepted.job_id,
+        count=accepted.accepted,
+        status=len(accepted.row_errors),
+    )
+    return accepted
+
+
+def _assemble_sample(
+    store: BatchStore, config: Config, landing: _Landing, scratch: Path
+) -> BatchAccepted:
+    """Copy the fixtures into staging and hand them to the ordinary upload path.
+
+    Copied rather than adopted in place, because `_assemble` *renames* the files it keeps
+    into the job directory — pointing it at `fixtures/` would move the committed artwork out
+    of the source tree on the first click and break every later one.
+    """
+    artwork = [(spec, _sample_artwork(spec)) for spec in _SAMPLE_ROWS]
+
+    missing = [
+        path.name for _, files in artwork for path in files if not path.is_file()
+    ]
+    if missing or not all(files for _, files in artwork):
+        # The same refusal `api/routes/sample.py` makes, for the same reason: a demo whose
+        # artwork is not in the build must say so rather than queue rows it cannot check.
+        raise errors.InternalError(
+            "The sample label images are missing from this build, so the sample batch "
+            "cannot be started. Upload a manifest and label images of your own."
+        )
+
+    staged: list[tuple[str, Path]] = []
+    for _, files in artwork:
+        for source in files:
+            target = scratch / source.name
+            shutil.copyfile(source, target)
+            staged.append((source.name, target))
+
+    manifest_path = scratch / "labelproof-sample.csv"
+    manifest_path.write_text(_sample_manifest(artwork), encoding="utf-8")
+
+    return _assemble(store, config, landing, staged, manifest_path)
 
 
 # --- reading --------------------------------------------------------------------------

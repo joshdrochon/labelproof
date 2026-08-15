@@ -39,6 +39,11 @@ _ROOT = Path(__file__).resolve().parents[2]
 _GOLDEN = _ROOT / "golden" / "set.json"
 _LABELS = _ROOT / "fixtures" / "labels"
 
+#: Where the generated label artwork lives. Public because the batch sample builds its
+#: manifest out of the same committed fixtures — one loader and one directory for both
+#: demos, so the two can never disagree about what a fixture contains.
+LABELS_DIR: Final[Path] = _LABELS
+
 #: Roles by position, for a two-image fixture. The warning lives on the back, which is
 #: what makes a pair worth demoing over a single face (TC-16).
 _PAIR_ROLES: Final[tuple[str, ...]] = ("front", "back")
@@ -117,14 +122,26 @@ def _golden() -> dict[str, dict[str, Any]]:
     return {entry["name"]: entry for entry in body.get("fixtures", [])}
 
 
-def _entry(case: SampleCase) -> dict[str, Any]:
-    entry = _golden().get(case.fixture)
+def golden_entry(fixture: str) -> dict[str, Any]:
+    """One fixture's committed record — application, images, notes — or a refusal.
+
+    The demos read the golden set rather than restating what a fixture contains, so a
+    sample that drifted from the set the suite gates on cannot exist. Refusing outright
+    when the name is not there is the same rule the fixture provider follows: a demo that
+    invented an application to stand in for a missing one would be demonstrating something
+    this project does not test.
+    """
+    entry = _golden().get(fixture)
     if entry is None:
         raise errors.InternalError(
-            f"The sample “{case.title}” names a fixture that is not in the "
-            f"committed set, so the demo cannot load it. Upload a label of your own."
+            f"A sample names the fixture “{fixture}”, which is not in the committed "
+            f"set, so the demo cannot load it. Upload a label of your own."
         )
     return entry
+
+
+def _entry(case: SampleCase) -> dict[str, Any]:
+    return golden_entry(case.fixture)
 
 
 def servable_images() -> frozenset[str]:

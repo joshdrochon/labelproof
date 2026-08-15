@@ -1680,6 +1680,193 @@ def test_an_unreadable_manifest_is_a_user_error_not_a_crash(tmp_path: Path) -> N
     assert "template" in response.json()["error"]["message"]
 
 
+# --- HTTP: the sample batch (UX-1, DEL-5) ---------------------------------------------
+#
+# Verify Now has had one-click samples since LP-088 and batch had nothing, so seeing this
+# half of the product meant hand-building a CSV and gathering images first. These run in
+# SAMPLE MODE — no provider injected, `use_fake_provider` on, exactly the configuration a
+# reviewer's server is in — because that is the path the endpoint exists to serve and the
+# one where a provider that fails closed on unrecognised artwork can quietly turn a demo
+# into five failures.
+
+
+def sample_client(tmp_path: Path) -> TestClient:
+    """The shipped sample-mode configuration, with nothing injected in front of it."""
+    config = make_config(tmp_path, anthropic_api_key="", batch_workers=3)
+    return TestClient(create_app(config=config, provider=None))
+
+
+def test_the_sample_batch_queues_five_and_reports_the_sixth(tmp_path: Path) -> None:
+    """TC-20 — three bad rows out of 300 must queue 297, and nobody believes that unseen.
+
+    Row-level validation is the part of batch mode hardest to take on trust, and a reviewer
+    cannot see it unless the manifest they were handed already contains a bad row. So one
+    of the six is deliberately malformed, and `row_errors` names its line and its column
+    the way a spreadsheet does.
+    """
+    client = sample_client(tmp_path)
+    response = client.post("/batch/sample")
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["accepted"] == 5
+    assert len(body["row_errors"]) == 1
+    error = body["row_errors"][0]
+    assert error["column"] == "commodity"
+    assert error["row"] >= 2, "the header is row 1, so no application can be row 1"
+    assert body["unmatched_files"] == [], (
+        "the malformed row reuses an image another row names, so nothing is left unused"
+    )
+
+
+def test_the_sample_batch_answers_in_the_same_shape_as_an_upload(tmp_path: Path) -> None:
+    """A client that can read `POST /batch` must not need a second reader for this."""
+    client = sample_client(tmp_path)
+    sampled = client.post("/batch/sample").json()
+
+    assert set(sampled) == {
+        "job_id",
+        "accepted",
+        "row_errors",
+        "unmatched_files",
+        "message",
+    }
+    assert sampled["job_id"].startswith("job_")
+
+
+def test_the_sample_batch_covers_the_outcomes_a_reviewer_needs_to_see(
+    tmp_path: Path,
+) -> None:
+    """One click, and the taxonomy is on screen: a pass, a disagreement, a missing warning,
+    a warning heading in the wrong case, and a photograph nobody could read.
+
+    Asserted as outcomes rather than as fixture names. A row that quietly stopped producing
+    the thing it was chosen for would still name the right fixture, and the sample would go
+    on claiming to show something it no longer shows.
+    """
+    client = sample_client(tmp_path)
+    job_id = client.post("/batch/sample").json()["job_id"]
+    drain(client)
+
+    items = client.get(f"/batch/{job_id}?include_pending=true").json()["items"]
+    assert len(items) == 5
+    assert all(item["state"] == ItemState.DONE.value for item in items), (
+        "sample mode failed a row it was supposed to check: "
+        f"{[i['failure'] for i in items if i['failure']]}"
+    )
+
+    by_image = {item["images"][0]: item for item in items}
+    outcomes = {
+        name: item["result"]["aggregate"]["recommendation"] for name, item in by_image.items()
+    }
+    assert outcomes["tc16_front_back_front.png"] == Recommendation.READY_TO_APPROVE.value
+
+    abv = by_image["tc08_abv_mismatch.png"]["result"]["fields"]
+    assert next(f for f in abv if f["field"] == "alcohol_content")["verdict"] == (
+        Verdict.MISMATCH.value
+    )
+
+    warning = by_image["tc07_missing_warning.png"]["result"]["fields"]
+    assert next(f for f in warning if f["field"] == "government_warning")["verdict"] == (
+        Verdict.MISSING.value
+    )
+
+    title_case = by_image["tc03_title_case_warning.png"]["result"]["aggregate"]
+    assert title_case["driving_field"] == "government_warning"
+
+    blurred = by_image["tc14_blur_hopeless.png"]["result"]
+    assert {f["verdict"] for f in blurred["fields"]} == {Verdict.UNREADABLE.value}
+
+
+def test_the_unreadable_row_blames_the_photograph_and_not_the_server(
+    tmp_path: Path,
+) -> None:
+    """In sample mode a hopeless photograph must still read as a hopeless photograph.
+
+    The fixture provider fails closed on artwork it does not recognise, which is right — but
+    resolving one for an image the pre-gate has already refused put that refusal on the row
+    instead. A blurred photograph came back as "this server is running in sample mode",
+    which is the tool blaming its own configuration for a defect in the picture, and it is
+    the one row of this sample that would make a reviewer think the demo is broken.
+    """
+    client = sample_client(tmp_path)
+    job_id = client.post("/batch/sample").json()["job_id"]
+    drain(client)
+
+    items = client.get(f"/batch/{job_id}?include_pending=true").json()["items"]
+    blurred = next(i for i in items if i["images"] == ["tc14_blur_hopeless.png"])
+
+    assert blurred["state"] == ItemState.DONE.value
+    assert blurred["failure"] is None
+    rationale = blurred["result"]["aggregate"]["rationale"]
+    assert "sample mode" not in rationale.lower()
+    assert "blurry" in rationale.lower() or "retake" in rationale.lower()
+
+
+def test_the_sample_batch_invents_no_results(tmp_path: Path) -> None:
+    """It supplies the paperwork, not the answers.
+
+    Every row goes through the real parser, the real pairing rule and the real pipeline. A
+    provider that cannot read the artwork must therefore produce failures here, not a
+    cheerful canned verdict — which is the same thing `api/routes/sample.py` refuses to do
+    and the worst bug this codebase has ever carried.
+    """
+    config = make_config(tmp_path, batch_workers=2)
+    client = TestClient(create_app(config=config, provider=FailingProvider(retryable=False)))
+    job_id = client.post("/batch/sample").json()["job_id"]
+    drain(client)
+
+    items = client.get(f"/batch/{job_id}?include_pending=true").json()["items"]
+    readable = [item for item in items if item["images"] != ["tc14_blur_hopeless.png"]]
+    assert readable, "the sample lost every row that needs a provider"
+    assert all(item["state"] == ItemState.FAILED.value for item in readable)
+    assert Recommendation.READY_TO_APPROVE.value not in json.dumps(items)
+
+
+def test_the_sample_manifest_is_written_in_the_parsers_own_columns(tmp_path: Path) -> None:
+    """A hand-written header would drift the first time a column is added, and the sample
+    would start refusing itself with a message about a missing column."""
+    client = sample_client(tmp_path)
+    job_id = client.post("/batch/sample").json()["job_id"]
+    drain(client)
+
+    store: BatchStore = client.app.state.batch_store
+    queued = store.items(job_id)
+    assert [item.row for item in queued] == [2, 3, 4, 5, 6]
+    assert all(item.application.brand_name for item in queued)
+
+
+def test_the_sample_names_only_fixtures_this_build_actually_ships(tmp_path: Path) -> None:
+    """The committed set is the source of truth for both demos, so a rename fails here
+    rather than shipping a sample that 500s on the reviewer's first click."""
+    for spec in batch_routes._SAMPLE_ROWS:
+        files = batch_routes._sample_artwork(spec)
+        assert files, f"{spec.fixture} names no artwork"
+        for path in files:
+            assert path.is_file(), f"{path} is not in this build"
+
+
+def test_a_sample_click_leaves_the_committed_fixtures_where_they_were(
+    tmp_path: Path,
+) -> None:
+    """`_assemble` RENAMES the files it keeps into the job directory.
+
+    Pointing it at `fixtures/` rather than at a copy would move the committed artwork out of
+    the source tree on the first click, and the second click — and every test that reads a
+    fixture afterwards — would fail with a missing file.
+    """
+    before = {
+        path: path.stat().st_size
+        for spec in batch_routes._SAMPLE_ROWS
+        for path in batch_routes._sample_artwork(spec)
+    }
+    client = sample_client(tmp_path)
+    client.post("/batch/sample")
+    drain(client)
+
+    assert {path: path.stat().st_size for path in before} == before
+
+
 # --- HTTP: progressive results (BATCH-5, BATCH-4) -------------------------------------
 
 
