@@ -1389,8 +1389,15 @@ kbd {
   white-space: nowrap;
 }
 
+/* The base chip needs its own size, not just `flex: none`. Only `.chip--lg` and
+   `.chip--sm` ever set one, so a bare `.chip` — which is what the batch triage table
+   uses — left the SVG with no intrinsic dimensions and let it fill the cell: a 90px
+   verdict mark beside 13px of text, shipped and live. Sized here so every chip has a
+   floor and the two modifiers keep overriding it. */
 .chip .glyph {
   flex: none;
+  width: 1.25rem;
+  height: 1.25rem;
 }
 
 .chip--lg {
