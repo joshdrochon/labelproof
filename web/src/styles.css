@@ -515,6 +515,16 @@ kbd {
   font-size: 1.0625rem;
 }
 
+/* No field on this form carries placeholder text, and that is a decision rather than an
+   omission. GOV.UK: "Do not use placeholder text in place of a label, or for hints or
+   examples, as: it vanishes when the user starts typing... not all screen readers read it
+   out; its browser default styles often do not meet WCAG 2.2 success criterion 1.4.3".
+   USWDS says the same. Every example lives in the hint above the box, where it survives
+   being typed over and gets read aloud. This rule exists to make a stray one obvious. */
+.field__input::placeholder {
+  color: transparent;
+}
+
 .field__hint {
   color: var(--ink-soft);
   font-size: 1rem;
