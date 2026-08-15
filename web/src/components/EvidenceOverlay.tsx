@@ -53,10 +53,26 @@ interface PlacedTag {
   region: EvidenceRegion;
   left: number;
   top: number;
+  /** True when the tag is anchored by its right edge, to keep it inside the picture. */
+  flipped: boolean;
 }
 
 const TAG_MIN_GAP = 7.5; // percent of image height
-const TAG_X_PROXIMITY = 16; // percent of image width
+
+//: How close two tags have to be horizontally before they can collide.
+//:
+//: This was 16, which is narrower than the tags themselves. "Government warning" and
+//: "Producer name and address" sat 18% apart on a landscape label — outside this window,
+//: so the stacker left them alone — and overlapped on screen anyway, because each tag is
+//: as wide as its words and neither is 16% of anything. Widened to the width a tag
+//: actually occupies on the narrowest panel this renders in.
+const TAG_X_PROXIMITY = 45; // percent of image width
+
+//: Past this, a tag is anchored by its RIGHT edge and grows leftward into the picture.
+//: Left-anchored tags near the right edge ran off the image entirely and over the
+//: checklist beside it: `left` positions the start of the tag, and nothing was accounting
+//: for how long the tag is.
+const TAG_FLIP_AT = 55; // percent of image width
 
 /**
  * Push overlapping tags apart, top to bottom. Deterministic: same input, same layout,
@@ -66,7 +82,9 @@ export function placeTags(regions: EvidenceRegion[]): PlacedTag[] {
   const wanted = regions
     .map((region) => ({
       region,
-      left: clamp(region.bbox.x0 * 100, 0, 88),
+      // Not clamped to 88 any more. A tag past TAG_FLIP_AT is anchored on its right, so
+      // it can sit at the true edge of its region without leaving the picture.
+      left: clamp(region.bbox.x0 * 100, 0, 100),
       top: clamp(region.bbox.y0 * 100, 0, 94),
     }))
     .sort((a, b) => a.top - b.top || a.left - b.left);
@@ -89,7 +107,12 @@ export function placeTags(regions: EvidenceRegion[]): PlacedTag[] {
         }
       }
     }
-    placed.push({ region: tag.region, left: tag.left, top: clamp(top, 0, 96) });
+    placed.push({
+      region: tag.region,
+      left: tag.left,
+      top: clamp(top, 0, 96),
+      flipped: tag.left > TAG_FLIP_AT,
+    });
   }
   return placed;
 }
@@ -142,7 +165,7 @@ export default function EvidenceOverlay({
         )}
 
         {imageUrl
-          ? tags.map(({ region, left, top }) => {
+          ? tags.map(({ region, left, top, flipped }) => {
               const active = region.field === activeField;
               const width = (region.bbox.x1 - region.bbox.x0) * 100;
               const height = (region.bbox.y1 - region.bbox.y0) * 100;
@@ -165,6 +188,7 @@ export default function EvidenceOverlay({
                     className="evidence__tag"
                     data-active={active ? 'true' : 'false'}
                     data-attention={region.needsAttention ? 'true' : 'false'}
+                    data-flipped={flipped ? 'true' : 'false'}
                     style={{ left: `${left}%`, top: `${top}%` }}
                     onMouseEnter={() => onActivateField?.(region.field)}
                     onMouseLeave={() => onActivateField?.(null)}

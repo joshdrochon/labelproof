@@ -1063,6 +1063,7 @@ kbd {
 .evidence__tag {
   position: absolute;
   transform: translate(-0.35rem, -2.1rem);
+  max-width: 100%;
   display: inline-flex;
   align-items: center;
   gap: 0.25rem;
@@ -1083,6 +1084,12 @@ kbd {
    the very thing it is pointing at. So the drawn box stays the size of its words and an
    invisible pseudo-element carries the rest of the hit area, centred on the chip. It is
    absolutely positioned, so it costs no layout and moves with the tag. */
+/* Anchored by its right edge, so a tag marking something at the far side of the label
+   grows back into the picture instead of off it and over the checklist. */
+.evidence__tag[data-flipped='true'] {
+  transform: translate(calc(-100% + 0.35rem), -2.1rem);
+}
+
 .evidence__tag::after {
   content: '';
   position: absolute;
