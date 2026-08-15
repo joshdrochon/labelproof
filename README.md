@@ -45,7 +45,7 @@ Nothing below needs an API key. The suite and the demo both run offline.
 git clone <this repo> && cd labelproof
 python3.14 -m venv .venv && .venv/bin/pip install -e ".[dev]"
 
-.venv/bin/python -m pytest                        # 3585 tests, offline, ~5 min
+.venv/bin/python -m pytest                        # 3,693 tests, offline, ~5 min
 .venv/bin/python -m eval.run                      # the accuracy gate
 LABELPROOF_FAKE_PROVIDER=1 .venv/bin/uvicorn api.main:app --reload
 ```
