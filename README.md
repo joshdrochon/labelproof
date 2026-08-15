@@ -89,7 +89,7 @@ so filling it by hand is the least representative way to see the product.
 
 **Then look at the second tab.** *Batch check* is the other half of the product and it is
 easy to miss — a reviewer who only uses the first tab never sees the mode Janet actually
-asked for. **Try a sample batch** loads six applications and starts them, so it needs no
+asked for. **Try a sample batch** loads a six-row manifest and starts it, so it needs no
 spreadsheet and no images. Watch for three things: rows appear while the job is still
 running rather than all at the end, they arrive **worst first** — return-for-correction,
 then items that could not be checked, then needs-review, then clean — and one row is
